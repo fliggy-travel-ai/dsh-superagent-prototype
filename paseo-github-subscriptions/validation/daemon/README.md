@@ -1,6 +1,6 @@
 # 隔离守护进程联调
 
-`latest-result.json` 记录本次检查，十七项全部通过，`passed` 为 `true`，`knownDefects` 为空。`plugin-logs.json` 为相关日志证据。
+本次检查十七项全部通过，`knownDefects` 为空，汇总见 `../summary.json`。联调脚本生成本地 `latest-result.json` 和 `plugin-logs.json`；原始运行报告与日志不提交到源码仓库。
 
 在插件根目录执行：
 
@@ -20,4 +20,4 @@ PATH="/Applications/Paseo.app/Contents/Resources/bin:$PATH" npm run test:daemon
 
 重启检查针对曾发现的启动竞态：`paseo.pid` 的监听地址会短暂为 null。插件现在等待本机连接就绪，失败后允许下次操作重试，卸载可中止等待。
 
-固定事件提供方补充了会话持久化接口，以支持 reload 后重新打开会话；夹具不回放历史。因此重启验收确认新消息成功送达，不宣称恢复了夹具历史。真实 Claude/Codex 忙时行为的早期探针证据在仓库 `plans/m0-evidence/`。
+固定事件提供方补充了会话持久化接口，以支持 reload 后重新打开会话；夹具不回放历史。因此重启验收确认新消息成功送达，不宣称恢复了夹具历史。真实 Claude/Codex 忙时行为的早期探针结论见仓库 `plans/m0-evidence/README.md`，一次性探针和原始时间线仅在本地留存。

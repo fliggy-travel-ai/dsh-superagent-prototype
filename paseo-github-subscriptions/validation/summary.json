@@ -1,6 +1,7 @@
 {
   "date": "2026-11-06",
   "issue": "fliggy-travel-ai/deepseek-harness#1673",
+  "generatedEvidencePolicy": "保留检查汇总、复现脚本和必要实测记录；daemon 原始日志及报告、界面截图和 GIF 仅在本地生成，不提交",
   "check": {
     "command": "npm run check",
     "exitCode": 0,

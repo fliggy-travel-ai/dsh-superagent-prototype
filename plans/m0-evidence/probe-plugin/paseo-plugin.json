@@ -1,6 +1,0 @@
-{
-  "id": "ghsub-probe",
-  "name": "GitHub 订阅（探针）",
-  "description": "M0 探针：只用于隔离守护进程实测，不连接 GitHub",
-  "requirements": { "paseo": ">=0.15.0 <0.16.0" }
-}

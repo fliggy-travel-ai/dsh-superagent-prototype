@@ -1,6 +1,6 @@
 // fixture 预览的界面验收脚本。运行：见 validation/ui/README.md
 // ego-browser nodejs < acceptance.js   （每次运行会重新截图并覆盖 out/）
-const ROOT = "/Volumes/data/Workspace/dsh-superagent-prototype/paseo-github-subscriptions/validation/ui";
+const ROOT = process.cwd();
 const OUT = `${ROOT}/out`;
 const BASE = "http://127.0.0.1:4173/";
 const fs = await import("node:fs/promises");

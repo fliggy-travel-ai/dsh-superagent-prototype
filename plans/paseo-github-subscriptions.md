@@ -2,14 +2,14 @@
 
 - 需求：fliggy-travel-ai/deepseek-harness#1673（服务端接收 GitHub 通知，经 Paseo 插件推给会话）。
 - 起草：Opus 5.5 原型子会话，2026-11-06。状态：用户已审阅界面稿并授权实现；插件、自动化检查和隔离联调已完成，原生生产及双机长期验收尚未执行。
-- 接手：主会话 `9f268954-897e-451c-ad25-6d6730082bf7`；界面稿为 `plans/ui-mockup/index.html`，检查记录为 `plans/ui-mockup/README.md`。
+- 接手：主会话 `9f268954-897e-451c-ad25-6d6730082bf7`；早期界面稿与检查截图仅在本地留存，当前组件预览与复现说明见 `paseo-github-subscriptions/validation/ui/README.md`。
 - 本机环境：Paseo CLI 0.15.0（`/Applications/Paseo.app/Contents/Resources/bin/paseo --version`）；gh 2.103.3。
 - 参考插件（只读）：`/Users/bbm/Documents/Workspace/paseo-plugins/event-notifications`（#1566）。
 
 标注约定：
 - 【文档】后面写文档 URL 和小节名。
 - 【本机】表示在本机 0.15.0 安装包或 SDK 类型文件里核实。
-- 【已实测】表示在隔离守护进程里实测过，证据在 `plans/m0-evidence/`。
+- 【已实测】表示在隔离守护进程里实测过，结论见 `plans/m0-evidence/README.md`，一次性探针与原始时间线仅在本地留存。
 - 【未核实】表示文档没有写清，本机也没有实测。
 
 ## 0. 用户已决定（2026-11-06，优先于下文）
@@ -166,7 +166,7 @@ flowchart LR
 踩过的坑（来自 #1566 评论、参考插件 README / INTEGRATION.md 与本次实测）：
 
 1. **RPC 必须在 `contribute()` 里同步注册。** 异步注册的 RPC 不会进入目录。处理函数里 `await ready`。
-2. **隔离守护进程联调要干净环境。** 本次用 `env -i` 只传 `HOME`、`PATH`、`TMPDIR`、`PASEO_HOME`（见 `plans/m0-evidence/scripts/cli.sh`），否则继承当前会话的 `PASEO_*` 变量。覆写隔离 `config.json` 会丢掉已安装插件的登记：改配置时读出来再合并，改完重装（本次踩到）。
+2. **隔离守护进程联调要干净环境。** 本次用 `env -i` 只传 `HOME`、`PATH`、`TMPDIR`、`PASEO_HOME`，否则继承当前会话的 `PASEO_*` 变量。当前联调的环境清理实现见 `paseo-github-subscriptions/tests/daemon-lib.ts`。覆写隔离 `config.json` 会丢掉已安装插件的登记：改配置时读出来再合并，改完重装（本次踩到）。
 3. **`daemon.mcp.injectIntoAgents` 不开，插件注入的会话工具对会话不可见。** 钩子照常执行、日志无报错，但 Claude 和 Codex 都找不到工具（已实测）。Mac mini 生产为 `true`；隔离守护进程默认没开，联调配置要加。
 4. **影子模式会消耗自己的去重记录。** 切实发必须换新的状态目录（参考插件 README）。本插件把“送达记录”与“已见事件”分开存，切换时只清送达记录，或换目录。
 5. **新旧通道不能同时真实唤醒。** 参考插件 INTEGRATION 要求影子期保留旧通道为唯一唤醒者。本插件没有旧通道，但仍要在影子期保证 `send` 一次不调用。
@@ -189,7 +189,7 @@ flowchart LR
 | `GET /repos/{o}/{r}/issues/comments?since=` | 200，上限 5000 次/小时 | 按仓库轮询可用。 |
 | `GET /orgs/fliggy-travel-ai/repos` | 可见 9 个仓库 | 仓库目录可从组织刷新。默认排除 5 个，实际监听 4 个（见第 0 节）。 |
 
-【已实测】M0 对组织 9 个仓库逐个读（2026-11-06，只读 GET，明细见 `plans/m0-evidence/github-permissions.md`）：
+【已实测】M0 对组织 9 个仓库逐个读（2026-11-06，只读 GET），读取结果如下：
 
 | 接口 | 4 个监听仓库 | 所需权限 | 结论 |
 | --- | --- | --- | --- |
@@ -337,7 +337,7 @@ flowchart LR
 
 ### 5.2 M0 核实结果（原“未核实”10 项）
 
-实测环境：Paseo 0.15.0 隔离守护进程（临时 `PASEO_HOME`，端口 6790）；模型 Claude `claude-haiku-5-5`、Codex `gpt-6-luna`。证据与脚本：`plans/m0-evidence/`。源码出处指 Paseo 0.15.0 `app.asar` 内 `@getpaseo/server/dist/server/server/`。
+实测环境：Paseo 0.15.0 隔离守护进程（临时 `PASEO_HOME`，端口 6790）；模型 Claude `claude-haiku-5-5`、Codex `gpt-6-luna`。结论见 `plans/m0-evidence/README.md`，原始证据与一次性脚本仅在本地留存。源码出处指 Paseo 0.15.0 `app.asar` 内 `@getpaseo/server/dist/server/server/`。
 
 | # | 事项 | 状态 | 结论与证据 |
 | --- | --- | --- | --- |
@@ -524,9 +524,9 @@ Paseo 0.15.0 没有给插件提供数据目录 API。【本机】`PluginServerCo
 
 | 阶段 | 当前结果 | 尚需验证 |
 | --- | --- | --- |
-| M0 探针 | 已核实 Claude/Codex 忙时 steer、待答清除、工具注入和隔离加载；原始证据保留在 plans/m0-evidence | 原生胶囊顺序和手机系统面板 |
+| M0 探针 | 已核实 Claude/Codex 忙时 steer、待答清除、工具注入和隔离加载；结论见 plans/m0-evidence/README.md，原始探针仅本地留存 | 原生胶囊顺序和手机系统面板 |
 | M1 监听 | 已实现目录、轮询、ETag、额度降速、重启游标与去重，相关夹具通过 | 真实四仓库连续二十四小时影子观测、抽查事件与额度 |
-| M2 订阅与送达 | 类型检查与74项测试通过；17项真实隔离 daemon 检查通过，含待答仍 steer、reload/重启、关闭会话恢复、归档与幂等 | 真实模型长期运行与双机 |
+| M2 订阅与送达 | 类型检查与73项测试通过；17项真实隔离 daemon 检查通过，含待答仍 steer、reload/重启、关闭会话恢复、归档与幂等 | 真实模型长期运行与双机 |
 | M3 界面 | 真实客户端组件在 RN Web 夹具中84项通过；宽窄/深浅/错误/空状态/取消/导航/设置/令牌/清理有证据，主会话复查 | 生产原生主题、两个会话胶囊目标隔离与实际手机 |
 | M4 部署 | 使用说明、开发说明与验收复现文档已写入 | 未生产安装；双机长期观测和实发切换尚未执行 |
 
@@ -604,7 +604,7 @@ Paseo 0.15.0 没有给插件提供数据目录 API。【本机】`PluginServerCo
   - 8.1–8.4：文件树注释；`package.json` 开发依赖按 `paseo plugin init` 模板补齐（React、react-native、zod、@tanstack/react-query）；tsconfig 合并要点；仅允许可擦除的 TS 语法；新增令牌来源（环境变量 → 0600 令牌文件，`gh auth token` 无效）；隔离守护进程配方。
   - 9：M0 完成状态、M1 改为 4 个仓库、M2/M3 验收项补充；设置页默认排除列表、按提供方忙时处理。
   - 10.1、10.2：补 5 条风险；已决定项归并；新增问题 15（MacBook 环境确认）、16（待答权限时的处理）、17（CI 来源）。
-  - 证据：`plans/m0-evidence/`（JSON 时间线、探针插件、脚本、权限表）。
+  - 结论：`plans/m0-evidence/README.md`；JSON 时间线、探针插件、脚本和权限表仅本地留存。
 - 未改动：原型 `src/`、`tests/`、根目录文件；参考插件；生产守护进程与生产 `config.json`。
 
-- 2026-11-06 实现收尾：采用独立令牌、事务 state.json、SDK 0.15 snapshot RPC、可重试初始化；修复审阅风险，74 项检查、17 项隔离联调和84项组件预览通过。生产原生与双机长期验收仍待执行。前述修订历史中的暂缓规则、文字派生编号与旧文件草图已由当前正文替代。
+- 2026-11-06 实现收尾：采用独立令牌、事务 state.json、SDK 0.15 snapshot RPC、可重试初始化；修复审阅风险，73 项测试、17 项隔离联调和84项组件预览通过。生产原生与双机长期验收仍待执行。前述修订历史中的暂缓规则、文字派生编号与旧文件草图已由当前正文替代。

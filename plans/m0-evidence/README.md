@@ -1,8 +1,10 @@
 # M0 实测证据（2026-11-06，隔离守护进程）
 
+仓库仅保留本说明中的结论与边界。下表列出的一次性探针、脚本和原始时间线保留在本地，不随功能提交。当前可维护的隔离联调脚本见 `paseo-github-subscriptions/tests/daemon-integration.ts`，复现说明见 `paseo-github-subscriptions/validation/daemon/README.md`。
+
 环境：Paseo 0.15.0；临时 `PASEO_HOME=/tmp/m0/home`，监听 127.0.0.1:6790，干净环境变量启动（`scripts/cli.sh`）。未碰生产守护进程、生产配置和已有会话。测试会话都在隔离守护进程里，测完归档，隔离目录已删除。模型：Claude `claude-haiku-5-5`、Codex `gpt-6-luna`。
 
-| 文件 | 内容 |
+| 本地留存文件 | 内容 |
 | --- | --- |
 | `steer-busy-claude-steer.json`、`steer-busy-codex-steer.json` | 忙时 steer：回合编号不变，前台命令跑完，转向文字被采纳 |
 | `steer-busy-claude-interrupt.json` | 对照：interrupt 取消前台命令，开新回合 |
