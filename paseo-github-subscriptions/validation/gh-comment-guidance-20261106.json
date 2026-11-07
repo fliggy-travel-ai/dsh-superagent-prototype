@@ -1,0 +1,19 @@
+{
+  "date": "2026-11-06",
+  "issue": "fliggy-travel-ai/deepseek-harness#1673",
+  "tools": ["github_subscribe", "github_unsubscribe", "github_list_subscriptions", "github_read"],
+  "commentToolRemoved": true,
+  "guidanceIn": "github_subscribe.description",
+  "agentIdSource": "PASEO_AGENT_ID",
+  "commentMarker": "<!-- paseo-ghsub agent=<实际会话ID> -->",
+  "typecheck": "passed",
+  "unitTests": {"passed": 73, "failed": 0},
+  "isolatedDaemon": {"passed": true, "checks": 17, "evidence": "daemon/latest-result.json"},
+  "production": {
+    "macMini": {"status": "running", "operation": "plugin reload", "daemonPidBefore": 58484, "daemonPidAfter": 58484},
+    "macBook": {"status": "running", "operation": "plugin reload", "daemonPidBefore": 99451, "daemonPidAfter": 99451, "toolCount": 4, "guidancePresent": true, "commentToolPresent": false}
+  },
+  "realGithubTestCommentPosted": true,
+  "realGithubSelfNotificationEvidence": "gh-self-comment-20261106.json",
+  "enforcement": "工具描述提示会话添加标记；不拦截或修改 shell 命令"
+}

@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-06",
+  "issue": "fliggy-travel-ai/deepseek-harness#1673",
+  "generatedEvidencePolicy": "保留检查汇总、复现脚本和必要实测记录；daemon 原始日志及报告、界面截图和 GIF 仅在本地生成，不提交",
+  "check": {
+    "command": "npm run check",
+    "exitCode": 0,
+    "typecheck": "passed",
+    "tests": 73,
+    "failed": 0,
+    "includesVendorDriftCheck": true
+  },
+  "daemon": {
+    "command": "npm run test:daemon",
+    "exitCode": 0,
+    "checks": 17,
+    "passed": true,
+    "knownDefects": [],
+    "evidence": "daemon/latest-result.json",
+    "scope": "独立临时守护进程、固定提供方和网络夹具，无真实模型与 GitHub 请求"
+  },
+  "ui": {
+    "checks": 84,
+    "failed": 0,
+    "evidence": "ui/out/results.json",
+    "reviewedByMainAgent": true,
+    "scope": "实际客户端组件在 React Native Web、假宿主/RPC 和近似主题下的预览"
+  },
+  "package": {
+    "command": "npm pack --dry-run --json",
+    "files": 37,
+    "containsTestsOrValidationOrNodeModules": false
+  },
+  "productionInstalled": true,
+  "productionHotfixEvidence": "production-hotfix-20261106.json",
+  "commentGuidanceEvidence": "gh-comment-guidance-20261106.json",
+  "realGithubCommentPosted": true,
+  "realGithubSelfNotificationEvidence": "gh-self-comment-20261106.json",
+  "nativeUiValidated": false,
+  "dualMachineValidated": false,
+  "longRunningShadowValidated": false,
+  "defaultShadow": true
+}

@@ -1,0 +1,15 @@
+{
+  "name": "ghsub-ui-preview",
+  "private": true,
+  "type": "module",
+  "description": "GitHub 订阅插件客户端的 fixture 预览（react-native-web）。仅用于界面验收，不是生产原生验收。",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "node serve.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.25.0",
+    "react-dom": "19.1.0",
+    "react-native-web": "^0.21.0"
+  }
+}

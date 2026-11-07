@@ -1,0 +1,6 @@
+{
+  "id": "github-subscriptions",
+  "name": "GitHub 订阅",
+  "description": "按仓库轮询 GitHub，将订阅事件发送给本机会话。",
+  "requirements": { "paseo": ">=0.15.0 <0.16.0" }
+}
