@@ -1,0 +1,12 @@
+{
+  "name": "cloud-session-probe",
+  "private": true,
+  "version": "0.0.0",
+  "files": ["paseo-plugin.json", "OVERVIEW.md", "index.server.ts"],
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.15.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}
