@@ -1,0 +1,75 @@
+# GitHub 订阅 Paseo 插件
+
+插件独立位于本目录。用户操作说明见 [OVERVIEW.md](OVERVIEW.md)，完整方案及确认记录见 [技术方案](../plans/paseo-github-subscriptions.md)。开发和验证不修改原型已有源代码，也不修改 Paseo 上游。
+
+## 兼容与安装
+
+实现使用 `@getpaseo/plugin`、`@getpaseo/client`、`@getpaseo/protocol` 的 0.15.0 版本。清单限制 Paseo 为 `>=0.15.0 <0.16.0`。
+
+核对过的 npm 0.15.0–0.15.3 未提供在线文档所示的 subscription API。因此客户端通过一个共用 store 每五秒读取一次 snapshot RPC。胶囊和侧边栏共用刷新，不要求用户打开插件页面。客户端使用 React Native 原语；TypeScript 不引入 DOM 库。
+
+本地目录安装需要先准备依赖，然后在目标机器安装。以下命令会改变所选守护进程的插件配置，应只在确定安装目标后执行：
+
+```sh
+cd paseo-github-subscriptions
+npm ci --ignore-scripts
+paseo plugin install "$PWD"
+```
+
+macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app/Contents/Resources/bin/paseo`。两台机器分别安装和设置。插件默认启用影子模式。Mac Mini 与 MacBook 已完成生产安装和插件热更新，并通过 snapshot RPC 核对；生产守护进程未重启。安装与验收证据见 `validation/production-hotfix-20261106.json` 和 `validation/gh-comment-guidance-20261106.json`。
+
+## 事件与送达
+
+- 默认组织为 `fliggy-travel-ai`，排除 `rea`、`dsh-superagent-prototype`、`hypit`、`content-wx`、`harness2`。新增组织仓库默认纳入。组织外或已排除的仓库，需要先在设置中显式纳入。
+- 每仓库读取 Issue、对话评论、代码评论和最近 100 条 Actions runs。详情流支持分页、五秒重叠窗口、ETag 和十四天追读上限。首次启动只建立基线。
+- `opened`、`comment`、`review_comment`、`state` 可按仓库或具体对象匹配。整仓库 `ci` 只监听默认分支；`push`、`review` 需要指定 PR，仓库范围选择会返回明确错误。
+- 已跟踪 PR 每五分钟补读详情和评审，每十分钟核对 CI；默认分支每十分钟核对 CI。这些核对用于补充列表更新信号，可能增加请求数。额度偏低、429 或额度耗尽时降速，按重置时间恢复。
+- CI 使用 Actions runs、jobs 和提交状态，不调用 `check-runs`。新提交出现同名失败、恢复后再次失败、取消后重订都有独立事件编号。
+- 同轮按会话合并。通知最多展开二十条、总长小于四千字符，超出部分给出数量和读取提示。送达记录仍保留全部事件编号。发送使用固定 `messageId` 与 `activeTurnBehavior: 'steer'`。
+- 失败最多尝试三次；重试沿用相同编号和正文。结果未知时停止自动重发并记录原因。提供方设置「跳过本轮」时直接跳过，不等待空闲。
+- 订阅工具描述提示会话使用 `gh issue comment` 或 `gh pr comment` 发评论时，从 `PASEO_AGENT_ID` 读取当前会话 ID，在正文末尾另起一行添加 `<!-- paseo-ghsub agent=<当前会话ID> -->`。只过滤写评论的会话，其他订阅者仍能收到。插件不再提供评论发布工具；未按格式加标记的评论照常送达。
+- 每个会话最多五十个 Issue/PR、五个整仓库订阅，全机最多一千条。归档立即清理；关闭三天后到期，重开取消到期；十四天无事件清理。
+
+## 设置、凭据与状态
+
+默认目录为 `$PASEO_HOME/github-subscriptions`，测试可用 `PASEO_GHSUB_STATE_DIR` 覆盖。目录权限 0700，文件权限 0600。
+
+| 文件 | 内容 |
+| --- | --- |
+| `github-token` | 独立令牌文件；不从守护进程的 GH_TOKEN 读取 |
+| `state.json` | 版本、偏好、订阅、来源游标、去重、事件、送达和评论登记 |
+
+`state.json` 通过串行事务和原子替换保存。来源游标与待发登记一起提交，避免游标先推进而漏发。待发记录包含事件快照，最近事件列表裁剪不影响重试。坏状态文件会报错并保留原内容。
+
+最近事件保留七天、最多五百条；完成的送达记录保留十四天、最多五千条；待发记录不按数量裁剪。去重与评论登记保留十四天。切换到影子模式会把已有待发记录转为影子记录，切回实发不会补发这些记录。停用期间不轮询；重新启用后按保存的游标追读并受消息摘要上限约束。
+
+令牌保存前请求 GitHub `/user` 验证。请求仅发往 `api.github.com`，拒绝重定向、跨主机分页和 `/notifications`。客户端令牌输入为密文，保存成功后清空；RPC 快照、日志、状态文件不包含令牌。令牌文件本身是权限受限的本机文件，未声称由系统钥匙串加密。
+
+## 开发检查
+
+在本目录执行：
+
+```sh
+npm run check
+npm run vendor:check
+npm run test:daemon
+```
+
+`check` 包含类型检查与单元测试，不改变仓库根目录的 `pnpm check`。隔离联调用临时 PASEO_HOME、独立端口、固定提供方与网络夹具；没有真实模型调用，没有真实 GitHub 请求。测试结束只停止自建守护进程，并删除临时目录。
+
+| 证据 | 范围 |
+| --- | --- |
+| `validation/summary.json` | 类型检查、七十三项测试、隔离联调、组件预览与安装包检查的汇总和边界 |
+| `validation/daemon/latest-result.json` | 真实隔离守护进程加载、工具注入、RPC、送达幂等、重载、重启和归档 |
+| `validation/ui/out/results.json` | 实际客户端组件在 React Native Web 预览中的八十四项交互与布局检查 |
+| `validation/ui/out/gifs/` | 胶囊取消、跳转、两个会话、窄屏面板、令牌和设置流程 |
+| `validation/ui/out/shots/` | 宽窄布局、深浅主题、空状态与错误状态截图 |
+| `validation/gh-self-comment-20261106.json` | 真实 GitHub 评论读回、会话标记识别和发布会话自通知过滤 |
+
+界面预览说明与复现命令见 [界面验收](validation/ui/README.md)。该预览使用真实客户端组件、假宿主和假 RPC，主题颜色为近似值，不能代替原生 Paseo 的生产验收。Mac Mini 已验证从胶囊进入全局页；用户报告的重复弹层尚未复现，根因待确认。手机系统面板、真实胶囊排序、MacBook 原生界面和二十四小时影子观测仍需验证。
+
+## 原型复用边界
+
+`server/vendor/dsh-superagent` 由 `scripts/vendor-sync.ts` 生成三个纯逻辑副本，只调整导入并记录原文件 SHA-256。`shim.ts` 是本插件适配层。漂移检查会在原型变更时失败，更新时运行 `node --experimental-strip-types scripts/vendor-sync.ts` 后检查差异。
+
+事件格式、CI 摘要与 `readGithub` 复用原型纯函数；GitHub 请求通过本插件的 fetch 适配器执行。未复制原型的命令执行器、Web、Eval、Ticket 或 Executor。安装包只包含客户端、服务端、共享定义和用户说明，不包含夹具、截图及开发依赖目录。

@@ -1,0 +1,5 @@
+{
+  "id": "notification-fixture",
+  "name": "通知验证专用事件源",
+  "requirements": { "paseo": ">=0.15.0 <0.16.0" }
+}

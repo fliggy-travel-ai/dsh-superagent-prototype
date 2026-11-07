@@ -1,0 +1,33 @@
+[
+ {
+  "k": "守护进程重启后会话状态",
+  "v": {
+   "status": "closed",
+   "archivedAt": null
+  }
+ },
+ {
+  "k": "重启后相同 messageId 相同内容：报错",
+  "v": null
+ },
+ {
+  "k": "PONG_1 用户消息数",
+  "v": 1
+ },
+ {
+  "k": "向已关闭（未归档）会话 send：报错",
+  "v": null
+ },
+ {
+  "k": "send 后状态",
+  "v": {
+   "status": "idle",
+   "finish": "idle",
+   "text": "PONG_2"
+  }
+ },
+ {
+  "k": "PONG_2 用户消息数",
+  "v": 1
+ }
+]

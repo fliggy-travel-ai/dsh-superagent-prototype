@@ -1,0 +1,466 @@
+{
+  "results": [
+    {
+      "name": "wide-light 胶囊弹出层：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 胶囊弹出层：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 订阅页（按仓库）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 订阅页（按仓库）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 订阅页（按会话）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 订阅页（按会话）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 事件页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 事件页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 监听状态页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 监听状态页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 设置页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-light 设置页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 胶囊弹出层：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 胶囊弹出层：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 订阅页（按仓库）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 订阅页（按仓库）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 订阅页（按会话）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 订阅页（按会话）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 事件页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 事件页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 监听状态页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 监听状态页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 设置页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "wide-dark 设置页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 胶囊弹出层：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 胶囊弹出层：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 订阅页（按仓库）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 订阅页（按仓库）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 订阅页（按会话）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 订阅页（按会话）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 事件页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 事件页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 监听状态页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 监听状态页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 设置页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-light 设置页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 胶囊弹出层：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 胶囊弹出层：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 订阅页（按仓库）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 订阅页（按仓库）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 订阅页（按会话）：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 订阅页（按会话）：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 事件页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 事件页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 监听状态页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 监听状态页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 设置页：无横向溢出",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "compact-dark 设置页：没有未取主题色的纯黑文字",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "name": "空状态：订阅页提示还没有订阅",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "空状态：会话页没有 GitHub 胶囊",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "错误状态：显示仓库出错和注入工具未打开",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "错误状态：设置页给出工具注入修复提示",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "离线：显示无法连接插件服务",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "胶囊：主会话有胶囊，标签带数量和影子标记",
+      "ok": true,
+      "detail": "[\"GitHub · 3 · 影子\",\"GitHub · 2 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\"]"
+    },
+    {
+      "name": "弹出层：影子模式提示可见",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "取消订阅：胶囊数字立即变成 2",
+      "ok": true,
+      "detail": "[\"GitHub · 2 · 影子\",\"GitHub · 2 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\"]"
+    },
+    {
+      "name": "取消订阅：调用了删除接口",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "全部取消：胶囊被移除",
+      "ok": true,
+      "detail": "[\"agent-ui:github\",\"agent-poller:github\",\"agent-trip:github\",\"agent-kb:github\",\"agent-daily:github\"]"
+    },
+    {
+      "name": "全部取消：弹出层显示已没有订阅",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "全部取消：会话页没有 GitHub 胶囊",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "跳转：打开了全局订阅页",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "跳转：弹出层已关闭",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "跳转：订阅行可以打开会话",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "两个会话：同工作区的主会话和界面稿会话各有一个胶囊",
+      "ok": true,
+      "detail": "[\"agent-main:github\",\"agent-ui:github\",\"agent-poller:github\",\"agent-trip:github\",\"agent-kb:github\",\"agent-daily:github\"]"
+    },
+    {
+      "name": "两个会话：主会话弹出层只有自己的 3 个订阅",
+      "ok": true,
+      "detail": "按钮 3"
+    },
+    {
+      "name": "两个会话：界面稿会话弹出层只有自己的 2 个订阅",
+      "ok": true,
+      "detail": "按钮 2"
+    },
+    {
+      "name": "窄屏：面板内取消订阅有效",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "页面取消订阅后，胶囊数量同步",
+      "ok": true,
+      "detail": "[\"GitHub · 2 · 影子\",\"GitHub · 2 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\",\"GitHub · 1 · 影子\"]"
+    },
+    {
+      "name": "令牌前缀只带一个省略号（服务端前缀已含 …）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "令牌输入框是密文类型（password）",
+      "ok": true,
+      "detail": "[\"password\"]"
+    },
+    {
+      "name": "令牌保存后输入框已清空",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "令牌保存后页面不含令牌",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "令牌不在控制台日志里",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "令牌调用记录只含长度",
+      "ok": true,
+      "detail": "subscriptions.token.save token(32 字符)"
+    },
+    {
+      "name": "令牌保存失败：错误文字不含令牌且已脱敏",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "移除令牌后显示未保存",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "设置：关闭影子模式后出现警告",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "设置：非法组织名提示错误",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "设置：保存写入了假守护进程",
+      "ok": true,
+      "detail": "{\"shadow\":false,\"excluded\":[\"rea\",\"dsh-superagent-prototype\",\"hypit\",\"content-wx\",\"harness2\",\"scratch\"]}"
+    },
+    {
+      "name": "设置：保存后订阅页显示实际发送",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "定时刷新：页面没打开时胶囊也随数据变化（主会话胶囊被移除）",
+      "ok": true,
+      "detail": "[\"agent-ui:github\",\"agent-poller:github\",\"agent-trip:github\",\"agent-kb:github\",\"agent-daily:github\"]"
+    },
+    {
+      "name": "定时刷新：只有一个定时器（5.6 秒内最多 3 次 snapshot）",
+      "ok": true,
+      "detail": "snapshot 次数 2"
+    },
+    {
+      "name": "清理：胶囊、页面、侧边栏全部移除",
+      "ok": true,
+      "detail": "{\"pills\":[],\"screens\":[],\"sidebar\":[]}"
+    },
+    {
+      "name": "清理：停掉后不再轮询",
+      "ok": true,
+      "detail": "2 → 2"
+    }
+  ],
+  "labels": {
+    "pill-cancel": [
+      "会话页：胶囊「GitHub · 3 · 影子」",
+      "点开胶囊：本会话 3 个订阅",
+      "取消第 1 个订阅：胶囊变成 2",
+      "全部取消：弹出层提示没有订阅",
+      "关闭弹出层：输入框上方没有 GitHub 胶囊"
+    ],
+    "pill-jump": [
+      "点开胶囊",
+      "点「在 GitHub 订阅页查看全部」：跳到全局订阅页",
+      "点某行「打开会话」：跳到该会话"
+    ],
+    "two-sessions": [
+      "主会话的胶囊：GitHub · 3 · 影子",
+      "主会话的弹出层：3 个订阅",
+      "切到界面稿会话：胶囊 GitHub · 2 · 影子",
+      "界面稿会话的弹出层：只有自己的 2 个订阅"
+    ],
+    "compact-sheet": [
+      "窄屏会话页",
+      "窄屏：胶囊变成底部面板",
+      "窄屏取消一个订阅"
+    ],
+    "page-cancel": [
+      "订阅页（按会话）",
+      "取消主会话的第 1 个订阅",
+      "回到主会话：胶囊数量已同步"
+    ],
+    "token": [
+      "输入令牌：输入框是密文",
+      "保存成功：输入框清空，只显示前缀和账号",
+      "保存失败：错误文字里令牌已替换成 ***",
+      "移除令牌：提示还没有保存令牌"
+    ],
+    "settings": [
+      "设置页：影子模式开启中",
+      "关闭影子模式：出现立即发送的警告，保存按钮可用",
+      "组织名不合法：提示并禁用保存",
+      "保存设置：提示已保存"
+    ]
+  }
+}

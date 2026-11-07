@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-06",
+  "issue": "fliggy-travel-ai/deepseek-harness#1673",
+  "pageError": {
+    "cause": "全局订阅页面调用仅限工作区面板的 useAgent",
+    "resolution": "订阅行改用保存的会话标题；预览 Hook 遇到调用时抛出宿主相同错误",
+    "typecheck": "passed",
+    "previewBuild": "passed",
+    "fixtureChecks": 4,
+    "fixtureEvidence": "ui/out/hook-fix-results.json",
+    "macMiniNativeNavigation": "passed"
+  },
+  "duplicatePopover": {
+    "status": "未复现，尚未确认根因",
+    "observations": "Mac Mini 热更新前后仅见一份弹出层；双会话夹具仅见一份",
+    "remaining": "原生多标签页场景复现与根因确认"
+  },
+  "hosts": [
+    {
+      "name": "Mac Mini",
+      "serverId": "srv_RBkDrTgFhpo5",
+      "installation": "plugin reload github-subscriptions",
+      "status": "running",
+      "daemonRestarted": false,
+      "shadow": false,
+      "tokenConfigured": true,
+      "toolInjection": true,
+      "subscriptions": 1,
+      "existingSubscriptionPreserved": true,
+      "repositoryCount": 4,
+      "repositoryErrors": 0,
+      "error": null
+    },
+    {
+      "name": "MacBook",
+      "serverId": "srv_8u_hsRgzZXzn",
+      "installationPath": "/Users/yishu.cy/.paseo/local-plugins/github-subscriptions",
+      "status": "running",
+      "daemonPidBefore": 99451,
+      "daemonPidAfter": 99451,
+      "daemonRestarted": false,
+      "shadow": true,
+      "tokenConfigured": true,
+      "toolInjection": true,
+      "subscriptions": 0,
+      "repositoryCount": 4,
+      "repositoryErrors": 0,
+      "error": null,
+      "nativeUiValidated": false,
+      "archiveSha256": "62d714473edfac065faf4e4598d71af99608eb751c67ddd18dc0da7917a5b2a3"
+    }
+  ],
+  "realGithubCommentPosted": false,
+  "longRunningBudgetValidated": false
+}

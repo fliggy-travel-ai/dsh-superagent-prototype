@@ -1,0 +1,27 @@
+{
+  "name": "paseo-github-subscriptions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": ["paseo-plugin.json", "OVERVIEW.md", "index.client.tsx", "index.server.ts", "client/", "server/", "shared/"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "vendor:check": "node --experimental-strip-types scripts/vendor-sync.ts --check",
+    "test:daemon": "node --experimental-strip-types tests/daemon-integration.ts"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.15.0",
+    "@getpaseo/plugin": "0.15.0",
+    "@getpaseo/protocol": "0.15.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3"
+  }
+}

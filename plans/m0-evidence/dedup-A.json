@@ -1,0 +1,32 @@
+[
+ {
+  "k": "首次发送后用户消息数",
+  "v": 1
+ },
+ {
+  "k": "相同 messageId 相同内容再发：报错",
+  "v": null
+ },
+ {
+  "k": "再发后用户消息数",
+  "v": 1
+ },
+ {
+  "k": "相同 messageId 不同内容：报错",
+  "v": "agent_request_key_conflict"
+ },
+ {
+  "k": "PONG_CHANGED 用户消息数",
+  "v": 0
+ },
+ {
+  "k": "相同 messageId 相同内容不同 activeTurnBehavior：报错",
+  "v": "agent_request_key_conflict"
+ },
+ {
+  "k": "空闲会话 steer 后 assistant 回复",
+  "v": [
+   "PONG_1"
+  ]
+ }
+]

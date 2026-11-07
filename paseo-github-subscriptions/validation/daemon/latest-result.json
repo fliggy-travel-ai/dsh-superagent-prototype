@@ -1,0 +1,206 @@
+{
+  "passed": true,
+  "failure": null,
+  "knownDefects": [],
+  "checks": [
+    {
+      "name": "隔离守护进程在独立端口启动，env 干净且不含 GH_TOKEN",
+      "detail": {
+        "port": 53782,
+        "tokenInEnvironment": false
+      }
+    },
+    {
+      "name": "插件与事件夹具提供方安装后都为 running"
+    },
+    {
+      "name": "安装后立即调用 RPC 成功（同步注册）"
+    },
+    {
+      "name": "快照：影子模式、工具注入已开、令牌来自文件且只显示前缀",
+      "detail": {
+        "shadow": true,
+        "toolInjection": true,
+        "tokenPrefix": "ghp_d…"
+      }
+    },
+    {
+      "name": "其余 RPC 都已注册并可调用"
+    },
+    {
+      "name": "轮询经网络夹具读取组织仓库，只用测试令牌，不连真实 GitHub",
+      "detail": {
+        "requests": 8
+      }
+    },
+    {
+      "name": "夹具会话注入 4 个工具，订阅描述包含 gh 评论标记规则",
+      "detail": [
+        "github_list_subscriptions",
+        "github_read",
+        "github_subscribe",
+        "github_unsubscribe"
+      ]
+    },
+    {
+      "name": "工具调用：订阅、列出、他人无法取消、范围外仓库被拒绝",
+      "detail": {
+        "subscriptionId": "sub_8fc059f7cf0ae583c889"
+      }
+    },
+    {
+      "name": "影子模式：事件入库并记录送达草稿，但不向会话发送"
+    },
+    {
+      "name": "实发：只送达订阅会话，消息含外部内容声明和评论摘录",
+      "detail": {
+        "messageId": "ghsub-9f578764100fe51ad982a35a9228ea4ddfc5240cc45a8e0e7d5b6ef9083f0b5c"
+      }
+    },
+    {
+      "name": "同 messageId 同内容重发幂等，不同内容被拒绝为冲突"
+    },
+    {
+      "name": "插件重载后读取位置和已见事件保留，同一事件不重复送达"
+    },
+    {
+      "name": "会话有待答提问时仍立即 steer 送达（按方案第 0 节）",
+      "detail": {
+        "status": "delivered",
+        "pendingPermissionsAfter": 0
+      }
+    },
+    {
+      "name": "守护进程重启后插件自动恢复，RPC 可用"
+    },
+    {
+      "name": "守护进程重启后状态保留，向已关闭未归档会话送达会自动重开",
+      "detail": {
+        "statusBeforeSend": "closed",
+        "deliveries": 4
+      }
+    },
+    {
+      "name": "归档会话后其订阅被取消，其他会话订阅保留"
+    },
+    {
+      "name": "插件日志、守护进程日志、状态文件和快照中都没有令牌",
+      "detail": {
+        "pluginLogs": false,
+        "daemonLog": false,
+        "stateFile": false,
+        "snapshot": false
+      }
+    }
+  ],
+  "startedAt": "2026-11-07T00:17:57.950Z",
+  "finishedAt": "2026-11-07T00:18:12.706Z",
+  "command": "node --experimental-strip-types tests/daemon-integration.ts",
+  "paseoVersion": "0.15.0",
+  "realModelCalls": 0,
+  "realGithubRequests": 0,
+  "fixtureGithubRequests": 47,
+  "cliCommands": [
+    {
+      "args": [
+        "daemon",
+        "start",
+        "--timeout",
+        "40"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "/Volumes/data/Workspace/dsh-superagent-prototype/paseo-github-subscriptions/tests/fixtures/provider"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "plugin",
+        "install",
+        "/var/folders/d1/hnm4w5tj14q39jvqtm5pg9yw0000gn/T/ghsub-daemon-it-EAhlEB/plugin-stage"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "plugin",
+        "ls"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "plugin",
+        "reload",
+        "github-subscriptions"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "daemon",
+        "stop"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "daemon",
+        "start",
+        "--timeout",
+        "40"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "plugin",
+        "ls"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "plugin",
+        "logs",
+        "github-subscriptions"
+      ],
+      "ok": true
+    },
+    {
+      "args": [
+        "daemon",
+        "stop"
+      ],
+      "ok": true
+    }
+  ],
+  "isolation": {
+    "homes": [
+      "/var/folders/d1/hnm4w5tj14q39jvqtm5pg9yw0000gn/T/ghsub-daemon-it-EAhlEB/home"
+    ],
+    "allCommandsUseTemporaryHome": true,
+    "productionHomeTouchedByTest": false,
+    "productionConfigFingerprintInformational": {
+      "before": "c638dde27e8931cd",
+      "after": "c638dde27e8931cd",
+      "note": "生产应用自身可能写入该文件，只作参考，不作为测试断言"
+    }
+  },
+  "cleanup": {
+    "stopped": true,
+    "removed": true
+  },
+  "leakScan": {
+    "pluginLogs": false,
+    "daemonLog": false,
+    "stateFile": false,
+    "snapshot": false
+  },
+  "stagedPluginDifference": "与 index.server.ts 相比只多第一行 import ./server/fixture-network.ts（接管 api.github.com 的 fetch）"
+}

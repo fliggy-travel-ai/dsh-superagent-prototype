@@ -1,0 +1,5 @@
+node_modules/
+validation/ui/dist/
+validation/ui/out.log
+validation/ui/shots/
+*.tmp

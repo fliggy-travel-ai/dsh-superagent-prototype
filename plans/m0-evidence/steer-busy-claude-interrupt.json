@@ -1,0 +1,52 @@
+{
+ "provider": "claude/claude-haiku-5-5",
+ "modeId": "bypassPermissions",
+ "behavior": "interrupt",
+ "turnBeforeSteer": "foreground-turn-1",
+ "turnAfterSteer": "foreground-turn-2",
+ "distinctTurnsSeen": [
+  "foreground-turn-1",
+  "foreground-turn-2"
+ ],
+ "sendError": null,
+ "sendMs": 7,
+ "finishStatus": "idle",
+ "finalText": "BASE_DONE_A\nSTEERED_OK_B",
+ "timeline": [
+  {
+   "type": "user_message",
+   "text": "Run this exact shell command in the foreground (do not background it) and wait for it: python3 -c 'import time; time.sleep(35); print(123456)'. When it has fini"
+  },
+  {
+   "type": "tool_call",
+   "name": "Bash",
+   "status": "canceled",
+   "detail": {
+    "cmd": "python3 -c 'import time; time.sleep(35); print(123456)'"
+   }
+  },
+  {
+   "type": "user_message",
+   "text": "STEER_TEST: after you finish, also append the word STEERED_OK_B to your final reply."
+  },
+  {
+   "type": "tool_call",
+   "name": "Bash",
+   "status": "completed",
+   "detail": {
+    "cmd": "python3 -c 'import time; time.sleep(35); print(123456)'"
+   }
+  },
+  {
+   "type": "tool_call",
+   "name": "task_notification",
+   "status": "completed",
+   "detail": "plain_text"
+  },
+  {
+   "type": "assistant_message",
+   "text": "BASE_DONE_A\nSTEERED_OK_B"
+  }
+ ],
+ "statusTrace": "running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr running:foregr "
+}
