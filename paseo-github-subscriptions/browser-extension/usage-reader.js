@@ -71,10 +71,8 @@
         const clientState = typeof parsed?.clientState === 'string' ? JSON.parse(parsed.clientState) : (parsed?.clientState ?? parsed);
         const queries = Array.isArray(clientState?.queries) ? clientState.queries : Array.isArray(parsed) ? parsed : [];
         for (const query of queries) {
-          const key = query?.queryKey ?? query?.queryHash;
-          const hasCurrentAccount = typeof key === 'string'
-            ? key.includes('current_account')
-            : Array.isArray(key) && key.some(item => (typeof item === 'string' ? item : JSON.stringify(item ?? '')).includes('current_account'));
+          const key = query?.queryKey;
+          const hasCurrentAccount = Array.isArray(key) && key[0] === 'current_account';
           if (!hasCurrentAccount) continue;
           const rawData = query?.state?.data ?? query?.data;
           const data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
@@ -168,7 +166,7 @@
     if (typeof state.tab?.id === 'number') {
       try {
         const existing = await chrome.tabs.get(state.tab.id);
-        if (existing && typeof existing.id === 'number' && isUsageUrl(existing.url)) {
+        if (existing && typeof existing.id === 'number' && (isUsageUrl(existing.url) || isLoginUrl(existing.url))) {
           reloadAt = Date.now();
           await chrome.tabs.reload(existing.id);
           tabId = existing.id;

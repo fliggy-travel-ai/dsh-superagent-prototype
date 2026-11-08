@@ -26,6 +26,8 @@ const DEFAULT_CLAIM_TIMEOUT_MS = 20_000;
 const DEFAULT_RECEIPT_TIMEOUT_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const MAX_AUDIT = 300;
+const DEDUP_TTL_MS = 10 * 60_000;
+const MAX_DEDUP = 500;
 
 export interface WebRequestBridgeSession {
   instanceId: string;
@@ -114,6 +116,7 @@ export class WebRequestExecutor {
     expected: WebRequestAnswer['expected'];
     digest: string;
     promise: Promise<WebRequestResult>;
+    at: number;
   }>();
   private lateWatchers = new Map<string, {
     candidateId: string;
@@ -171,6 +174,17 @@ export class WebRequestExecutor {
     }
     void this.persistAudit();
     return entry;
+  }
+
+  private pruneDedup(now: number): void {
+    for (const [key, entry] of this.dedup) {
+      if (now - entry.at >= DEDUP_TTL_MS) this.dedup.delete(key);
+    }
+    while (this.dedup.size > MAX_DEDUP) {
+      const oldestKey = this.dedup.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.dedup.delete(oldestKey);
+    }
   }
 
   private checkLateReceipts() {
@@ -283,6 +297,7 @@ export class WebRequestExecutor {
   readonly answerWebRequest: AnswerWebRequest = async (request: WebRequestAnswer): Promise<WebRequestResult> => {
     await this.ensureLoaded();
     this.checkLateReceipts();
+    this.pruneDedup(this.clock());
 
     const sessionMatch = typeof request.webSessionId === 'string' ? WEB_SESSION_RE.exec(request.webSessionId) : null;
     if (!sessionMatch || typeof request.toolUseId !== 'string' || !request.toolUseId.trim()) {
@@ -299,7 +314,8 @@ export class WebRequestExecutor {
         if (existing.digest !== summary.digest) return { status: 'unknown', detail: 'answer_changed' };
         return existing.promise;
       }
-      const nowIso = new Date(this.clock()).toISOString();
+      const now = this.clock();
+      const nowIso = new Date(now).toISOString();
       this.recordAuditEntry({
         webSessionId: request.webSessionId,
         toolUseId: request.toolUseId,
@@ -310,7 +326,8 @@ export class WebRequestExecutor {
       });
       const result: WebRequestResult = { status: 'unknown', detail: 'tool_in_browser' };
       const promise = Promise.resolve(result);
-      this.dedup.set(dedupKey, { expected: structuredClone(request.expected), digest: summary.digest, promise });
+      this.dedup.set(dedupKey, { expected: structuredClone(request.expected), digest: summary.digest, promise, at: now });
+      this.pruneDedup(now);
       await this.writes;
       return result;
     }
@@ -477,8 +494,10 @@ export class WebRequestExecutor {
       }
     };
 
+    const createdAt = this.clock();
     const promise = execute();
-    this.dedup.set(dedupKey, { expected: structuredClone(request.expected), digest: summary.digest, promise });
+    this.dedup.set(dedupKey, { expected: structuredClone(request.expected), digest: summary.digest, promise, at: createdAt });
+    this.pruneDedup(createdAt);
     return promise;
   };
 }

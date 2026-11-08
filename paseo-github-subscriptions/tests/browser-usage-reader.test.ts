@@ -338,7 +338,7 @@ test('readDialog 从 IndexedDB keyval-store 只读提取 current_account 邮箱�
   assert.equal(parseDialog(withObject).account, 'alice@example.com');
   assert.deepEqual(txModes, ['readonly']);
 
-  // 2. 值为 JSON 字符串
+  // 2. 值为 JSON 字符串（且只匹配 queryKey[0] === 'current_account'，忽略非首项含 current_account 的查询）
   const withJsonString = await runInNewContext(`(${readDialog.toString()})()`, {
     document: dom.document,
     location: dom.location,
@@ -347,7 +347,8 @@ test('readDialog 从 IndexedDB keyval-store 只读提取 current_account 邮箱�
       value: JSON.stringify({
         clientState: {
           queries: [
-            { queryKey: ['account', 'current_account'], state: { data: { email_address: 'bob@example.com' } } },
+            { queryKey: ['account', 'current_account'], state: { data: { email_address: 'wrong@example.com' } } },
+            { queryKey: ['current_account', 'org_1'], state: { data: { email_address: 'bob@example.com' } } },
           ],
         },
       }),
@@ -672,15 +673,30 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
   assert.equal(harness.state.usageState.reason, 'timeout');
   assert.equal(harness.state.usageState.nextReadAt, baseTime + (10 + 20 + 40 + 60 + 60) * 60_000);
 
-  // 未登录（signed_out）：间隔 30 分钟，且清除 reason，保留旧窗口数值
+  // 未登录（signed_out）：标签页地址变为 /login，连续读两轮都不新建标签页，间隔 30 分钟，且清除 reason，保留旧窗口数值
+  const tabsCreatedBeforeSignedOut = harness.createdTabs.length;
+  const currentUsageTabId = harness.state.usageState.tab.id;
+  harness.tabs.set(currentUsageTabId, { id: currentUsageTabId, url: 'https://claude.ai/login', active: false, status: 'complete' });
   const signedOutAt = harness.state.usageState.nextReadAt;
   harness.setNow(signedOutAt);
   harness.setResponder(() => [{ result: { path: '/login', title: 'Sign in - Claude', rows: [], now: signedOutAt, tzOffset: 300, timeOrigin: signedOutAt } }]);
   await harness.tick();
+  assert.equal(harness.createdTabs.length, tabsCreatedBeforeSignedOut);
+  assert.equal(harness.state.usageState.tab?.id, currentUsageTabId);
   assert.equal(harness.state.usageState.status, 'signed_out');
   assert.equal(harness.state.usageState.reason, undefined);
   assert.equal(harness.state.usageState.fiveHour.usedPct, 59);
   assert.equal(harness.state.usageState.nextReadAt, signedOutAt + 30 * 60_000);
+
+  // 第二轮到期时标签页地址仍是 /login：复用同一标签页刷新，不新开标签页
+  const signedOutAt2 = harness.state.usageState.nextReadAt;
+  harness.setNow(signedOutAt2);
+  harness.setResponder(() => [{ result: { path: '/login', title: 'Sign in - Claude', rows: [], now: signedOutAt2, tzOffset: 300, timeOrigin: signedOutAt2 } }]);
+  await harness.tick();
+  assert.equal(harness.createdTabs.length, tabsCreatedBeforeSignedOut);
+  assert.equal(harness.state.usageState.tab?.id, currentUsageTabId);
+  assert.equal(harness.state.usageState.status, 'signed_out');
+  assert.equal(harness.state.usageState.nextReadAt, signedOutAt2 + 30 * 60_000);
 });
 
 test('reload 后校验 performance.timeOrigin、等待 status === complete 与 [role="meter"] 延迟出现及超时', async () => {

@@ -307,58 +307,74 @@
       .filter(state => state && state.pages === entry.pages && state.pageNumber === pageNo && (entry.toolUseId ? state.toolUseId === entry.toolUseId : !state.toolUseId));
     return states.length === 1 ? states[0] : null;
   }
-  function validateCardPagePlan(cardState, expectedPage, totalPages, decision, allKeys, isManual) {
+  function normalizeDecision(decision) {
+    const answers = {};
+    for (const [rawKey, rawList] of Object.entries(decision.answers || {})) {
+      const k = squeeze(rawKey);
+      if (!k || Object.hasOwn(answers, k) || !Array.isArray(rawList) || rawList.some(item => typeof item !== 'string')) return null;
+      answers[k] = rawList.map(squeeze);
+    }
+    const otherAnswers = {};
+    if (decision.otherAnswers !== undefined) {
+      for (const [rawKey, rawVal] of Object.entries(decision.otherAnswers)) {
+        const k = squeeze(rawKey);
+        if (!k || Object.hasOwn(otherAnswers, k) || typeof rawVal !== 'string') return null;
+        otherAnswers[k] = rawVal;
+      }
+    }
+    return { answers, otherAnswers };
+  }
+  function validateCardPagePlan(cardState, expectedPage, totalPages, normalized, allKeys, isManual) {
     if (!cardState || cardState.pageNumber !== expectedPage || cardState.pages !== totalPages) return null;
     if (cardState.sensitive && !isManual) return null;
-    const qKey = cardState.prompt.question;
+    const qKey = squeeze(cardState.prompt.question);
     if (!allKeys.has(qKey)) return null;
-    const picked = Object.hasOwn(decision.answers, qKey) ? decision.answers[qKey] : [];
-    const hasOtherKey = Boolean(decision.otherAnswers && Object.hasOwn(decision.otherAnswers, qKey));
-    const rawOther = hasOtherKey ? decision.otherAnswers[qKey] : undefined;
-    if (rawOther !== undefined && typeof rawOther !== 'string') return null;
+    const picked = Object.hasOwn(normalized.answers, qKey) ? normalized.answers[qKey] : [];
+    const hasOtherKey = Object.hasOwn(normalized.otherAnswers, qKey);
+    const rawOther = hasOtherKey ? normalized.otherAnswers[qKey] : undefined;
     const otherText = typeof rawOther === 'string' ? rawOther.trim() : '';
     if (hasOtherKey && !otherText) return null;
     if (!Array.isArray(picked) || new Set(picked).size !== picked.length) return null;
-    if (!picked.every(label => cardState.prompt.options.some(option => option.label === label))) return null;
+    if (!picked.every(label => cardState.prompt.options.some(option => squeeze(option.label) === label))) return null;
     if (otherText && (!cardState.prompt.allowOther || !cardState.otherButton || otherText.length > 2000)) return null;
     const totalPicked = picked.length + (otherText ? 1 : 0);
     if (!cardState.prompt.multiSelect ? totalPicked !== 1 : totalPicked < 1) return null;
     return { cardState, picked, otherText };
   }
-  async function answerCard(entry, decision, key, now, isManual) {
+  async function answerCard(entry, decision, normalized, key, now, isManual) {
     const totalPages = entry.pages || 1;
     const allKeys = new Set([
-      ...Object.keys(decision.answers || {}),
-      ...Object.keys(decision.otherAnswers || {}),
+      ...Object.keys(normalized.answers),
+      ...Object.keys(normalized.otherAnswers),
     ]);
     if (allKeys.size !== totalPages) return 'unknown';
     const seenQuestions = new Set();
-    let currentPlan = validateCardPagePlan(entry.cardState, 1, totalPages, decision, allKeys, isManual);
+    let currentPlan = validateCardPagePlan(entry.cardState, 1, totalPages, normalized, allKeys, isManual);
     if (!currentPlan) return 'unknown';
     attempted.set(key, now);
 
     for (let pageNo = 1; pageNo <= totalPages; pageNo++) {
       if (pageNo > 1) {
         const nextState = findCardPage(entry, pageNo);
-        currentPlan = validateCardPagePlan(nextState, pageNo, totalPages, decision, allKeys, isManual);
-        if (!currentPlan || seenQuestions.has(currentPlan.cardState.prompt.question)) return 'unknown';
+        currentPlan = validateCardPagePlan(nextState, pageNo, totalPages, normalized, allKeys, isManual);
+        if (!currentPlan || seenQuestions.has(squeeze(currentPlan.cardState.prompt.question))) return 'unknown';
       }
       const { cardState, picked, otherText } = currentPlan;
-      seenQuestions.add(cardState.prompt.question);
+      seenQuestions.add(squeeze(cardState.prompt.question));
 
       if (!cardState.prompt.multiSelect) {
         if (otherText) {
           if (!cardState.otherButton || disabled(cardState.otherButton)) return 'unknown';
           cardState.otherButton.click();
         } else {
-          const targetIdx = cardState.prompt.options.findIndex(option => option.label === picked[0]);
+          const targetIdx = cardState.prompt.options.findIndex(option => squeeze(option.label) === picked[0]);
           const targetControl = cardState.controls[targetIdx];
           if (!targetControl || disabled(targetControl)) return 'unknown';
           targetControl.click();
         }
       } else {
         for (const [index, control] of cardState.controls.entries()) {
-          const wanted = picked.includes(cardState.prompt.options[index].label);
+          const wanted = picked.includes(squeeze(cardState.prompt.options[index].label));
           if (disabled(control)) { if (wanted !== pressed(control)) return 'unknown'; continue; }
           if (pressed(control) !== wanted) control.click();
         }
@@ -382,7 +398,7 @@
       await pause(150);
       if (destroyed || Date.now() >= decision.expiresAt) return 'unknown';
 
-      if (!cardState.controls.every((control, index) => pressed(control) === picked.includes(cardState.prompt.options[index].label))) return 'unknown';
+      if (!cardState.controls.every((control, index) => pressed(control) === picked.includes(squeeze(cardState.prompt.options[index].label)))) return 'unknown';
       if (cardState.otherButton && pressed(cardState.otherButton) !== Boolean(otherText)) return 'unknown';
       if (otherText) {
         const textarea = findOtherTextArea(cardState.card);
@@ -410,26 +426,28 @@
     const key = `${decision.id}\n${decision.fingerprint}`;
     for (const [oldKey, at] of attempted) if (now - at > 600000) attempted.delete(oldKey);
     if (attempted.has(key)) return 'unknown';
+    const normalized = normalizeDecision(decision);
+    if (!normalized) return 'unknown';
     const entry = scan().find(item => item.question.id === decision.id && item.question.fingerprint === decision.fingerprint);
     const isManual = decision.source === 'manual';
     if (!entry || (entry.sensitive && !isManual)) return 'unknown';
     if (entry.kind === 'card') {
-      return answerCard(entry, decision, key, now, isManual);
+      return answerCard(entry, decision, normalized, key, now, isManual);
     }
-    if (decision.otherAnswers && Object.keys(decision.otherAnswers).length > 0) return 'unknown';
-    const names = Object.keys(decision.answers);
-    if (names.length !== entry.prompts.length || !entry.prompts.every(prompt => Object.hasOwn(decision.answers, prompt.question))) return 'unknown';
+    if (Object.keys(normalized.otherAnswers).length > 0) return 'unknown';
+    const names = Object.keys(normalized.answers);
+    if (names.length !== entry.prompts.length || !entry.prompts.every(prompt => Object.hasOwn(normalized.answers, squeeze(prompt.question)))) return 'unknown';
     const plan = [];
     for (const prompt of entry.prompts) {
-      const picked = decision.answers[prompt.question];
+      const picked = normalized.answers[squeeze(prompt.question)];
       if (!Array.isArray(picked) || !picked.length || new Set(picked).size !== picked.length || (!prompt.multiSelect && picked.length !== 1)) return 'unknown';
-      if (!picked.every(label => prompt.options.some(option => option.label === label))) return 'unknown';
+      if (!picked.every(label => prompt.options.some(option => squeeze(option.label) === label))) return 'unknown';
       plan.push({ prompt, picked });
     }
     attempted.set(key, now);
     for (const { prompt, picked } of plan) {
       for (const [index, control] of prompt.controls.entries()) {
-        const wanted = picked.includes(prompt.options[index].label);
+        const wanted = picked.includes(squeeze(prompt.options[index].label));
         if (disabled(control)) { if (wanted !== checked(control)) return 'unknown'; continue; }
         if (checked(control) !== wanted && (wanted || prompt.multiSelect)) control.click();
       }
@@ -437,7 +455,7 @@
     await pause(150);
     if (destroyed || Date.now() >= decision.expiresAt) return 'unknown';
     for (const { prompt, picked } of plan) {
-      if (!prompt.controls.every((control, index) => checked(control) === picked.includes(prompt.options[index].label))) return 'unknown';
+      if (!prompt.controls.every((control, index) => checked(control) === picked.includes(squeeze(prompt.options[index].label)))) return 'unknown';
     }
     const { root, submit } = entry;
     if (!root.isConnected || !submit.isConnected || !visible(submit) || disabled(submit) || submitsIn(root).length !== 1 || submitsIn(root)[0] !== submit) return 'unknown';

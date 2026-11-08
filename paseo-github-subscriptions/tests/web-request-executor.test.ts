@@ -219,6 +219,52 @@ test('同键同答案只转交一次，原请求或答案（含其他文本）�
     });
     assert.deepEqual(changedExpected, { status: 'unknown', detail: 'request_changed' });
     assert.equal(env.delegatedCalls.length, 1);
+
+    // 超过 10 分钟后 dedup 过期清理，新答案不再报 answer_changed
+    env.now += 10 * 60_000;
+    env.setSessions([{ instanceId: 'inst-1', sessionId: 'abc123', lastSeenAt: env.now }]);
+    env.states.set('browser:inst-1:abc123:bq-1', { state: 'pending', queued: false });
+    env.setCandidates([{
+      id: 'browser:inst-1:abc123:bq-1',
+      question: sampleBrowserQuestion(),
+      seen: env.now,
+      state: 'pending',
+    }]);
+    const afterTtl = await executor.answerWebRequest({
+      ...request,
+      answers: { 'Which environment?': ['Staging'] },
+      otherAnswers: undefined,
+    });
+    assert.deepEqual(afterTtl, { status: 'submitted' });
+    assert.equal(env.delegatedCalls.length, 2);
+
+    // 超过 500 条时淘汰最早的 dedup 记录
+    for (let i = 0; i < 501; i++) {
+      await executor.answerWebRequest({
+        webSessionId: 'session_abc123',
+        toolUseId: `toolu_cap_${i}`,
+        expected: { toolName: 'Bash', input: { i } },
+        kind: 'tool',
+        decision: 'allow',
+      });
+    }
+    // toolu_cap_0 已被淘汰，换 decision 不会报 answer_changed；toolu_cap_500 仍在去重表内，换 decision 报 answer_changed
+    const evictedRes = await executor.answerWebRequest({
+      webSessionId: 'session_abc123',
+      toolUseId: 'toolu_cap_0',
+      expected: { toolName: 'Bash', input: { i: 0 } },
+      kind: 'tool',
+      decision: 'deny',
+    });
+    assert.deepEqual(evictedRes, { status: 'unknown', detail: 'tool_in_browser' });
+    const retainedRes = await executor.answerWebRequest({
+      webSessionId: 'session_abc123',
+      toolUseId: 'toolu_cap_500',
+      expected: { toolName: 'Bash', input: { i: 500 } },
+      kind: 'tool',
+      decision: 'deny',
+    });
+    assert.deepEqual(retainedRes, { status: 'unknown', detail: 'answer_changed' });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

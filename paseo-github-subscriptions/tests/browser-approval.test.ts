@@ -190,7 +190,11 @@ test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once
   const mcpCardFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
   const mcpMenuFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-menu.json', import.meta.url), 'utf8'));
 
-  async function runMcpScenario(menuItems: Array<{ role: string; text: string; 'aria-keyshortcuts'?: string }>, dismissOnClick = true) {
+  async function runMcpScenario(
+    menuItems: Array<{ role: string; text: string; 'aria-keyshortcuts'?: string }>,
+    dismissOnClick = true,
+    menuLabelledBy?: string,
+  ) {
     const cardTree = DomNode.fromTuple(mcpCardFixture.tree);
     const body = new DomNode('body', {}, []);
     body.appendChild(cardTree);
@@ -202,9 +206,18 @@ test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once
     const alwaysAllowButton = allButtons.find(b => b.innerText.includes('Always allow'))!;
     const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
 
+    // 页面上另有一个 aria-labelledby 指向无关按钮的菜单，其内也有 Allow once，必须被忽略
+    const strayItem = new DomNode('div', { role: 'menuitem' }, ['Allow once']);
+    const strayMenu = new DomNode('div', { role: 'menu', 'aria-labelledby': 'unrelated-button-id' }, [strayItem]);
+    body.appendChild(strayMenu);
+
     const createdMenuItems: DomNode[] = [];
     moreButton.onClick = () => {
-      const menu = new DomNode('div', { role: mcpMenuFixture.menu.role, ...mcpMenuFixture.menu.attrs }, []);
+      const menu = new DomNode('div', {
+        role: mcpMenuFixture.menu.role,
+        ...mcpMenuFixture.menu.attrs,
+        'aria-labelledby': menuLabelledBy ?? moreButton.getAttribute('id') ?? '',
+      }, []);
       for (const itemSpec of menuItems) {
         const item = new DomNode('div', {
           role: itemSpec.role,
@@ -265,24 +278,26 @@ test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once
       await Promise.resolve();
     }
 
-    return { denyButton, alwaysAllowButton, moreButton, createdMenuItems, body, audit };
+    return { denyButton, alwaysAllowButton, moreButton, createdMenuItems, strayItem, body, audit };
   }
 
-  // 1. 菜单含 Allow once（真实样本）：打开菜单并只点击 Allow once，不点 Always allow 或 Deny
+  // 1. 菜单含 Allow once（真实样本）：打开菜单并只点击 aria-labelledby 指向 moreButton.id 的菜单里的 Allow once，不点 Always allow、Deny 或无关菜单项
   const okRun = await runMcpScenario(mcpMenuFixture.menu.items, true);
   assert.equal(okRun.alwaysAllowButton.clicks, 0);
   assert.equal(okRun.denyButton.clicks, 0);
   assert.equal(okRun.moreButton.clicks, 1);
   assert.equal(okRun.createdMenuItems.length, 1);
   assert.equal(okRun.createdMenuItems[0]!.clicks, 1);
+  assert.equal(okRun.strayItem.clicks, 0);
   assert.deepEqual(okRun.audit, [{ button: 'Allow once', status: 'dismissed' }]);
 
-  // 2. 菜单中只有 Always allow、没有 Allow once：按 Escape 关闭菜单并记 skipped，永不点 Always allow
+  // 2. 菜单中只有 Always allow、没有 Allow once（即便页面其他菜单有 Allow once）：按 Escape 关闭菜单并记 skipped，永不点 Always allow 或其他菜单的 Allow once
   const missingRun = await runMcpScenario([{ role: 'menuitem', text: 'Always allow' }], true);
   assert.equal(missingRun.alwaysAllowButton.clicks, 0);
   assert.equal(missingRun.denyButton.clicks, 0);
   assert.equal(missingRun.moreButton.clicks, 1);
   assert.equal(missingRun.createdMenuItems[0]!.clicks, 0);
+  assert.equal(missingRun.strayItem.clicks, 0);
   const escapeEvents = [...missingRun.moreButton.events, ...missingRun.body.events].filter(ev => ev?.key === 'Escape');
   assert.ok(escapeEvents.length >= 1);
   assert.deepEqual(missingRun.audit, [{ button: 'Allow once', status: 'skipped' }]);

@@ -396,6 +396,20 @@ test('claude.ai 真实单选样本：识别卡片与 allowOther，默认已选�
     source: 'manual',
   }), 'unknown');
   assert.equal(controls3.submitOrNext!.clicks, 0);
+
+  // 4. 题目或选项标签含换行/多空白时，复核与答案键两边都做空白归一，提交成功
+  const newlineCard = fromFixtureTree(multiFixture.tree);
+  const newlineGroup = newlineCard.matches('[data-approval-card-root]') ? newlineCard : newlineCard.querySelectorAll('[data-approval-card-root]')[0]!;
+  newlineGroup.setAttribute('aria-label', '测试多选：\n  选哪些标记？');
+  wireCardBehaviors(newlineCard, { multiSelect: true });
+  const page4 = install([newlineCard]);
+  const [q4] = await page4.read();
+  assert.equal(q4.prompts[0].question, '测试多选： 选哪些标记？');
+  assert.equal(await page4.answer({
+    ...page4.decide(q4, { '测试多选：\n  选哪些标记？': ['PASEO_M2,\n  含逗号'] }),
+    otherAnswers: { '  测试多选：\n选哪些标记？ ': '含换行题目的其他回答' },
+    source: 'manual',
+  }), 'submitted');
 });
 
 test('claude.ai 真实多选与分页样本：含逗号标签、多选加 Other、两页逐页复核并从 Next 到 Submit', async () => {

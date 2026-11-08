@@ -331,7 +331,7 @@ export class PresenceRuntime {
     for (const [id, entry] of this.decisions) {
       if (!current.has(id)) continue;
       this.decisions.delete(id);
-      const valid = () => entry.generation === this.generation && !this.stopped && !this.configuring && !this.state.settings.paused && (entry.delegated || !entry.automatic || this.observation.mode === 'offline');
+      const valid = () => entry.generation === this.generation && !this.stopped && !this.configuring && (!entry.automatic || !this.state.settings.paused && (entry.delegated || this.observation.mode === 'offline'));
       if (!valid()) continue;
       let reserved = false;
       await this.persist(next => {
@@ -378,7 +378,7 @@ export class PresenceRuntime {
     otherAnswers?: Record<string, string>,
     source: 'automatic' | 'manual' = 'manual',
   ): boolean {
-    if (this.stopped || this.configuring || this.state.settings.paused) return false;
+    if (this.stopped || this.configuring || (source === 'automatic' && this.state.settings.paused)) return false;
     const original = this.browser.get(id);
     const question = this.state.questions.find(item => item.id === id);
     if (!original || !question || question.state !== 'pending') return false;
