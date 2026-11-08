@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { GuardSpeech, type SpeechExecutor } from '../server/speech.ts';
@@ -28,6 +28,38 @@ test('晓晓合成、提示音和播放按顺序执行；冷却与成功回执�
     assert.equal((await restarted.speak('two', '下一个问题')).played, true);
     assert.deepEqual(await readdir(directory), ['plugin-speech.json']);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('优先使用可执行的专用语音环境；显式解释器优先；专用环境不可执行时回退 PATH', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'speech-python-'));
+  const installedPython = join(directory, 'speech-venv', 'bin', 'python3');
+  const originalPython = process.env.ASKUSER_PYTHON;
+  const interpreters: string[] = [];
+  let now = 1000;
+  const execute: SpeechExecutor = async (executable, args) => {
+    if (!args.includes('--write-media')) return;
+    interpreters.push(executable);
+    await writeFile(args[args.indexOf('--write-media') + 1], 'audio');
+  };
+  try {
+    await mkdir(dirname(installedPython), { recursive: true });
+    await writeFile(installedPython, '', { mode: 0o700 });
+    delete process.env.ASKUSER_PYTHON;
+    const speech = new GuardSpeech(directory, execute, () => now);
+    assert.equal((await speech.speak('installed', '专用语音环境')).engine, 'neural');
+    process.env.ASKUSER_PYTHON = '/configured/python3';
+    now += 180_001;
+    assert.equal((await speech.speak('configured', '指定语音环境')).engine, 'neural');
+    delete process.env.ASKUSER_PYTHON;
+    await chmod(installedPython, 0o600);
+    now += 180_001;
+    assert.equal((await speech.speak('fallback', '默认语音环境')).engine, 'neural');
+    assert.deepEqual(interpreters, [installedPython, '/configured/python3', 'python3']);
+  } finally {
+    if (originalPython === undefined) delete process.env.ASKUSER_PYTHON;
+    else process.env.ASKUSER_PYTHON = originalPython;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('合成失败回退系统语音；全部失败不占用成功记录且不泄露执行错误', async () => {

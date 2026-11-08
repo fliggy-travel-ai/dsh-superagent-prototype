@@ -9,7 +9,7 @@ import type { PaseoApi } from '@getpaseo/client';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { forwardMcp } from '../shared/cloud-session.ts';
 import { ProviderEventSchema, type ProviderEvent, type ProviderInput } from '@getpaseo/plugin/server/provider';
-import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS, redactError } from '../server/cloud-session/index.ts';
+import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS, redactError, type AnswerWebRequest } from '../server/cloud-session/index.ts';
 
 const cloudId = 'cse_abcdefgh1234';
 const token = 'fake-secret-token-1707';
@@ -20,9 +20,11 @@ test('error redaction removes websocket addresses', () => {
     assert.equal(result, 'connection failed: [redacted URL]');
   }
 });
-async function fixture(url?: string) {
-  const agents: { id: string; cloud: string; archived: boolean; title?: string }[] = [];
+async function fixture(url?: string, answerWeb?: AnswerWebRequest) {
+  const agents: { id: string; cloud: string; archived: boolean; workspaceId: string; title?: string }[] = [];
   const importedCwds: string[] = [];
+  const workspaces: { id: string; path: string; title: string; projectId?: string }[] = [];
+  const pins: string[] = []; let failPin = false;
   let imports = 0; let failure: string | undefined; let closeFailure = false; let reloads = 0; let session = 0;
   let cloud: ReturnType<typeof createCloudSession>;
   let connection: Awaited<ReturnType<typeof cloud.provider.connect>>;
@@ -32,13 +34,15 @@ async function fixture(url?: string) {
   };
   const daemon = async () => ({
     list: async (id: string) => agents.find(a => a.cloud === id && !a.archived) ?? null,
-    import: async (id: string, cwd: string) => { importedCwds.push(cwd); if (failure) { const message = failure; failure = undefined; throw new Error(message); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false }; agents.push(a); await open(); return a; },
+    import: async (id: string, cwd: string, workspaceId: string) => { importedCwds.push(cwd); if (failure) { const message = failure; failure = undefined; throw new Error(message); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false, workspaceId }; agents.push(a); await open(); return a; },
+    createWorkspace: async (path: string, title: string, projectId?: string) => { const id = `workspace-${workspaces.length + 1}`; workspaces.push({ id, path, title, projectId }); return id; },
+    pinWorkspace: async (id: string) => { pins.push(id); if (failPin) throw new Error(`Bearer ${token}`); },
     title: async (id: string, title: string) => { agents.find(a => a.id === id)!.title = title; }, serverId: () => 'server', close: async () => { if (closeFailure) throw new Error(`close failed Bearer ${token}`); },
   });
   const paseo = { agents: { ref: () => ({ reload: async () => { reloads++; await open(); } }) }, projects: { list: async () => ({ projects: [] }) }, workspaces: { list: async () => ({ entries: [] }) } } as unknown as PaseoApi;
-  const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
+  const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon, answerWeb); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
   await restart();
-  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, importedCwds, get imports() { return imports; }, get reloads() { return reloads; }, failClose(value: boolean) { closeFailure = value; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
+  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, workspaces, pins, importedCwds, failPin(value: boolean) { failPin = value; }, get imports() { return imports; }, get reloads() { return reloads; }, failClose(value: boolean) { closeFailure = value; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
 }
 test('import uses the CLI-compatible persistence handle', () => {
   const request = importRequest(cloudId, '/tmp');
@@ -242,9 +246,109 @@ test('ensure selects an existing Mac project directory or the requested fallback
       try {
         await f.cloud.ensure({ ...ensureInput, cwd: '/cloud/path/repository/', fallbackCwd: example.fallbackCwd }, paseo);
         assert.equal(f.importedCwds[0], example.expected, example.name);
+        const selected = example.projects.find(project => project.projectRootPath === example.expected && project.projectDisplayName === 'repository');
+        assert.equal(f.workspaces[0]?.projectId, selected?.projectId, `${example.name}: project association`);
+        assert.equal(f.agents[0]?.workspaceId, f.workspaces[0]?.id, `${example.name}: import into created workspace`);
         await f.cloud.ensure({ ...ensureInput, cwd: '/cloud/path/other' }, paseo);
         assert.equal(f.importedCwds.length, 1, `${example.name}: existing agent is reused`);
       } finally { f.cloud.dispose(); }
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('new cloud session creates and pins a dedicated workspace; existing agent reuses it', async () => {
+  const f = await fixture();
+  try {
+    const result = await f.cloud.ensure(ensureInput, f.paseo);
+    assert.equal(result.workspaceId, 'workspace-1');
+    assert.deepEqual(f.workspaces, [{ id: 'workspace-1', path: homedir(), title: ensureInput.title, projectId: undefined }]);
+    assert.deepEqual(f.pins, ['workspace-1']); assert.equal(f.agents[0]?.workspaceId, result.workspaceId);
+    assert.equal((await f.cloud.ensure(ensureInput, f.paseo)).workspaceId, result.workspaceId);
+    assert.equal(f.workspaces.length, 1); assert.equal(f.pins.length, 1);
+  } finally { f.cloud.dispose(); }
+});
+
+test('workspace pin failure is logged safely and does not block ensure', async () => {
+  const f = await fixture(); f.failPin(true);
+  const logs: string[] = []; const original = console.error; console.error = (...args: unknown[]) => logs.push(args.join(' '));
+  try {
+    const result = await f.cloud.ensure(ensureInput, f.paseo);
+    assert.equal(result.workspaceId, 'workspace-1'); assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /置顶失败/); assert.ok(!logs[0]!.includes(token));
+  } finally { console.error = original; f.cloud.dispose(); }
+});
+
+test('provider mirrors requests and forwards human answers once until cloud resolves them', async () => {
+  const received: Parameters<AnswerWebRequest>[0][] = [];
+  let status: 'submitted' | 'page_not_open' | 'unknown' = 'submitted';
+  const f = await fixture(undefined, async value => { received.push(value); return status === 'unknown' ? { status, detail: 'uncertain' } : { status }; });
+  try {
+    await f.cloud.ensure(ensureInput, f.paseo);
+    const connection = f.connection;
+    assert.ok(connection.capabilities.includes('permission'));
+    const question = { toolUseId: 'tool-question', toolName: 'AskUserQuestion', kind: 'question' as const, input: { questions: [{ question: 'Which?', options: [{ label: 'A' }] }] } };
+    assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request: question }), { shown: true });
+    const event = f.events.at(-1); assert.equal(event?.type, 'session.permission');
+    if (event?.type === 'session.permission') { assert.equal(event.request.id, question.toolUseId); assert.equal(event.request.kind, 'question'); assert.deepEqual(event.request.input, question.input); }
+    if (event?.type === 'session.permission') assert.deepEqual(event.request.metadata, { cloudSessionManual: true, webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId });
+    assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request: question }), { shown: false });
+    assert.throws(() => f.cloud.notify({ cloudSessionId: cloudId, request: { ...question, input: { questions: [] } } }), /请求内容已变化/);
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } } } }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId, expected: { toolName: question.toolName, input: question.input }, kind: 'question', answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } });
+    assert.equal(f.events.at(-1)?.type, 'session.permission');
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } } } }));
+    await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1); assert.equal(f.events.at(-1)?.type, 'session.permission');
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': 'A' } } } }));
+    await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1);
+    const changed = f.events.at(-1); assert.equal(changed?.type, 'timeline.item');
+    if (changed?.type === 'timeline.item' && changed.item.type === 'assistant_message') assert.equal(changed.item.text, '结果不确定，请在 claude.ai 核对');
+    assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: question.toolUseId, outcome: 'answered' }), { closed: true });
+    assert.equal(f.events.at(-1)?.type, 'session.permission_resolved');
+    assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: question.toolUseId, outcome: 'answered' }), { closed: false });
+    for (const next of ['page_not_open', 'unknown'] as const) {
+      status = next; const toolUseId = `tool-${next}`;
+      f.cloud.notify({ cloudSessionId: cloudId, request: { toolUseId, toolName: 'Bash', kind: 'tool', input: { command: 'sample' } } });
+      const permission = f.events.at(-1); assert.equal(permission?.type, 'session.permission');
+      if (permission?.type === 'session.permission') assert.equal(permission.request.kind, 'tool');
+      await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: toolUseId, response: { behavior: 'deny' } }));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const last = f.events.at(-1); assert.equal(last?.type, 'timeline.item');
+      if (last?.type === 'timeline.item' && last.item.type === 'assistant_message') assert.equal(last.item.text, next === 'page_not_open' ? '请在 claude.ai 作答' : '结果不确定，请在 claude.ai 核对');
+      assert.equal(received.at(-1)?.kind, 'tool'); if (received.at(-1)?.kind === 'tool') assert.equal((received.at(-1) as Extract<(typeof received)[number], { kind: 'tool' }>).decision, 'deny');
+      await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: toolUseId, response: { behavior: 'allow' } }));
+      await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.filter(item => item.toolUseId === toolUseId).length, 1);
+      assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId, outcome: 'denied' }), { closed: true });
+    }
+  } finally { f.cloud.dispose(); }
+});
+
+test('pending requests reappear after reopen and can resolve while closed', async () => {
+  const f = await fixture();
+  try {
+    await f.cloud.ensure(ensureInput, f.paseo);
+    const request = { toolUseId: 'pending-one', toolName: 'Bash', kind: 'tool' as const, input: { command: 'sample' } };
+    f.cloud.notify({ cloudSessionId: cloudId, request });
+    await f.connection.send(input({ type: 'session.close', sessionId: f.current(), requestId: 'close' }));
+    await f.open(); assert.equal(f.events.at(-1)?.type, 'session.permission');
+    assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request }), { shown: false });
+    await f.connection.send(input({ type: 'session.close', sessionId: f.current(), requestId: 'close-again' }));
+    assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: request.toolUseId, outcome: 'answered' }), { closed: true });
+    await f.open(); assert.equal(f.events.at(-1)?.type, 'session.ready');
+  } finally { f.cloud.dispose(); }
+});
+
+test('handoff uses a snapshot of the original notification input', async () => {
+  const received: Parameters<AnswerWebRequest>[0][] = [];
+  const f = await fixture(undefined, async value => { received.push(value); return { status: 'submitted' }; });
+  try {
+    await f.cloud.ensure(ensureInput, f.paseo);
+    const request = { toolUseId: 'original-input', toolName: 'Bash', kind: 'tool' as const, input: { command: 'first' } };
+    f.cloud.notify({ cloudSessionId: cloudId, request });
+    request.input.command = 'changed';
+    assert.throws(() => f.cloud.notify({ cloudSessionId: cloudId, request }), /请求内容已变化/);
+    await f.connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: request.toolUseId, response: { behavior: 'allow' } }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: request.toolUseId, expected: { toolName: 'Bash', input: { command: 'first' } }, kind: 'tool', decision: 'allow' });
+  } finally { f.cloud.dispose(); }
 });

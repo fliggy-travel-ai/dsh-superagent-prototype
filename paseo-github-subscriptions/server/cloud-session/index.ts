@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
@@ -11,8 +13,17 @@ type Emit = (event: ProviderEvent) => void;
 type Endpoint = { url: string; headers: Record<string, string>; session?: string };
 type Session = { id: string; cloud: string; emit: Emit; cwd: string; model: string; mode: string; turn: string | null; endpoint?: Endpoint };
 type Item = { seq: number; messageId: string; delivery: 'auto' | 'steer'; text: string; receivedAt: string };
-type Daemon = { list(id: string): Promise<{ id: string } | null>; import(id: string, cwd: string): Promise<{ id: string }>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
-const caps = ['prompt.message', 'prompt.steer', 'session.persistence'] as const;
+type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
+const caps = ['prompt.message', 'prompt.steer', 'session.persistence', 'permission'] as const;
+type PendingRequest = { toolUseId: string; toolName: string; kind: 'question' | 'tool'; input: Record<string, unknown> };
+export const CLOUD_MANUAL_REQUEST_MARKER = 'cloudSessionManual';
+type WebRequestContext = { webSessionId: string; toolUseId: string; expected: { toolName: string; input: Record<string, unknown> } };
+export type WebRequestAnswer = WebRequestContext & ({ kind: 'question'; answers: Record<string, string | string[]>; otherAnswers?: Record<string, string> } | { kind: 'tool'; decision: 'allow' | 'deny' });
+export type WebRequestResult = { status: 'submitted' } | { status: 'page_not_open' } | { status: 'unknown'; detail: string };
+export type AnswerWebRequest = (request: WebRequestAnswer) => Promise<WebRequestResult>;
+const AnswersSchema = z.record(z.string(), z.union([z.string(), z.array(z.string())]));
+const OtherAnswersSchema = z.record(z.string(), z.string());
+
 
 function endpointSecrets(endpoint: Endpoint): string[] {
   const authorization = Object.entries(endpoint.headers).filter(([name]) => name.toLowerCase() === 'authorization').map(([, value]) => value);
@@ -54,8 +65,8 @@ export async function connectWithTimeout(client: { connect(): Promise<unknown>; 
   } finally { clearTimeout(timer); }
 }
 
-export function importRequest(id: string, cwd: string) {
-  return { provider: rpc.CLOUD_SESSION_PROVIDER_ID, sessionId: `plugin:${JSON.stringify({ version: 1, data: { cloudSessionId: id } })}`, cwd, labels: { [rpc.CLOUD_SESSION_LABEL]: id } };
+export function importRequest(id: string, cwd: string, workspaceId?: string) {
+  return { ...(workspaceId ? { workspaceId } : {}), provider: rpc.CLOUD_SESSION_PROVIDER_ID, sessionId: `plugin:${JSON.stringify({ version: 1, data: { cloudSessionId: id } })}`, cwd, labels: { [rpc.CLOUD_SESSION_LABEL]: id } };
 }
 
 async function connectLocal(): Promise<Daemon> {
@@ -74,7 +85,13 @@ async function connectLocal(): Promise<Daemon> {
       } while (cursor);
       return null;
     },
-    import: (id, cwd) => client.importAgent(importRequest(id, cwd)),
+    import: (id, cwd, workspaceId) => client.importAgent(importRequest(id, cwd, workspaceId)),
+    async createWorkspace(cwd, title, projectId) {
+      const result = await client.createWorkspace({ source: { kind: 'directory', path: cwd, ...(projectId ? { projectId } : {}) }, title });
+      if (result.error || !result.workspace) throw new Error(result.error ?? '工作区创建失败');
+      return result.workspace.id;
+    },
+    async pinWorkspace(id) { await client.setWorkspacePinned(id, true); },
     title: (id, title) => client.updateAgent(id, { name: title }),
     serverId: () => { const id = client.getLastServerInfoMessage()?.serverId; if (!id) throw new Error('daemon server id unavailable'); return id; },
     close: () => client.close(),
@@ -85,27 +102,69 @@ async function directoryExists(path: string): Promise<boolean> {
   try { return (await stat(path)).isDirectory(); } catch { return false; }
 }
 
-async function resolveImportCwd(paseo: import('@getpaseo/client').PaseoApi, cwd: string, fallbackCwd?: string): Promise<string> {
+async function resolveImportCwd(paseo: import('@getpaseo/client').PaseoApi, cwd: string, fallbackCwd?: string): Promise<{ path: string; projectId?: string }> {
   const name = basename(cwd);
   const projects = (await paseo.projects.list()).projects.filter(project => project.projectDisplayName === name);
   const matches: typeof projects = [];
   for (const project of projects) if (await directoryExists(project.projectRootPath)) matches.push(project);
-  if (matches.length === 1) return matches[0]!.projectRootPath;
+  if (matches.length === 1) return { path: matches[0]!.projectRootPath, projectId: matches[0]!.projectId };
   if (matches.length > 1) {
     for (const project of matches) {
       const workspaces = await paseo.workspaces.list({ filter: { projectId: project.projectId, includeBackground: true }, page: { limit: 1 } });
-      if (workspaces.entries.length) return project.projectRootPath;
+      if (workspaces.entries.length) return { path: project.projectRootPath, projectId: project.projectId };
     }
-    return matches[0]!.projectRootPath;
+    return { path: matches[0]!.projectRootPath, projectId: matches[0]!.projectId };
   }
-  return fallbackCwd && await directoryExists(fallbackCwd) ? fallbackCwd : homedir();
+  return { path: fallbackCwd && await directoryExists(fallbackCwd) ? fallbackCwd : homedir() };
 }
 
-export function createCloudSession(connect: () => Promise<Daemon> = connectLocal) {
+export function createCloudSession(connect: () => Promise<Daemon> = connectLocal, answerWebRequest: AnswerWebRequest = async () => ({ status: 'page_not_open' })) {
   const epoch = randomUUID();
   const sessions = new Map<string, Session>();
   const queues = new Map<string, { seq: number; items: Item[]; waiters: Set<() => void> }>();
   const locks = new Map<string, Promise<unknown>>();
+  const workspaceReservations = new Map<string, { id: string; path: string }>();
+  const requests = new Map<string, Map<string, { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response'] }>>();
+  const pending = (cloud: string) => { let entries = requests.get(cloud); if (!entries) { entries = new Map(); requests.set(cloud, entries); } return entries; };
+  const permissionEvent = (s: Session, request: PendingRequest) => {
+    const event = ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input, metadata: { [CLOUD_MANUAL_REQUEST_MARKER]: true, webSessionId: `session_${s.cloud.slice(4)}`, toolUseId: request.toolUseId } } });
+    s.emit(event);
+  };
+  const notify = ({ cloudSessionId, request }: { cloudSessionId: string; request: PendingRequest }) => {
+    const s = find(cloudSessionId); const entries = pending(cloudSessionId);
+    const existing = entries.get(request.toolUseId);
+    if (existing) { if (!isDeepStrictEqual(existing.request, request)) throw new Error('云端请求内容已变化'); return { shown: false }; }
+    ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input } });
+    const original = structuredClone(request);
+    entries.set(request.toolUseId, { request: original, closed: false, delivered: false }); permissionEvent(s, original); return { shown: true };
+  };
+  const resolve = ({ cloudSessionId, toolUseId }: { cloudSessionId: string; toolUseId: string; outcome: 'answered' | 'denied' | 'canceled' }) => {
+    const entry = requests.get(cloudSessionId)?.get(toolUseId); if (!entry || entry.closed) return { closed: false };
+    entry.closed = true; const s = sessions.get(cloudSessionId); if (s) s.emit({ type: 'session.permission_resolved', sessionId: s.id, permissionId: toolUseId }); return { closed: true };
+  };
+  const answer = async (s: Session, permissionId: string, response: Extract<ProviderInput, { type: 'session.permission' }>['response']) => {
+    const entry = requests.get(s.cloud)?.get(permissionId);
+    if (!entry || entry.closed) return;
+    if (entry.delivered) {
+      if (!isDeepStrictEqual(entry.response, response)) s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text: '结果不确定，请在 claude.ai 核对' } });
+      return;
+    }
+    entry.delivered = true; entry.response = structuredClone(response);
+    let result: WebRequestResult;
+    try {
+      const context = { webSessionId: `session_${s.cloud.slice(4)}`, toolUseId: permissionId, expected: { toolName: entry.request.toolName, input: structuredClone(entry.request.input) } };
+      if (entry.request.kind === 'question') {
+        const updated = response.behavior === 'allow' ? response.updatedInput : undefined;
+        const answers = AnswersSchema.safeParse(updated?.answers);
+        const otherAnswers = updated?.otherAnswers === undefined ? undefined : OtherAnswersSchema.parse(updated.otherAnswers);
+        if (!answers.success) throw new Error('invalid answers');
+        result = await answerWebRequest({ ...context, kind: 'question', answers: answers.data, ...(otherAnswers ? { otherAnswers } : {}) });
+      } else result = await answerWebRequest({ ...context, kind: 'tool', decision: response.behavior });
+    } catch { result = { status: 'unknown', detail: '' }; }
+    if (entry.closed || sessions.get(s.cloud) !== s) return;
+    const text = result.status === 'page_not_open' ? '请在 claude.ai 作答' : result.status === 'unknown' ? '结果不确定，请在 claude.ai 核对' : null;
+    if (text) s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text } });
+  };
   const queue = (id: string) => { let q = queues.get(id); if (!q) { q = { seq: 0, items: [], waiters: new Set() }; queues.set(id, q); } return q; };
   const find = (cloud: string) => { const session = sessions.get(cloud); if (!session) throw new Error('not_opened'); return session; };
   const finish = (s: Session, state: 'completed' | 'failed' | 'canceled') => { if (!s.turn) return; const turnId = s.turn; s.turn = null; s.emit({ type: 'session.turn', sessionId: s.id, turnId, state, ...(state === 'failed' ? { error: { message: 'Cloud turn failed', code: 'CLOUD_TURN_FAILED' } } : {}) }); };
@@ -135,7 +194,9 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
           emit({ type: 'session.opened', requestId: input.requestId, sessionId: s.id, capabilities: [...caps], restoration: 'core', persistence: { version: 1, data: { cloudSessionId: cloud } }, cwd: s.cwd, title: input.config.title });
           emit({ type: 'session.config', sessionId: s.id, config: config(s) });
           emit({ type: 'session.commands', sessionId: s.id, commands: [] });
-          emit({ type: 'session.ready', requestId: input.requestId, sessionId: s.id }); return;
+          emit({ type: 'session.ready', requestId: input.requestId, sessionId: s.id });
+          for (const entry of requests.get(cloud)?.values() ?? []) if (!entry.closed) permissionEvent(s, entry.request);
+          return;
         }
         if (input.type === 'session.prompt') {
           const s = byId(input.sessionId); if (!s) { emit({ type: 'session.prompt_result', sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: 'failed', error: { message: 'Unknown session', code: 'UNKNOWN_SESSION' } } }); return; }
@@ -145,6 +206,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
           const text = input.prompt.input.type === 'message' ? input.prompt.input.content.map(p => p.type === 'text' ? p.text : `[${p.type}]`).join('\n') : `/${input.prompt.input.name} ${input.prompt.input.arguments}`;
           const q = queue(s.cloud); q.items.push({ seq: ++q.seq, messageId: input.prompt.clientMessageId, delivery, text, receivedAt: new Date().toISOString() }); for (const wake of q.waiters) wake(); return;
         }
+        if (input.type === 'session.permission') { const s = byId(input.sessionId); if (s) void answer(s, input.permissionId, input.response); return; }
         if (input.type === 'session.close') { const s = byId(input.sessionId); if (s && sessions.get(s.cloud) === s) sessions.delete(s.cloud); emit({ type: 'session.closed', sessionId: input.sessionId }); emit({ type: 'request.completed', requestId: input.requestId }); return; }
         if (input.type === 'session.interrupt') { emit({ type: 'request.completed', requestId: input.requestId }); return; }
         if (input.type === 'session.configure') { const s = byId(input.sessionId); if (s) { s.model = input.changes.model ?? s.model; s.mode = input.changes.mode ?? s.mode; emit({ type: 'session.config', sessionId: s.id, config: config(s) }); } emit({ type: 'request.completed', requestId: input.requestId }); return; }
@@ -161,10 +223,24 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       try {
         daemon = await connect();
         let agent = await daemon.list(input.cloudSessionId); const created = !agent;
-        if (!agent) { sessions.delete(input.cloudSessionId); agent = await daemon.import(input.cloudSessionId, await resolveImportCwd(paseo, input.cwd, input.fallbackCwd)); await daemon.title(agent.id, input.title); }
+        if (!agent) {
+          sessions.delete(input.cloudSessionId);
+          let workspace = workspaceReservations.get(input.cloudSessionId);
+          if (!workspace) {
+            const location = await resolveImportCwd(paseo, input.cwd, input.fallbackCwd);
+            const id = await daemon.createWorkspace(location.path, input.title, location.projectId);
+            workspace = { id, path: location.path }; workspaceReservations.set(input.cloudSessionId, workspace);
+            try { await daemon.pinWorkspace(id); } catch { console.error('云端会话工作区置顶失败'); }
+          }
+          agent = await daemon.import(input.cloudSessionId, workspace.path, workspace.id);
+          if (!agent.workspaceId) agent = { ...agent, workspaceId: workspace.id };
+          workspaceReservations.delete(input.cloudSessionId);
+          await daemon.title(agent.id, input.title);
+        }
+        if (!agent.workspaceId) throw new Error('云端会话 agent 没有关联工作区');
         if (!sessions.has(input.cloudSessionId)) await paseo.agents.ref(agent.id).reload();
         if (!sessions.has(input.cloudSessionId)) throw new Error('not_opened');
-        return { agentId: agent.id, serverId: daemon.serverId(), epoch, created };
+        return { agentId: agent.id, serverId: daemon.serverId(), workspaceId: agent.workspaceId, epoch, created };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const secrets = [...knownSecrets, ...[...sessions.values()].flatMap(session => session.endpoint ? endpointErrorSecrets(session.endpoint) : [])];
@@ -216,7 +292,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       return { status: response.status, messages: parts.map(part => clean(JSON.parse(part)) as Record<string, unknown>) };
     } catch { throw new Error(controller.signal.aborted ? 'Paseo MCP request timed out' : 'Paseo MCP request failed'); } finally { clearTimeout(timer); }
   };
-  return { provider, ensure, push, poll, ack, mcp, epoch, dispose() { sessions.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
+  return { provider, ensure, push, poll, ack, mcp, notify, resolve, epoch, dispose() { sessions.clear(); requests.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
 }
 
 export function registerCloudSession(server: PluginServerContext, create = createCloudSession) {
@@ -227,5 +303,7 @@ export function registerCloudSession(server: PluginServerContext, create = creat
   server.handle(rpc.pollInbox, input => cloud.poll(input));
   server.handle(rpc.ackInbox, input => cloud.ack(input));
   server.handle(rpc.forwardMcp, input => cloud.mcp(input));
+  server.handle(rpc.notifyPendingRequest, input => cloud.notify(input));
+  server.handle(rpc.resolvePendingRequest, input => cloud.resolve(input));
   return () => cloud.dispose();
 }

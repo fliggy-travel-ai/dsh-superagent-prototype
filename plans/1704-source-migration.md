@@ -21,6 +21,18 @@
 
 提交源为 Mac Mini 的 guard-integration-superagent 工作树。双机业务文件已逐项对比，部署目录中的修复保留在提交源。MacBook 锁文件仅 caniuse-lite 与 electron-to-chromium 两个开发依赖版本不同，采用仓库锁文件。后续仅从推送成功的提交生成部署包；保留目标机器配置、配对、运行数据和依赖目录。插件 reload 后核对状态与日志，守护进程不重启。
 
-交付前验证：`npm run check` 通过类型检查及 167 项测试；Python 采样脚本 6 项测试通过；人工待办预览 8 项交互检查通过，窄屏截图已复核。MacBook 的 Python 3.12 已安装 edge_tts 7.3.1。真实语音将在已推送提交热更新后验证，结果另记 Issue。
+交付前验证：`npm run check` 通过类型检查及 167 项测试；Python 采样脚本 6 项测试通过；人工待办预览 8 项交互检查通过，窄屏截图已复核。MacBook 的 Python 3.12 已安装 edge_tts 7.3.1。
+
+2026-11-08 UTC 02:58:59 和 02:59:09，Mac Mini 和 MacBook 分别从已推送提交 b1fb806 部署，124 个文件哈希核验一致，插件 reload 成功，daemon 未重启。沿用各机 node_modules，运行配置、状态、凭据和配对数据保留。Mini 部署窗口随后释放给 #1707；#1707 报告其最新 Mini 集成提交为 a996a72ff3dd9ed7d3845c4b718cb39b7e718ed3，本轮没有再次核验该部署，也没有覆盖 Mini 的集成文件。
+
+03:00:13.764Z，MacBook 真实回执为 `played=true, engine=system`，具体结果为提示音成功、晓晓合成失败、系统语音回退成功。这证明回退路径可用。后续核验发现 Framework Python 3.12 经本机代理读取 CONNECT 响应时被重置；同机 Homebrew Python 3.14、系统 Python 与 Node 的 CONNECT 均成功，尚未确定解释器差异的根因。
+
+专用环境 `~/.claude-guard/speech-venv` 使用 Python 3.14.3 和 edge-tts 7.3.1，经原有代理完成晓晓合成：退出码 0，音频 12,384 字节。保留 TLS 校验，未改动代理配置。插件增加专用环境自动选择，显式 `ASKUSER_PYTHON` 仍优先。
+
+03:54:00Z，MacBook 从已推送提交 `03719f169db879b2f11751121a1e0e92bffcf231` 更新语音修复，部署基线为 b1fb806。三个插件文件发生变化，124 个交付文件哈希全部一致，插件 reload 成功，daemon 未变化。原文件备份在 `/tmp/1704-neural-backup-20261108T035400Z`，本机部署证据为 `/tmp/1704-neural-deploy-result.json`。类型检查及语音、问答 30 项测试通过。
+
+04:07:58.821Z 至 04:08:15.776Z，通过 MacBook 本机插件 RPC `presence.speak` 完成真实播放，编号为 `1704-neural-03719f1-macbook-20261108`。回执为 `played=true, engine=neural`，详情为“提示音成功；晓晓语音合成成功；神经语音播放成功”。结果保存在 `/tmp/1704-neural-local-rpc-result.json`。这证明神经语音合成和播放进程成功，不代表用户已听到或认可音色。Mini 到 MacBook 的 SDK 路由此前返回 `host_offline`，发生在播放请求发出之前；本次本机 RPC 验证不代表跨主机语音链路已通过。
+
+SunBrowser 扩展已部署 0.4.0，配对、令牌和权限开关正常；业务页面没有被刷新。03:09:18Z 只有运行中状态样本，未出现提问和审批完成样本。
 
 离线夹具不能证明真实网页问答和权限点击成功；目前只有运行中网页的真实样本，没有等待、限额、问答和审批成功样本。语音进程成功也不等于用户已听到。
