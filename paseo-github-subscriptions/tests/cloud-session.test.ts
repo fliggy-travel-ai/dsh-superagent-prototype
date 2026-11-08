@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { PaseoApi } from '@getpaseo/client';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { forwardMcp } from '../shared/cloud-session.ts';
@@ -19,6 +22,7 @@ test('error redaction removes websocket addresses', () => {
 });
 async function fixture(url?: string) {
   const agents: { id: string; cloud: string; archived: boolean; title?: string }[] = [];
+  const importedCwds: string[] = [];
   let imports = 0; let failure: string | undefined; let closeFailure = false; let reloads = 0; let session = 0;
   let cloud: ReturnType<typeof createCloudSession>;
   let connection: Awaited<ReturnType<typeof cloud.provider.connect>>;
@@ -28,13 +32,13 @@ async function fixture(url?: string) {
   };
   const daemon = async () => ({
     list: async (id: string) => agents.find(a => a.cloud === id && !a.archived) ?? null,
-    import: async (id: string) => { if (failure) { const message = failure; failure = undefined; throw new Error(message); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false }; agents.push(a); await open(); return a; },
+    import: async (id: string, cwd: string) => { importedCwds.push(cwd); if (failure) { const message = failure; failure = undefined; throw new Error(message); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false }; agents.push(a); await open(); return a; },
     title: async (id: string, title: string) => { agents.find(a => a.id === id)!.title = title; }, serverId: () => 'server', close: async () => { if (closeFailure) throw new Error(`close failed Bearer ${token}`); },
   });
-  const paseo = { agents: { ref: () => ({ reload: async () => { reloads++; await open(); } }) } } as unknown as PaseoApi;
+  const paseo = { agents: { ref: () => ({ reload: async () => { reloads++; await open(); } }) }, projects: { list: async () => ({ projects: [] }) }, workspaces: { list: async () => ({ entries: [] }) } } as unknown as PaseoApi;
   const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
   await restart();
-  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, get imports() { return imports; }, get reloads() { return reloads; }, failClose(value: boolean) { closeFailure = value; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
+  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, importedCwds, get imports() { return imports; }, get reloads() { return reloads; }, failClose(value: boolean) { closeFailure = value; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
 }
 test('import uses the CLI-compatible persistence handle', () => {
   const request = importRequest(cloudId, '/tmp');
@@ -210,4 +214,37 @@ test('MCP RPC timeout defaults to 45 seconds and rejects above 50 seconds', () =
   assert.equal(forwardMcp.input.parse({ cloudSessionId: cloudId, message: {} }).timeoutMs, 45_000);
   assert.equal(forwardMcp.input.parse({ cloudSessionId: cloudId, message: {}, timeoutMs: 50_000 }).timeoutMs, 50_000);
   assert.equal(forwardMcp.input.safeParse({ cloudSessionId: cloudId, message: {}, timeoutMs: 50_001 }).success, false);
+});
+
+test('ensure selects an existing Mac project directory or the requested fallback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cloud-cwd-test-'));
+  const first = join(root, 'one'); const second = join(root, 'two'); const fallback = join(root, 'fallback');
+  const missing = join(root, 'missing'); const file = join(root, 'file');
+  await Promise.all([mkdir(first), mkdir(second), mkdir(fallback), writeFile(file, 'file')]);
+  const project = (projectId: string, projectRootPath: string, projectDisplayName = 'repository') => ({ projectId, projectRootPath, projectDisplayName });
+  const cases = [
+    { name: 'matching project', projects: [project('one', first)], active: [], fallbackCwd: fallback, expected: first },
+    { name: 'active workspace preferred', projects: [project('one', first), project('two', second)], active: ['two'], fallbackCwd: fallback, expected: second },
+    { name: 'project order breaks ties', projects: [project('one', first), project('two', second)], active: ['one', 'two'], fallbackCwd: fallback, expected: first },
+    { name: 'no active workspace uses first', projects: [project('one', first), project('two', second)], active: [], fallbackCwd: fallback, expected: first },
+    { name: 'missing project directory ignored', projects: [project('one', missing), project('two', second)], active: ['one'], fallbackCwd: fallback, expected: second },
+    { name: 'fallback directory', projects: [project('one', first, 'different')], active: [], fallbackCwd: fallback, expected: fallback },
+    { name: 'missing fallback uses home', projects: [], active: [], fallbackCwd: missing, expected: homedir() },
+    { name: 'file is not a fallback directory', projects: [], active: [], fallbackCwd: file, expected: homedir() },
+  ];
+  try {
+    for (const example of cases) {
+      const f = await fixture();
+      const paseo = { ...f.paseo,
+        projects: { list: async () => ({ projects: example.projects }) },
+        workspaces: { list: async ({ filter }: { filter: { projectId: string } }) => ({ entries: example.active.includes(filter.projectId) ? [{ projectId: filter.projectId }] : [] }) },
+      } as unknown as PaseoApi;
+      try {
+        await f.cloud.ensure({ ...ensureInput, cwd: '/cloud/path/repository/', fallbackCwd: example.fallbackCwd }, paseo);
+        assert.equal(f.importedCwds[0], example.expected, example.name);
+        await f.cloud.ensure({ ...ensureInput, cwd: '/cloud/path/other' }, paseo);
+        assert.equal(f.importedCwds.length, 1, `${example.name}: existing agent is reused`);
+      } finally { f.cloud.dispose(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

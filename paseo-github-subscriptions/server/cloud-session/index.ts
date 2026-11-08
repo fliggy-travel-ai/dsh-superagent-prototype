@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
 import { createHostClient } from '@getpaseo/client/node';
 import { ProviderEventSchema, type ProviderConnection, type ProviderEvent, type ProviderInput, type ProviderRegistration, type ProviderTimelineItem } from '@getpaseo/plugin/server/provider';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
@@ -81,6 +81,26 @@ async function connectLocal(): Promise<Daemon> {
   };
 }
 
+async function directoryExists(path: string): Promise<boolean> {
+  try { return (await stat(path)).isDirectory(); } catch { return false; }
+}
+
+async function resolveImportCwd(paseo: import('@getpaseo/client').PaseoApi, cwd: string, fallbackCwd?: string): Promise<string> {
+  const name = basename(cwd);
+  const projects = (await paseo.projects.list()).projects.filter(project => project.projectDisplayName === name);
+  const matches: typeof projects = [];
+  for (const project of projects) if (await directoryExists(project.projectRootPath)) matches.push(project);
+  if (matches.length === 1) return matches[0]!.projectRootPath;
+  if (matches.length > 1) {
+    for (const project of matches) {
+      const workspaces = await paseo.workspaces.list({ filter: { projectId: project.projectId, includeBackground: true }, page: { limit: 1 } });
+      if (workspaces.entries.length) return project.projectRootPath;
+    }
+    return matches[0]!.projectRootPath;
+  }
+  return fallbackCwd && await directoryExists(fallbackCwd) ? fallbackCwd : homedir();
+}
+
 export function createCloudSession(connect: () => Promise<Daemon> = connectLocal) {
   const epoch = randomUUID();
   const sessions = new Map<string, Session>();
@@ -133,7 +153,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       return { version: 1, capabilities: [...caps], async send(input) { if (closed) throw new Error('Connection closed'); handle(input); }, onEvent(listener) { listeners.add(listener); return () => listeners.delete(listener); }, async close() { closed = true; for (const [id, s] of sessions) if (s.emit === emit) sessions.delete(id); listeners.clear(); } } satisfies ProviderConnection;
     },
   };
-  const ensure = async (input: { cloudSessionId: string; title: string; cwd: string }, paseo: import('@getpaseo/client').PaseoApi) => {
+  const ensure = async (input: { cloudSessionId: string; title: string; cwd: string; fallbackCwd?: string }, paseo: import('@getpaseo/client').PaseoApi) => {
     const previous = locks.get(input.cloudSessionId) ?? Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
       const knownSecrets = [...sessions.values()].flatMap(session => session.endpoint ? endpointErrorSecrets(session.endpoint) : []);
@@ -141,7 +161,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       try {
         daemon = await connect();
         let agent = await daemon.list(input.cloudSessionId); const created = !agent;
-        if (!agent) { sessions.delete(input.cloudSessionId); agent = await daemon.import(input.cloudSessionId, input.cwd); await daemon.title(agent.id, input.title); }
+        if (!agent) { sessions.delete(input.cloudSessionId); agent = await daemon.import(input.cloudSessionId, await resolveImportCwd(paseo, input.cwd, input.fallbackCwd)); await daemon.title(agent.id, input.title); }
         if (!sessions.has(input.cloudSessionId)) await paseo.agents.ref(agent.id).reload();
         if (!sessions.has(input.cloudSessionId)) throw new Error('not_opened');
         return { agentId: agent.id, serverId: daemon.serverId(), epoch, created };
