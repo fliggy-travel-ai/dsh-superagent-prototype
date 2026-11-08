@@ -12,3 +12,9 @@ for (const scenario of ['cloud-fails', 'github-fails']) {
     assert.equal(result.stdout, '');
   });
 }
+
+test('local daemon client disables reconnect and times out without blocking the next ensure', async () => {
+  const connectionFixture = fileURLToPath(new URL('./fixtures/isolation/connect.mjs', import.meta.url));
+  const result = await run(process.execPath, ['--experimental-test-module-mocks', '--experimental-strip-types', connectionFixture], { timeout: 12_000 });
+  assert.equal(result.stdout, '');
+});

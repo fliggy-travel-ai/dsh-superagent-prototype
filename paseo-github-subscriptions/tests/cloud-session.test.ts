@@ -4,30 +4,31 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { PaseoApi } from '@getpaseo/client';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
+import { forwardMcp } from '../shared/cloud-session.ts';
 import { ProviderEventSchema, type ProviderEvent, type ProviderInput } from '@getpaseo/plugin/server/provider';
-import { createCloudSession, importRequest, registerCloudSession } from '../server/cloud-session/index.ts';
+import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS } from '../server/cloud-session/index.ts';
 
 const cloudId = 'cse_abcdefgh1234';
 const token = 'fake-secret-token-1707';
 const input = (value: unknown) => value as ProviderInput;
-async function fixture(url: string) {
+async function fixture(url?: string) {
   const agents: { id: string; cloud: string; archived: boolean; title?: string }[] = [];
-  let imports = 0; let failure: string | undefined; let session = 0;
+  let imports = 0; let failure: string | undefined; let closeFailure = false; let reloads = 0; let session = 0;
   let cloud: ReturnType<typeof createCloudSession>;
   let connection: Awaited<ReturnType<typeof cloud.provider.connect>>;
   const events: ProviderEvent[] = [];
   const open = async () => {
-    await connection.send(input({ type: 'session.open', requestId: 'open', sessionId: `s${++session}`, persistence: { version: 1, data: { cloudSessionId: cloudId } }, config: { cwd: '/tmp', env: {}, persist: true, mcpServers: { paseo: { type: 'http', url, headers: { Authorization: `Bearer ${token}` } } } } }));
+    await connection.send(input({ type: 'session.open', requestId: 'open', sessionId: `s${++session}`, persistence: { version: 1, data: { cloudSessionId: cloudId } }, config: { cwd: '/tmp', env: {}, persist: true, mcpServers: url ? { paseo: { type: 'http', url, headers: { Authorization: `Bearer ${token}` } } } : {} } }));
   };
   const daemon = async () => ({
     list: async (id: string) => agents.find(a => a.cloud === id && !a.archived) ?? null,
     import: async (id: string) => { if (failure) { const message = failure; failure = undefined; throw new Error(message); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false }; agents.push(a); await open(); return a; },
-    title: async (id: string, title: string) => { agents.find(a => a.id === id)!.title = title; }, serverId: () => 'server', close: async () => {},
+    title: async (id: string, title: string) => { agents.find(a => a.id === id)!.title = title; }, serverId: () => 'server', close: async () => { if (closeFailure) throw new Error(`close failed Bearer ${token}`); },
   });
-  const paseo = { agents: { ref: () => ({ reload: async () => { await open(); } }) } } as unknown as PaseoApi;
+  const paseo = { agents: { ref: () => ({ reload: async () => { reloads++; await open(); } }) } } as unknown as PaseoApi;
   const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
   await restart();
-  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, get imports() { return imports; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
+  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, get imports() { return imports; }, get reloads() { return reloads; }, failClose(value: boolean) { closeFailure = value; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
 }
 test('import uses the CLI-compatible persistence handle', () => {
   const request = importRequest(cloudId, '/tmp');
@@ -120,11 +121,11 @@ test('RPC error paths conceal endpoint credentials and query values', async () =
     await f.cloud.ensure(ensureInput, f.paseo);
     const args = { cloudSessionId: cloudId, message: { jsonrpc: '2.0', method: 'tools/list' }, timeoutMs: 1000 };
     const status = await invoke('cloud-session.mcp', args) as { status: number; messages: unknown[] };
-    assert.equal(status.status, 503); assert.equal(status.messages.length, 1); assertSafe(status);
+    assert.equal(status.status, 503); assert.equal(status.messages.length, 1); assert.ok(!JSON.stringify(status).includes(token)); assert.ok(JSON.stringify(status).includes(querySecret));
     behavior = 'invalid';
     await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request failed'; });
     behavior = 'timeout';
-    await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request failed'; });
+    await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request timed out'; });
     f.agents[0]!.archived = true;
     f.failNext(`import failed ${token} ${querySecret} ${url}`);
     await assert.rejects(invoke('cloud-session.ensure', ensureInput), error => { assertSafe(error); return error instanceof Error && error.message.includes('import failed'); });
@@ -136,4 +137,71 @@ test('RPC error paths conceal endpoint credentials and query values', async () =
     await f.open();
     await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request failed'; });
   } finally { server.closeAllConnections(); server.close(); dispose(); f.cloud.dispose(); }
+});
+
+test('opened session without MCP remains running across ensure', async () => {
+  const f = await fixture();
+  const first = await f.cloud.ensure(ensureInput, f.paseo);
+  await f.connection.send(prompt(f.current(), 'running', 'auto'));
+  const events = f.events.length; const current = f.current(); const reloads = f.reloads;
+  assert.equal((await f.cloud.ensure(ensureInput, f.paseo)).agentId, first.agentId);
+  assert.equal(f.reloads, reloads); assert.equal(f.current(), current); assert.equal(f.events.length, events);
+  assert.equal(f.cloud.push({ cloudSessionId: cloudId, startTurn: true, items: [] }).turnRunning, true);
+  await assert.rejects(f.cloud.mcp({ cloudSessionId: cloudId, message: {}, timeoutMs: 1000 }), /not_opened/);
+  f.cloud.dispose();
+});
+
+test('MCP preserves own agent ID and forwards params without changing endpoint identity', async () => {
+  const own = 'own-agent-id-123'; let body: unknown; let requestUrl = ''; let auth = '';
+  const server = createServer(async (req, res) => {
+    requestUrl = req.url ?? ''; auth = req.headers.authorization ?? '';
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
+    body = JSON.parse(Buffer.concat(chunks).toString());
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ parentAgentId: own, message: `child of ${own}`, token, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/mcp?callerAgentId=${own}` }));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const addr = server.address(); assert.ok(addr && typeof addr !== 'string');
+  const f = await fixture(`http://127.0.0.1:${addr.port}/mcp?callerAgentId=${own}`);
+  try {
+    await f.cloud.ensure(ensureInput, f.paseo);
+    const message = { jsonrpc: '2.0', method: 'tools/call', params: { callerAgentId: 'other-agent', url: 'http://other.invalid/mcp' } };
+    const result = await f.cloud.mcp({ cloudSessionId: cloudId, message, timeoutMs: 1000 });
+    assert.deepEqual(body, message); assert.equal(requestUrl, `/mcp?callerAgentId=${own}`); assert.equal(auth, `Bearer ${token}`);
+    assert.equal(result.messages[0]?.parentAgentId, own); assert.equal(result.messages[0]?.message, `child of ${own}`);
+    assert.ok(!JSON.stringify(result).includes(token)); assert.ok(!JSON.stringify(result).includes(`http://127.0.0.1:${addr.port}/mcp`));
+  } finally { f.cloud.dispose(); server.closeAllConnections(); server.close(); }
+});
+
+test('local connection timeout releases ensure lock and closes failed client', async () => {
+  assert.equal(LOCAL_CONNECT_TIMEOUT_MS, 5000);
+  let connects = 0; let closes = 0;
+  const cloud = createCloudSession(async () => {
+    connects++;
+    if (connects === 1) await connectWithTimeout({ connect: () => new Promise(() => {}), close: async () => { closes++; } }, 25);
+    throw new Error('second attempt');
+  });
+  const paseo = {} as PaseoApi;
+  const first = cloud.ensure(ensureInput, paseo); const second = cloud.ensure(ensureInput, paseo);
+  await assert.rejects(first, /连接本机 daemon 超时/);
+  await assert.rejects(second, /second attempt/);
+  assert.equal(connects, 2); assert.equal(closes, 1); cloud.dispose();
+});
+
+test('daemon close failure does not mask result or import error', async () => {
+  const f = await fixture('http://127.0.0.1:12345/mcp'); const logs: string[] = []; const original = console.error;
+  console.error = (...args: unknown[]) => { logs.push(args.join(' ')); };
+  try {
+    f.failClose(true);
+    assert.equal((await f.cloud.ensure(ensureInput, f.paseo)).agentId, 'a1');
+    f.agents[0]!.archived = true; f.failNext('original import error');
+    await assert.rejects(f.cloud.ensure(ensureInput, f.paseo), /original import error/);
+    assert.equal(logs.length, 2); assert.ok(!logs.join(' ').includes(token));
+  } finally { console.error = original; f.cloud.dispose(); }
+});
+
+test('MCP RPC timeout defaults to 45 seconds and rejects above 50 seconds', () => {
+  assert.equal(forwardMcp.input.parse({ cloudSessionId: cloudId, message: {} }).timeoutMs, 45_000);
+  assert.equal(forwardMcp.input.parse({ cloudSessionId: cloudId, message: {}, timeoutMs: 50_000 }).timeoutMs, 50_000);
+  assert.equal(forwardMcp.input.safeParse({ cloudSessionId: cloudId, message: {}, timeoutMs: 50_001 }).success, false);
 });
