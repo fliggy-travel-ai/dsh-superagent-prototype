@@ -4,7 +4,7 @@ PASEO_CLOUD_SHA256='SHA256_PLACEHOLDER'
 (
   tmp=$(mktemp) || exit 0
   trap 'rm -f "$tmp"' EXIT
-  if ! curl -fsSL "$PASEO_CLOUD_URL" -o "$tmp"; then
+  if ! curl -fsSL --max-time 60 --retry 2 "$PASEO_CLOUD_URL" -o "$tmp"; then
     echo '警告：云端程序下载失败。' >&2
     exit 0
   fi
@@ -15,5 +15,5 @@ PASEO_CLOUD_SHA256='SHA256_PLACEHOLDER'
   fi
   mkdir -p /opt/paseo-cloud-session || exit 0
   install -m 755 "$tmp" /opt/paseo-cloud-session/paseo-cloud-session.mjs || exit 0
-  node /opt/paseo-cloud-session/paseo-cloud-session.mjs install-claude-config
+  node /opt/paseo-cloud-session/paseo-cloud-session.mjs install-claude-config || echo '警告：Claude 配置安装失败。' >&2
 )
