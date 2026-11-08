@@ -190,3 +190,12 @@ test('标题失败最多三次、复用同一 MCP 初始化且接管后不覆盖
   await writeFile(third,JSON.stringify({type:'user',uuid:'three',message:{content:'重启后新消息'}})+'\n'); await waitFor(()=>pushed>=3); assert.equal(times.length,3);
  } finally {try {await writeFile(lock,JSON.stringify({pid:process.pid,path:'finished',token:'finished'}));} catch {} if(thirdTask) await thirdTask; if(secondTask) await secondTask; await firstTask; await rm(dir,{recursive:true,force:true});}
 });
+
+test('ensure 在配置和未配置备用目录时传入正确字段',async()=>{
+ const seen=[]; const rpc=async(_contract,input)=>{seen.push(input); return {agentId:'agent',serverId:'server',epoch:'epoch',created:true};};
+ const base={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_fallback'+Date.now()};
+ await hook({source:'startup',transcript_path:'missing',cwd:'/cloud/work/project'}, {...base,PASEO_CLOUD_SESSION_FALLBACK_CWD:'/mac/fallback'},rpc,false);
+ await hook({source:'startup',transcript_path:'missing'}, {...base,PASEO_CLOUD_SESSION_FALLBACK_CWD:''},rpc,false);
+ assert.equal(seen[0].cwd,'/cloud/work/project'); assert.equal(seen[0].fallbackCwd,'/mac/fallback');
+ assert.equal(seen[1].cwd,process.cwd()); assert.equal(Object.hasOwn(seen[1],'fallbackCwd'),false);
+});

@@ -55,7 +55,7 @@ function safeReason(error, env) {
   return message.replace(/Bearer\s+[^\s,;]+/gi,'Bearer [已隐藏]').replace(/((?:token|password|authorization|offer|secret)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]').replace(/(?:https?|wss?):\/\/[^\s"']+/gi,'[地址已隐藏]').replace(/[\r\n]+/g,' ').trim().slice(0,500) || '未知错误';
 }
 const context = env => ({cloudSessionId: env.CLAUDE_CODE_REMOTE_SESSION_ID});
-async function ensure(rpc, env, path, cwd = process.cwd()) { return rpc(ensureSession, {...context(env), title: await titleFor(path), cwd}); }
+async function ensure(rpc, env, path, cwd = process.cwd()) { return rpc(ensureSession, {...context(env), title: await titleFor(path), cwd, ...(env.PASEO_CLOUD_SESSION_FALLBACK_CWD ? {fallbackCwd:env.PASEO_CLOUD_SESSION_FALLBACK_CWD} : {})}); }
 export function mapper() {
   const calls = new Map(), texts = new Map(), thoughts = new Map(); let canceled=false;
   return row => {
@@ -171,7 +171,7 @@ export async function forward(path, env=process.env, rpc=createRpc(env), startOf
 }
 export async function hook(input, env=process.env, rpc=createRpc(env), launch=true) {
   if(!eligible(env) || (input.source === 'subagent' || input.agent_id || input.agent_type) || !input.transcript_path) return '';
-  if(launch) { const size=await stat(input.transcript_path).then(x=>x.size).catch(()=>0); const child=spawn(process.execPath,[fileURLToPath(import.meta.url),'forward',input.transcript_path,String(size)],{detached:true,stdio:'ignore',env}); child.unref(); }
+  if(launch) { const size=await stat(input.transcript_path).then(x=>x.size).catch(()=>0); const child=spawn(process.execPath,[fileURLToPath(import.meta.url),'forward',input.transcript_path,String(size)],{detached:true,stdio:'ignore',env,cwd:input.cwd || process.cwd()}); child.unref(); }
   try { const result=await ensure(rpc,env,input.transcript_path,input.cwd || process.cwd());
     await mkdir(sessionDir(env),{recursive:true}); await writeFile(join(sessionDir(env),'epoch'),result.epoch,{flag:'wx'}).catch(()=>{});
     if(env.CLAUDE_ENV_FILE) await appendFile(env.CLAUDE_ENV_FILE,`export PASEO_AGENT_ID=${shellQuote(result.agentId)}\nexport PASEO_AGENT_SERVER_ID=${shellQuote(result.serverId)}\n`);

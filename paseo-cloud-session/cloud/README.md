@@ -2,6 +2,8 @@
 
 在 Linux、Node 22 容器中运行。启动脚本 `setup-snippet.sh` 的地址和 SHA-256 必须在发布后填入；下载校验通过后安装单文件，并合并 Claude 的用户级 SessionStart 钩子和 `paseo` MCP 条目。启动脚本应在 Claude 启动前运行。配对链接由个人环境变量 `PASEO_MINI_HOST` 提供；云端会话编号由 `CLAUDE_CODE_REMOTE_SESSION_ID` 提供。不要把实际链接写进仓库。
 
+`PASEO_CLOUD_SESSION_FALLBACK_CWD` 可由成员在个人云环境的环境变量中自行设置为 Mac 上的目录，作用于该成员的所有云端会话。插件先按云端会话工作目录的最后一段查找 Mac 上的同名项目；找不到时使用此目录，不设置时使用 Mac 主目录。该变量由成员自己修改。
+
 ```bash
 npm ci
 npm run typecheck
