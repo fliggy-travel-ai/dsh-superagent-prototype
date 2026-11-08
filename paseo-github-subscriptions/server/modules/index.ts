@@ -7,6 +7,8 @@ import { presenceModule } from './answer-presence/index.ts';
 import { browserModule } from './answer-browser/index.ts';
 import { stalledModule } from './todo-stalled/index.ts';
 import { defaultsModule } from './providers-defaults/index.ts';
+import { quietChildrenModule } from './answer-quiet-children/index.ts';
+import { escalationModule } from './answer-escalation/index.ts';
 
 /**
  * 全部模块，按注册顺序排列（与整合前一致：云端会话最先注册）。
@@ -21,4 +23,6 @@ export const MODULES: readonly Module<any>[] = [
   browserModule,
   stalledModule,
   defaultsModule,
+  quietChildrenModule,
+  escalationModule,
 ];
