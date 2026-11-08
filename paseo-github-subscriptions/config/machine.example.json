@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "machine": "macmini",
+  "modules": {
+    "providers.defaults": true
+  },
+  "agentDefaults": [
+    {
+      "provider": ["codex", "codex-2", "codex-3", "codex-4", "codex-5"],
+      "apply": "always",
+      "modeId": "full-access",
+      "features": { "service_tier": "priority" },
+      "removeFeatures": ["fast_mode"]
+    },
+    { "provider": "claude-user-pilot", "modeId": "bypassPermissions", "replaceModeIds": ["auto"] },
+    { "provider": ["opencode", "glm-acp-agent"], "features": { "auto_accept": true } },
+    { "provider": "qoder", "modeId": "yolo", "features": { "auto_accept": true } }
+  ]
+}

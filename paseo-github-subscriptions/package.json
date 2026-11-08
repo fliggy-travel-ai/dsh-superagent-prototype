@@ -3,13 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "files": ["paseo-plugin.json", "OVERVIEW.md", "index.client.tsx", "index.server.ts", "client/", "server/", "shared/", "browser-extension/", "scripts/proximity-away.py"],
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/",
+    "browser-extension/",
+    "scripts/proximity-away.py"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test && npm run scan",
     "vendor:check": "node --experimental-strip-types scripts/vendor-sync.ts --check",
-    "test:daemon": "node --experimental-strip-types tests/daemon-integration.ts"
+    "test:daemon": "node --experimental-strip-types tests/daemon-integration.ts",
+    "scan": "node --experimental-strip-types scripts/scan-secrets.ts"
   },
   "dependencies": {
     "@getpaseo/client": "0.15.0",
