@@ -17,5 +17,7 @@ This code answered the feasibility questions in the issue and is kept only as re
 - `probe.push {sessionId?, startTurn, reasoningText, toolCall, assistantText, usage, endTurn}`: timeline items and turn boundaries.
 - `probe.emit {events}`: raw provider events.
 - `probe.config {promptMode: turn|auto-complete}`.
+- `probe.mcp {sessionId? | cloudSessionId?, message, timeoutMs?}`: forwards one JSON-RPC message to the session's own Paseo MCP endpoint (Streamable HTTP) and returns the status, content type, `Mcp-Session-Id`, and parsed messages. The caller identity is the `callerAgentId` the daemon put in that endpoint.
+- `probe.secret-scan {texts}`: reports, per text, whether it contains the first 8 characters of a held bearer token, and whether the queue or emitted-event log does. Prototype-only leak check.
 
-The queue lives in memory and is lost when the plugin process restarts. The plugin stores no credentials and makes no network requests. Inputs are redacted before they are queued: environment values, URL query values, header values, and bearer tokens are replaced with `<redacted>`.
+The queue lives in memory and is lost when the plugin process restarts. The plugin keeps each session's Paseo MCP URL and headers in memory only, and its only network request is `probe.mcp` to that local endpoint. Prompts during an open turn are accepted as steering (`prompt.steer`). Inputs are redacted before they are queued: environment values, URL query values, header values, and bearer tokens are replaced with `<redacted>`.

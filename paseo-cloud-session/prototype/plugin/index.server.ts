@@ -18,7 +18,7 @@ import type {
 import { z } from "zod";
 
 const PROVIDER_ID = "cloud-session-probe";
-const SUPPORTED = ["prompt.message", "session.persistence"] as const;
+const SUPPORTED = ["prompt.message", "prompt.steer", "session.persistence"] as const;
 const MODEL_ID = "cloud-session";
 const MODE_ID = "default";
 
@@ -45,6 +45,34 @@ interface QueuedInput {
 }
 
 const sessions = new Map<string, ProbeSession>();
+
+/**
+ * The daemon-issued Paseo MCP endpoint of each open session. Its URL carries the caller agent ID and
+ * its headers carry the daemon's bearer token, so it never enters the queue, an RPC result, or a log.
+ */
+interface McpEndpoint {
+  url: string;
+  headers: Record<string, string>;
+  mcpSessionId?: string;
+}
+const mcpEndpoints = new Map<string, McpEndpoint>();
+
+function saveEndpoint(sessionId: string, config: ProviderSessionConfig): void {
+  const server = config.mcpServers.paseo;
+  if (server && server.type !== "stdio") mcpEndpoints.set(sessionId, { url: server.url, headers: { ...(server.headers ?? {}) } });
+  else mcpEndpoints.delete(sessionId);
+}
+
+/** Secret values the plugin holds, used only by `probe.secret-scan` to test texts for their 8-character prefix. */
+function secretPrefixes(): string[] {
+  const prefixes = new Set<string>();
+  for (const endpoint of mcpEndpoints.values())
+    for (const value of Object.values(endpoint.headers)) {
+      const token = value.replace(/^Bearer\s+/i, "");
+      if (token.length >= 8) prefixes.add(token.slice(0, 8));
+    }
+  return [...prefixes];
+}
 const queue: QueuedInput[] = [];
 const emitted: Array<{ at: string; type: string; sessionId?: string }> = [];
 const probeConfig: { promptMode: "turn" | "auto-complete"; autoReplyText: string } = {
@@ -188,6 +216,7 @@ function handle(connectionId: string, emit: Emit, input: ProviderInput): void {
         mode: input.config.mode ?? MODE_ID,
       };
       sessions.set(input.sessionId, session);
+      saveEndpoint(input.sessionId, input.config);
       emit({
         type: "session.opened",
         requestId: input.requestId,
@@ -214,6 +243,20 @@ function handle(connectionId: string, emit: Emit, input: ProviderInput): void {
         });
         return;
       }
+      const promptText =
+        input.prompt.input.type === "message"
+          ? input.prompt.input.content.map((part) => (part.type === "text" ? part.text : `[${part.type}]`)).join("\n")
+          : `/${input.prompt.input.name} ${input.prompt.input.arguments}`;
+      if (session.activeTurnId && input.prompt.delivery === "steer") {
+        emit({
+          type: "session.prompt_result",
+          sessionId: session.sessionId,
+          clientMessageId: input.prompt.clientMessageId,
+          result: { type: "steer", turnId: session.activeTurnId },
+        });
+        item(session, { type: "user_message", id: input.prompt.clientMessageId, clientMessageId: input.prompt.clientMessageId, text: promptText });
+        return;
+      }
       if (session.activeTurnId) {
         emit({
           type: "session.prompt_result",
@@ -227,11 +270,7 @@ function handle(connectionId: string, emit: Emit, input: ProviderInput): void {
       session.activeTurnId = turnId;
       emit({ type: "session.prompt_result", sessionId: session.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "turn", turnId } });
       emit({ type: "session.turn", sessionId: session.sessionId, turnId, state: "started" });
-      const text =
-        input.prompt.input.type === "message"
-          ? input.prompt.input.content.map((part) => (part.type === "text" ? part.text : `[${part.type}]`)).join("\n")
-          : `/${input.prompt.input.name} ${input.prompt.input.arguments}`;
-      item(session, { type: "user_message", id: input.prompt.clientMessageId, clientMessageId: input.prompt.clientMessageId, text });
+      item(session, { type: "user_message", id: input.prompt.clientMessageId, clientMessageId: input.prompt.clientMessageId, text: promptText });
       if (probeConfig.promptMode === "auto-complete") {
         item(session, { type: "assistant_message", id: randomUUID(), text: probeConfig.autoReplyText });
         endTurn(session, "completed");
@@ -258,6 +297,7 @@ function handle(connectionId: string, emit: Emit, input: ProviderInput): void {
       const session = sessions.get(input.sessionId);
       if (session) endTurn(session, "canceled");
       sessions.delete(input.sessionId);
+      mcpEndpoints.delete(input.sessionId);
       emit({ type: "session.closed", sessionId: input.sessionId });
       emit({ type: "request.completed", requestId: input.requestId });
       return;
@@ -290,7 +330,11 @@ function createConnection(): ProviderConnection {
     },
     async close() {
       closed = true;
-      for (const [id, session] of sessions) if (session.emit === emit) sessions.delete(id);
+      for (const [id, session] of sessions)
+        if (session.emit === emit) {
+          sessions.delete(id);
+          mcpEndpoints.delete(id);
+        }
       listeners.clear();
     },
   };
@@ -349,6 +393,86 @@ const emitRpc = defineRpc({
   input: z.object({ sessionId: z.string().optional(), events: z.array(z.record(z.string(), z.any())) }),
   output: any,
 });
+
+const mcpRpc = defineRpc({
+  name: "probe.mcp",
+  input: z.object({
+    sessionId: z.string().optional(),
+    cloudSessionId: z.string().optional(),
+    message: z.record(z.string(), z.any()),
+    timeoutMs: z.number().int().positive().max(300000).optional(),
+  }),
+  output: any,
+});
+const secretScanRpc = defineRpc({
+  name: "probe.secret-scan",
+  input: z.object({ texts: z.array(z.string()) }),
+  output: any,
+});
+
+/** Parses a Streamable HTTP response body: one JSON message, or the `data:` payloads of SSE events. */
+function parseMcpBody(contentType: string, body: string): unknown[] {
+  if (contentType.includes("text/event-stream")) {
+    const messages: unknown[] = [];
+    for (const block of body.split(/\r?\n\r?\n/)) {
+      const data = block
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""))
+        .join("\n");
+      if (data) messages.push(JSON.parse(data));
+    }
+    return messages;
+  }
+  return body.trim() ? [JSON.parse(body)] : [];
+}
+
+/** Forwards one JSON-RPC message to the session's own Paseo MCP endpoint; the caller identity is the endpoint's. */
+async function forwardMcp(session: ProbeSession, message: Record<string, unknown>, timeoutMs: number) {
+  const endpoint = mcpEndpoints.get(session.sessionId);
+  if (!endpoint) throw new Error(`Session ${session.sessionId} has no Paseo MCP endpoint`);
+  const headers: Record<string, string> = {
+    ...endpoint.headers,
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+  };
+  if (endpoint.mcpSessionId) headers["Mcp-Session-Id"] = endpoint.mcpSessionId;
+  const started = Date.now();
+  let response: Response;
+  try {
+    response = await fetch(endpoint.url, { method: "POST", headers, body: JSON.stringify(message), signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    // The error text is rebuilt from its name and cause code so no request detail is echoed.
+    const cause = error instanceof Error && error.cause && typeof error.cause === "object" && "code" in error.cause ? String(error.cause.code) : "";
+    throw new Error(`Paseo MCP request failed: ${error instanceof Error ? error.name : "Error"} ${cause}`.trim());
+  }
+  const returnedSessionId = response.headers.get("mcp-session-id");
+  if (returnedSessionId) endpoint.mcpSessionId = returnedSessionId;
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = await response.text();
+  let messages: unknown[] | null = null;
+  let parseError: string | null = null;
+  try {
+    messages = parseMcpBody(contentType, body);
+  } catch (error) {
+    parseError = error instanceof Error ? error.message : String(error);
+  }
+  return {
+    status: response.status,
+    contentType,
+    mcpSessionId: endpoint.mcpSessionId ?? null,
+    elapsedMs: Date.now() - started,
+    messages,
+    parseError,
+    body: messages === null ? body : undefined,
+  };
+}
+
+function pickByCloudId(cloudSessionId: string): ProbeSession {
+  const found = [...sessions.values()].filter((session) => session.cloudSessionId === cloudSessionId);
+  if (found.length !== 1) throw new Error(`${found.length} open sessions have cloudSessionId ${cloudSessionId}`);
+  return found[0]!;
+}
 
 function pick(sessionId: string | undefined): ProbeSession {
   if (sessionId) {
@@ -438,6 +562,19 @@ export default function contribute(server: PluginServerContext) {
     }
     return { session: summary(session), startedTurnId, endedTurnId, emittedTypes };
   });
+  server.handle(mcpRpc, (input) => {
+    const session = input.cloudSessionId ? pickByCloudId(input.cloudSessionId) : pick(input.sessionId);
+    return forwardMcp(session, input.message, input.timeoutMs ?? 120000);
+  });
+  server.handle(secretScanRpc, ({ texts }) => {
+    const prefixes = secretPrefixes();
+    const own = JSON.stringify(queue) + JSON.stringify(emitted);
+    return {
+      secretsHeld: prefixes.length,
+      texts: texts.map((text) => prefixes.some((prefix) => text.includes(prefix))),
+      queueOrEmittedContains: prefixes.some((prefix) => own.includes(prefix)),
+    };
+  });
   server.handle(emitRpc, (input) => {
     const session = pick(input.sessionId);
     for (const event of input.events) session.emit({ sessionId: session.sessionId, ...event } as ProviderEvent);
@@ -445,6 +582,7 @@ export default function contribute(server: PluginServerContext) {
   });
   return () => {
     sessions.clear();
+    mcpEndpoints.clear();
     queue.length = 0;
   };
 }
