@@ -1,9 +1,9 @@
 import { createHostClient } from '@getpaseo/client/node';
 import { ensureSession, pushTimeline, pollInbox, ackInbox, forwardMcp } from '../../../paseo-github-subscriptions/shared/cloud-session.ts';
 import { realpathSync } from 'node:fs';
-import { readFile, writeFile, mkdir, appendFile, open, stat, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, appendFile, open, stat, unlink, rename } from 'node:fs/promises';
 import { spawn, execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -16,27 +16,56 @@ const shellQuote = s => "'" + s.replaceAll("'", "'\\''") + "'";
 const eligible = env => !!env.PASEO_MINI_HOST && !!env.CLAUDE_CODE_REMOTE_SESSION_ID && !env.PASEO_AGENT_ID;
 const sessionDir = env => join(tmpdir(), 'paseo-cloud-session-' + createHash('sha256').update(env.CLAUDE_CODE_REMOTE_SESSION_ID).digest('hex'));
 const inputText = content => typeof content === 'string' ? content : Array.isArray(content) ? content.filter(b => b.type === 'text').map(b => b.text || '').join('') : '';
-async function titleFor(path) {
-  try { for (const line of (await readFile(path, 'utf8')).split('\n')) { try { const x = JSON.parse(line); if (x.type === 'user' && !x.isMeta && !x.isSidechain) { const s = inputText(x.message?.content).trim(); if (s) return Array.from(s).slice(0,60).join(''); } } catch {} } } catch {}
+async function titleFor(path, endOffset) {
+  try { for (const line of (await readFile(path)).subarray(0,endOffset).toString('utf8').split('\n')) { try { const x = JSON.parse(line); if (x.type === 'user' && !x.isMeta && !x.isSidechain) { const s = inputText(x.message?.content).trim(); if (s) return Array.from(s).slice(0,60).join(''); } } catch {} } } catch {}
   return '云端会话';
 }
-export function createRpc(env = process.env) {
-  return async (contract, input) => {
-    const client = createHostClient(env.PASEO_MINI_HOST, { clientId: 'cloud-session', connectTimeoutMs: 5000, logger: {debug(){},info(){},warn(){},error(){}} });
-    try { await client.connect(); const result = await client.invokePluginRpc('github-subscriptions', contract.name, contract.input.parse(input)); return contract.output.parse(result); }
-    finally { await client.close().catch(() => {}); }
+export function createRpc(env = process.env, options = {}) {
+  let client, connecting;
+  const timeoutMs = options.timeoutMs ?? 10000;
+  const close = async () => { const old=client; client=undefined; if(old) await old.close().catch(()=>{}); };
+  const connect = async () => {
+    if(client?.isConnected) return client;
+    if(connecting) return connecting;
+    connecting=(async()=>{
+      await close();
+      let next;
+      try { next=(options.createClient || createHostClient)(env.PASEO_MINI_HOST, {clientId:'cloud-session',connectTimeoutMs:timeoutMs,reconnect:{enabled:false},logger:{debug(){},info(){},warn(){},error(){}}}); }
+      catch { throw Error('配对链接无效'); }
+      client=next; let timer;
+      try {
+        await Promise.race([next.connect(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('连接超时')),timeoutMs);})]);
+        return next;
+      } catch(error) { await close(); throw error; } finally {clearTimeout(timer);}
+    })();
+    try {return await connecting;} finally {connecting=undefined;}
   };
+  const rpc=async (contract, input) => {
+    const active=await connect();
+    try {const result=await active.invokePluginRpc('github-subscriptions',contract.name,contract.input.parse(input)); return contract.output.parse(result);}
+    catch(error) {if(!active.isConnected) await close(); throw error;}
+  };
+  rpc.close=close;
+  return rpc;
+}
+function safeReason(error, env) {
+  let message=error instanceof Error ? error.message : String(error);
+  const host=env.PASEO_MINI_HOST || '';
+  if(host) { message=message.replaceAll(host,'[已隐藏]'); try {const u=new URL(host); for(const v of u.searchParams.values()) if(v) message=message.replaceAll(v,'[已隐藏]'); const frag=new URLSearchParams(u.hash.slice(1)); for(const v of frag.values()) if(v) message=message.replaceAll(v,'[已隐藏]');} catch {} }
+  return message.replace(/Bearer\s+[^\s,;]+/gi,'Bearer [已隐藏]').replace(/((?:token|password|authorization|offer|secret)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]').replace(/https?:\/\/[^\s"']+/gi,'[地址已隐藏]').replace(/[\r\n]+/g,' ').trim().slice(0,500) || '未知错误';
 }
 const context = env => ({cloudSessionId: env.CLAUDE_CODE_REMOTE_SESSION_ID});
 async function ensure(rpc, env, path, cwd = process.cwd()) { return rpc(ensureSession, {...context(env), title: await titleFor(path), cwd}); }
 export function mapper() {
-  const calls = new Map(), texts = new Map(), thoughts = new Map();
+  const calls = new Map(), texts = new Map(), thoughts = new Map(); let canceled=false;
   return row => {
     const items = []; let startTurn = false, endTurn;
     if (!row || row.isMeta || row.isSidechain) return null;
     const msg = row.message || {};
     if (row.type === 'user') {
-      if (typeof msg.content === 'string' && msg.content.trim()) { startTurn = true; items.push({type:'user_message', id:row.uuid, text:msg.content}); }
+      const text=inputText(msg.content);
+      if(text.trim() === '[Request interrupted by user]') {endTurn='canceled'; canceled=true;}
+      else if(text.trim()) { canceled=false; startTurn=true; items.push({type:'user_message',id:row.uuid,text}); }
       if (Array.isArray(msg.content)) for (const b of msg.content) if (b.type === 'tool_result' && calls.has(b.tool_use_id)) {
         const prev = calls.get(b.tool_use_id), output = inputText(b.content), detail = {...prev.detail};
         if (detail.type === 'shell') detail.output = output;
@@ -62,30 +91,76 @@ export function mapper() {
           const item={type:'tool_call',id:b.id,callId:b.id,name:b.name,detail,status:'running',error:null}; calls.set(b.id,item); items.push(item);
         }
       }
-      if (msg.stop_reason === 'end_turn' || msg.stop_reason === 'stop_sequence') endTurn='completed';
-    }
+    } else if(row.type === 'system' && row.subtype === 'stop_hook_summary') {if(!canceled) endTurn='completed'; canceled=false;}
     return items.length || startTurn || endTurn ? {startTurn,items,...(endTurn && {endTurn})} : null;
   };
 }
 export class ForwardQueue {
-  constructor(rpc, env) { this.rpc=rpc; this.env=env; this.pending=[]; this.map=mapper(); }
-  add(row) { const value=this.map(row); if(value) this.pending.push(value); }
-  async flush() { while(this.pending.length) { const value=this.pending[0]; const result=await this.rpc(pushTimeline,{...context(this.env),...value}); if(result.accepted !== value.items.length) throw Error('timeline rejected'); this.pending.shift(); } }
+  constructor(rpc, env) { this.rpc=rpc; this.env=env; this.pending=[]; this.map=mapper(); this.epoch=null; this.onEpochChange=null; }
+  enqueue(value) { if(!value) return; if(value.items.length<=200) {this.pending.push(value); return;} for(let i=0;i<value.items.length;i+=200) this.pending.push({startTurn:i===0 && value.startTurn,items:value.items.slice(i,i+200),...(i+200>=value.items.length && value.endTurn ? {endTurn:value.endTurn} : {})}); }
+  add(row) { this.enqueue(this.map(row)); }
+  async flush() {
+    while(this.pending.length) {
+      const batch={startTurn:false,items:[]}; let count=0;
+      for(const next of this.pending) {
+        if(count && (next.startTurn || batch.endTurn || batch.items.length+next.items.length>200)) break;
+        batch.startTurn ||= next.startTurn; batch.items.push(...next.items); if(next.endTurn) batch.endTurn=next.endTurn; count++;
+        if(batch.endTurn) break;
+      }
+      const result=await this.rpc(pushTimeline,{...context(this.env),...batch});
+      if(result.accepted !== batch.items.length) throw Error('timeline rejected');
+      this.pending.splice(0,count);
+      if(this.epoch && result.epoch && this.epoch!==result.epoch) await this.onEpochChange?.(result.epoch);
+      if(result.epoch) this.epoch=result.epoch;
+    }
+  }
 }
-async function lock(dir) {
-  await mkdir(dir,{recursive:true}); const p=join(dir,'forward.pid');
-  for (let i=0;i<2;i++) { try { const f=await open(p,'wx'); await f.writeFile(String(process.pid)); await f.close(); return p; } catch(e) { if(e.code!=='EEXIST') throw e; const pid=Number(await readFile(p,'utf8').catch(()=>'')); if(!pid) return null; try { if(pid>0) { process.kill(pid,0); return null; } } catch(e) { if(e.code !== 'ESRCH') return null; } await unlink(p).catch(()=>{}); } } return null;
+async function lock(dir, path) {
+  await mkdir(dir,{recursive:true}); const file=join(dir,'forward.pid'); const token=randomUUID();
+  const mine={pid:process.pid,path,token,titleHandled:false};
+  for(let i=0;i<4;i++) {
+    try {const f=await open(file,'wx'); await f.writeFile(JSON.stringify(mine)); await f.close(); return {file,token,titleHandled:mine.titleHandled};}
+    catch(e) {if(e.code!=='EEXIST') throw e;}
+    let existing; try {existing=JSON.parse(await readFile(file,'utf8'));} catch {await sleep(50); continue;}
+    let alive=false; try {process.kill(existing.pid,0); alive=true;} catch(e) {if(e.code!=='ESRCH') return null;}
+    if(alive && existing.path===path) return null;
+    if(alive) {
+      mine.titleHandled=!!existing.titleHandled; const tmp=join(dir,`forward-${token}.tmp`); await writeFile(tmp,JSON.stringify(mine)); await rename(tmp,file); return {file,token,titleHandled:mine.titleHandled};
+    }
+    await unlink(file).catch(()=>{});
+  }
+  return null;
+}
+async function markTitle(lease) {const f=await open(lease.file,'r+'); try {const info=JSON.parse(await f.readFile('utf8')); if(info.token===lease.token) {info.titleHandled=true; const value=JSON.stringify(info); await f.write(value,0,'utf8'); await f.truncate(Buffer.byteLength(value));}} finally {await f.close();}}
+async function ownsLock(lock) { try {return JSON.parse(await readFile(lock.file,'utf8')).token===lock.token;} catch {return false;} }
+async function remoteInit(rpc, env) {
+  const init=await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',id:'cloud-init',method:'initialize',params:{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'paseo-cloud-session',version:'0.1.0'}}}});
+  if(init.status>=400 || !init.messages.some(x=>x.id==='cloud-init' && x.result)) throw Error('Paseo MCP 初始化失败');
+  await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',method:'notifications/initialized'}});
+}
+export async function updateTitle(rpc, env, agentId, title) {
+  await remoteInit(rpc,env);
+  const result=await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',id:'cloud-title',method:'tools/call',params:{name:'update_agent',arguments:{agentId,name:Array.from(title).slice(0,60).join('')}}}});
+  const reply=result.messages.find(x=>x.id==='cloud-title');
+  if(result.status>=400 || !reply || reply.error || reply.result?.isError) throw Error('Paseo 标题更新失败');
 }
 export async function forward(path, env=process.env, rpc=createRpc(env), startOffset) {
-  const pid=await lock(sessionDir(env)); if(!pid) return;
-  const queue=new ForwardQueue(rpc,env); let offset=startOffset ?? (await stat(path)).size, partial=Buffer.alloc(0), delay=500, registered=false;
+  const lease=await lock(sessionDir(env),path); if(!lease) return;
+  const queue=new ForwardQueue(rpc,env); let offset=startOffset ?? (await stat(path)).size, partial=Buffer.alloc(0), delay=500, registered=false, agentId, titlePending=null;
+  let titleHandled=lease.titleHandled || (await titleFor(path,offset))!=='云端会话';
+  const register=async()=>{const result=await ensure(rpc,env,path); registered=true; agentId=result.agentId; queue.epoch=result.epoch;};
+  queue.onEpochChange=async()=>{registered=false; await register();};
   try { for (;;) {
+    if(!await ownsLock(lease)) return;
     try {
-      const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {queue.add(JSON.parse(line));} catch {} } } } finally {await f.close();}
-      if(!registered || queue.pending.length) {await ensure(rpc,env,path); registered=true; await queue.flush();} delay=500;
-    } catch { registered=false; delay=Math.min(delay*2,10000); }
+      const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {const row=JSON.parse(line); const value=queue.map(row); if(value) {queue.enqueue(value); if(!titleHandled && !titlePending) titlePending=value.items.find(x=>x.type==='user_message')?.text || null;}} catch {} } } } finally {await f.close();}
+      if(!registered) await register();
+      await queue.flush();
+      if(titlePending && !titleHandled) {try {await updateTitle(rpc,env,agentId,titlePending); titleHandled=true; titlePending=null; await markTitle(lease);} catch(error) {if(String(error).includes('not_opened')) registered=false;}}
+      delay=500;
+    } catch(error) { if(String(error).includes('not_opened')) registered=false; delay=Math.min(delay*2,10000); }
     await sleep(delay);
-  } } finally { await unlink(pid).catch(()=>{}); }
+  } } finally { if(await ownsLock(lease)) await unlink(lease.file).catch(()=>{}); }
 }
 export async function hook(input, env=process.env, rpc=createRpc(env), launch=true) {
   if(!eligible(env) || (input.source === 'subagent' || input.agent_id || input.agent_type) || !input.transcript_path) return '';
@@ -94,7 +169,7 @@ export async function hook(input, env=process.env, rpc=createRpc(env), launch=tr
     await mkdir(sessionDir(env),{recursive:true}); await writeFile(join(sessionDir(env),'epoch'),result.epoch,{flag:'wx'}).catch(()=>{});
     if(env.CLAUDE_ENV_FILE) await appendFile(env.CLAUDE_ENV_FILE,`export PASEO_AGENT_ID=${shellQuote(result.agentId)}\nexport PASEO_AGENT_SERVER_ID=${shellQuote(result.serverId)}\n`);
     return redact(`Paseo agent: ${result.agentId}\n${instructions}\n`, env);
-  } catch { return 'Mac Mini 不可达或注册失败，Paseo 接入将在后台重试。\n'; }
+  } catch(error) { return `Mac Mini 接入失败：${safeReason(error,env)}；后台将重试。\n`; }
 }
 export async function install(home, artifact, run = execFileSync) {
   const dir=join(home,'.claude'), path=join(dir,'settings.json'); await mkdir(dir,{recursive:true});
@@ -107,34 +182,59 @@ export async function install(home, artifact, run = execFileSync) {
   if(!exists) run('claude',['mcp','add','--scope','user','paseo','--','node',artifact,'mcp'],{stdio:'ignore'});
 }
 export async function wait(env=process.env,rpc=createRpc(env), opts={}) {
-  const dir=sessionDir(env), epochPath=join(dir,'epoch'); await mkdir(dir,{recursive:true}); let epoch=await readFile(epochPath,'utf8').catch(()=>null), delay=500, pending=null;
+  const dir=sessionDir(env), epochPath=join(dir,'epoch'); await mkdir(dir,{recursive:true}); let epoch=await readFile(epochPath,'utf8').catch(()=>null), delay=500, pending=null, registered=false;
   for (;;) { try {
-    if(!pending) { await ensure(rpc,env,opts.transcript || ''); const result=await rpc(pollInbox,{...context(env),afterSeq:0,waitMs:20000});
-      if(epoch && epoch!==result.epoch) (opts.print || console.log)('Mac 上的插件重启过，之前没取走的消息已丢失');
+    if(!pending) { if(!registered) {await ensure(rpc,env,opts.transcript || ''); registered=true;} const result=await rpc(pollInbox,{...context(env),afterSeq:0,waitMs:20000});
+      if(epoch && epoch!==result.epoch) { (opts.print || console.log)('Mac 上的插件重启过，之前没取走的消息已丢失'); registered=false; }
       epoch=result.epoch; await writeFile(epochPath,epoch); if(!result.items.length) continue;
       for(const item of result.items) (opts.print || console.log)(redact(`seq: ${item.seq} delivery: ${item.delivery}\n${item.text}`,env));
       pending=result.items.at(-1).seq;
     }
     await rpc(ackInbox,{...context(env),seq:pending}); return;
-  } catch { await (opts.sleep || sleep)(delay); delay=Math.min(delay*2,10000); } }
+  } catch(error) { if(String(error).includes('not_opened')) registered=false; await (opts.sleep || sleep)(delay); delay=Math.min(delay*2,10000); } }
 }
 export async function mcp(env=process.env,rpc=createRpc(env), input=process.stdin, output=process.stdout) {
   const send = x => output.write(redact(JSON.stringify(x),env)+'\n');
-  let remoteInitialized = false;
-  for await (const line of readline.createInterface({input,crlfDelay:Infinity})) {
+  let remoteInitialized=false, registered=false, stopped=false, recoveryRunning=false, timer;
+  const prepare=async()=>{
+    if(!env.PASEO_MINI_HOST || !env.CLAUDE_CODE_REMOTE_SESSION_ID) throw Error('Paseo 未配置');
+    if(!registered) {await ensure(rpc,env,''); registered=true;}
+    if(!remoteInitialized) {await remoteInit(rpc,env); remoteInitialized=true;}
+  };
+  const call=async message=>{
+    try {await prepare(); const result=await rpc(forwardMcp,{...context(env),message});
+      const response=result.messages.find(x=>x.id===message.id); if(result.status>=400 || !response) throw Error('Paseo MCP 未返回响应'); return response;
+    } catch(error) {remoteInitialized=false; if(String(error).includes('not_opened')) registered=false; throw error;}
+  };
+  let serial=Promise.resolve();
+  const callSerial=message=>{const operation=serial.then(()=>call(message)); serial=operation.then(()=>{},()=>{}); return operation;};
+  const recover=()=>{
+    if(recoveryRunning) return; recoveryRunning=true;
+    const attempt=async()=>{
+      if(stopped) {recoveryRunning=false; return;}
+      try {const response=await callSerial({jsonrpc:'2.0',id:'cloud-recovery-list',method:'tools/list'}); if(response.error) throw Error('Paseo 工具列表不可用');
+        if(!stopped) send({jsonrpc:'2.0',method:'notifications/tools/list_changed'}); recoveryRunning=false;
+      } catch {if(!stopped) {timer=setTimeout(attempt,2000); timer.unref();} else recoveryRunning=false;}
+    };
+    timer=setTimeout(attempt,2000); timer.unref();
+  };
+  try {for await (const line of readline.createInterface({input,crlfDelay:Infinity})) {
     let m; try {m=JSON.parse(line);} catch {continue;}
-    if(m.method==='initialize') {send({jsonrpc:'2.0',id:m.id,result:{protocolVersion:m.params?.protocolVersion || '2025-03-26',capabilities:{tools:{}},serverInfo:{name:'paseo',version:'0.1.0'},instructions}}); continue;}
+    if(m.method==='initialize') {send({jsonrpc:'2.0',id:m.id,result:{protocolVersion:m.params?.protocolVersion || '2025-03-26',capabilities:{tools:{listChanged:true}},serverInfo:{name:'paseo',version:'0.1.0'},instructions}}); continue;}
     if(m.id===undefined) continue;
-    try { if(!env.PASEO_MINI_HOST || !env.CLAUDE_CODE_REMOTE_SESSION_ID) throw Error('not configured'); await ensure(rpc,env,''); if(!remoteInitialized) { const init=await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',id:'cloud-init',method:'initialize',params:{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'paseo-cloud-session',version:'0.1.0'}}}}); if(init.status >= 400 || !init.messages.some(x=>x.id==='cloud-init' && x.result)) throw Error('initialization failed'); await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',method:'notifications/initialized'}}); remoteInitialized=true; } const result=await rpc(forwardMcp,{...context(env),message:m}); const response=result.messages.find(x=>x.id===m.id); if(!response) throw Error('missing response'); send(response); }
-    catch { remoteInitialized=false; send({jsonrpc:'2.0',id:m.id,error:{code:-32000,message:'Paseo 不可达或工具调用失败，请稍后重试。'}}); }
-  }
+    try {const response=await callSerial(m); send(response); if(m.method==='tools/list' && response.error) recover();}
+    catch(error) {send({jsonrpc:'2.0',id:m.id,error:{code:-32000,message:`Paseo 工具调用失败：${safeReason(error,env)}`}}); if(m.method==='tools/list') recover();}
+  }} finally {stopped=true; clearTimeout(timer);}
 }
 async function main() {
   const [cmd,arg]=process.argv.slice(2), env=process.env;
   if(cmd==='install-claude-config') return install(env.HOME,resolve(fileURLToPath(import.meta.url)));
-  if(cmd==='hook-session-start') {let s=''; for await(const c of process.stdin) s+=c; let input; try {input=JSON.parse(s);} catch {return;} process.stdout.write(await hook(input,env)); return;}
-  if(cmd==='mcp') return mcp(env);
-  if(cmd==='forward' && eligible(env) && arg) return forward(arg,env,createRpc(env),process.argv[4] === undefined ? undefined : Number(process.argv[4]));
-  if(cmd==='wait' && env.PASEO_MINI_HOST && env.CLAUDE_CODE_REMOTE_SESSION_ID) return wait(env);
+  const rpc=createRpc(env);
+  try {
+    if(cmd==='hook-session-start') {let s=''; for await(const c of process.stdin) s+=c; let input; try {input=JSON.parse(s);} catch {return;} process.stdout.write(await hook(input,env,rpc)); return;}
+    if(cmd==='mcp') return await mcp(env,rpc);
+    if(cmd==='forward' && eligible(env) && arg) return await forward(arg,env,rpc,process.argv[4] === undefined ? undefined : Number(process.argv[4]));
+    if(cmd==='wait' && env.PASEO_MINI_HOST && env.CLAUDE_CODE_REMOTE_SESSION_ID) return await wait(env,rpc);
+  } finally {await rpc.close();}
 }
 if(process.argv[1] && realpathSync(process.argv[1])===fileURLToPath(import.meta.url)) main().catch(()=>{process.stderr.write('Paseo 云端程序执行失败。\n'); process.exitCode=1;});

@@ -4,9 +4,9 @@
 
 Facts it encodes, observed in that real transcript:
 
-- A prompt that starts a turn is a `type: "user"` line whose `message.content` is a string. `turnOrigin` and `origin.kind` were `human` or `peer`; `promptSource` was `sdk` or `system`.
+- A prompt that starts a turn is a `type: "user"` line whose `message.content` is a string or an array of text blocks. `turnOrigin` and `origin.kind` were `human` or `peer`; `promptSource` was `sdk` or `system`.
 - `type: "user"` lines with `isMeta: true`, and `type: "attachment"` lines, carry reminders and hook output, not prompts.
 - One API message (`message.id`) is split across several `type: "assistant"` lines, one content block each: `thinking`, `text`, or `tool_use`. Most `thinking` blocks have empty text in cloud sessions.
 - A tool result is a `type: "user"` line whose content is a list with a `tool_result` block; its `content` is a string or a list of text blocks, and `is_error` is true, false, or absent.
-- A turn ends with an assistant line whose `stop_reason` is `end_turn` (once `stop_sequence`), followed by a `type: "system"` line with `subtype: "stop_hook_summary"`.
+- A final assistant message can be split into thinking and text lines, both carrying `stop_reason: "end_turn"`; a `type: "system"` line with `subtype: "stop_hook_summary"` follows. A user interruption is a user line containing `[Request interrupted by user]`.
 - Other line types (`queue-operation`, `last-prompt`, `cost-state`, `mode`, `tools-used`, `frame-link`, `atis-latch`) carry no timeline content.
