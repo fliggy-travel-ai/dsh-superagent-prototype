@@ -67,7 +67,7 @@ export function PresencePanel({ snapshot, busy, run }: { snapshot: PresenceSnaps
         primary={settings.sourceHostId === host.id || (host.id === null && settings.sourceHostId === snapshot.hosts[0]?.id)} disabled={busy} onPress={() => { if (settings.sourceHostId !== host.id) save({ sourceHostId: host.id }); }} />)}</View>
       <Text style={s.muted}>在所选主机上检测蓝牙设备并播放语音提醒。{missing ? `已选主机（${settings.sourceHostId}）当前不在主机列表中。` : ''}</Text>
     </Card>
-    <BluetoothPanel key={settings.sourceHostId || 'local'} hostId={settings.sourceHostId} busy={busy} />
+    <BluetoothPanel key={settings.sourceHostId || 'local'} hostId={settings.sourceHostId} busy={busy} mode={settings.mode} observation={observation} onToggle={enabled => save({ mode: enabled ? 'auto' : 'online' })} />
   </View>;
 }
 

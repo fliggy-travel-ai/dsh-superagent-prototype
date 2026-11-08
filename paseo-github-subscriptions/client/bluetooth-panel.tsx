@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { BluetoothSnapshot, BluetoothTarget } from '../shared/bluetooth.ts';
+import type { PresenceSnapshot } from '../shared/presence.ts';
 import { Btn, Card, Chip, Notice, useUi } from './ui.tsx';
 
-export function BluetoothPanel({ hostId, busy }: { hostId: string | null; busy: boolean }) {
+export function BluetoothPanel({ hostId, busy, mode, observation, onToggle }: {
+  hostId: string | null; busy: boolean; mode: PresenceSnapshot['settings']['mode'];
+  observation: PresenceSnapshot['observation']; onToggle(enabled: boolean): void;
+}) {
   const { control, s, theme } = useUi();
+  const [expanded, setExpanded] = useState(false);
   const [snapshot, setSnapshot] = useState<BluetoothSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -32,7 +37,8 @@ export function BluetoothPanel({ hostId, busy }: { hostId: string | null; busy: 
       const saved = await control.selectBluetooth(hostId, target);
       if (version === generation.current) {
         setSnapshot(previous => ({ target: saved, devices: previous?.devices ?? [], error: null }));
-        setMessage('设备已保存。等待来源主机采样；稳定距离判定需要持续一至两分钟。');
+        setMessage('手机已修改，等待新的距离判定。');
+        setExpanded(false); setName('');
       }
     } catch (failure) {
       if (version === generation.current) {
@@ -44,21 +50,42 @@ export function BluetoothPanel({ hostId, busy }: { hostId: string | null; busy: 
     finally { if (version === generation.current) setSaving(false); }
   }
   const disabled = busy || loading || saving;
+  const automatic = mode === 'auto';
+  const age = observation.observedAt ? Date.now() - Date.parse(observation.observedAt) : NaN;
+  const fresh = age >= -5000 && age < 120_000;
+  const distance = !automatic ? '未启用' : !fresh ? '等待采样' : observation.source === 'manual' ? '手动覆盖'
+    : observation.source !== 'bluetooth' || observation.mode === 'unknown' ? '未知' : observation.mode === 'online' ? '较近' : '较远';
   const selected = (device: BluetoothTarget) => snapshot?.target.address ? device.address === snapshot.target.address : device.address === null && device.name === snapshot?.target.name;
   const detected = snapshot?.devices.some(device => snapshot.target.address ? device.address === snapshot.target.address : device.name === snapshot.target.name);
-  return <Card title="蓝牙锚定设备">
-    <Text style={s.muted}>选择你随身携带的设备，用信号强度判断是否离开。</Text>
-    <View style={s.row}><Btn label={loading ? '正在读取设备…' : '刷新设备'} disabled={disabled} onPress={() => { void refresh(); }} /></View>
-    {snapshot ? <View style={[s.row, { flexWrap: 'wrap' }]}><Text style={s.strong}>当前设备：{snapshot.target.name}{snapshot.target.address ? ` · ${snapshot.target.address.slice(-8)}` : ' · 按名称匹配'}</Text><Chip label={detected ? '已发现' : '未发现'} tone={detected ? 'success' : 'warning'} /></View> : <Text style={s.muted}>{loading ? '正在读取来源主机的蓝牙设备，最长约 25 秒。' : '尚未读取设备配置。'}</Text>}
+  return <Card title="蓝牙自动判断" trailing={<Switch accessibilityLabel="按手机距离自动切换在线或离线" value={automatic} disabled={busy || saving} onValueChange={onToggle} />}>
+    <Text style={s.muted}>通过手机蓝牙信号预判距离，自动切换在线或离线。</Text>
+    <View style={[s.wrap, { gap: 8 }]}>
+      <Text style={[s.strong, { flexShrink: 1 }]}>当前手机：{snapshot?.target.name ?? (loading ? '读取中…' : '暂未读取')}</Text>
+      <Chip label={`距离预判：${distance}`} tone={distance === '较近' ? 'success' : distance === '较远' ? 'accent' : 'neutral'} />
+      <Pressable accessibilityRole="button" accessibilityLabel={expanded ? '收起设备选择' : '修改识别手机'} accessibilityState={{ expanded, disabled: busy || saving }} disabled={busy || saving}
+        onPress={() => { setExpanded(!expanded); if (!expanded && !loading) void refresh(); }} style={[s.button, { paddingVertical: 4, paddingHorizontal: 8 }]}>
+        <Text style={s.buttonText}>{expanded ? '收起设备选择' : '修改识别手机'}</Text>
+      </Pressable>
+    </View>
+    {!automatic ? <Text style={s.small}>自动判断已关闭，当前为手动{mode === 'online' ? '在线' : '离线'}。</Text> : null}
     {error ? <Notice tone="warning"><Text style={s.text}>{error}</Text></Notice> : null}
     {message ? <Text style={s.muted}>{message}</Text> : null}
-    {snapshot?.devices.map((device, index) => <View key={`${device.address ?? device.name}-${index}`} style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
-      <View style={{ flexShrink: 1 }}><Text style={s.text}>{device.name}{device.address ? ` · ${device.address.slice(-8)}` : ''}</Text><Text style={s.muted}>{device.connected ? '已连接' : '未连接'} · {device.rssi === null ? '暂无信号强度' : `${device.rssi} dBm`}</Text></View>
-      <Btn label={selected(device) ? '当前选择' : '选择设备'} disabled={disabled || selected(device)} onPress={() => { void choose({ name: device.name, address: device.address }); }} />
-    </View>)}
-    <Text style={s.strong}>手动输入设备完整名称</Text>
-    <TextInput accessibilityLabel="蓝牙设备完整名称" placeholder="输入系统蓝牙列表中的完整名称" placeholderTextColor={theme.colors.foregroundMuted} value={name} onChangeText={setName} editable={!disabled} maxLength={200} style={[s.text, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 10 }]} />
-    <Text style={s.muted}>按名称匹配时，同名设备有多台会无法判定。设备暂未发现时保留选择，不会自动更换设备。</Text>
-    <Btn label={saving ? '正在保存…' : '按完整名称保存'} disabled={disabled || !name.trim()} onPress={() => { void choose({ name: name.trim(), address: null }); }} />
+    {expanded ? <View style={{ gap: 10, borderTopWidth: 1, borderColor: theme.colors.border, paddingTop: 10 }}>
+      <View style={s.wrap}><Btn small label={loading ? '正在识别蓝牙设备…' : '刷新设备'} disabled={disabled} onPress={() => { void refresh(); }} />
+        {snapshot ? <Chip label={detected ? '当前手机已发现' : '当前手机未发现'} tone={detected ? 'success' : 'warning'} /> : null}
+      </View>
+      <Text style={s.small}>选择随身携带的手机。信号仅用于预判远近，不表示准确距离。</Text>
+      <ScrollView accessibilityLabel="可选蓝牙设备" nestedScrollEnabled style={{ maxHeight: 280 }} contentContainerStyle={{ gap: 10 }}>
+        {snapshot?.devices.map((device, index) => <View key={`${device.address ?? device.name}-${index}`} style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+          <View style={{ flexShrink: 1 }}><Text style={s.text}>{device.name}{device.address ? ` · ${device.address.slice(-8)}` : ''}</Text><Text style={s.muted}>{device.connected ? '已连接' : '未连接'} · {device.rssi === null ? '暂无信号强度' : `${device.rssi} dBm`}</Text></View>
+          <Btn small label={selected(device) ? '当前选择' : '选择手机'} disabled={disabled || selected(device)} onPress={() => { void choose({ name: device.name, address: device.address }); }} />
+        </View>)}
+      </ScrollView>
+      {snapshot && !snapshot.devices.length && !loading ? <Text style={s.muted}>未发现蓝牙设备，可以刷新或输入手机完整名称。</Text> : null}
+      <Text style={s.strong}>手动输入设备完整名称</Text>
+      <TextInput accessibilityLabel="蓝牙设备完整名称" placeholder="输入系统蓝牙列表中的完整名称" placeholderTextColor={theme.colors.foregroundMuted} value={name} onChangeText={setName} editable={!disabled} maxLength={200} style={[s.text, { borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, padding: 10 }]} />
+      <Text style={s.muted}>按名称匹配时，同名设备有多台会无法判定。设备暂未发现时保留选择，不会自动更换设备。</Text>
+      <Btn label={saving ? '正在保存…' : '按完整名称保存'} disabled={disabled || !name.trim()} onPress={() => { void choose({ name: name.trim(), address: null }); }} />
+    </View> : null}
   </Card>;
 }
