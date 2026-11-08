@@ -1,5 +1,5 @@
-import type { PluginScreenProps } from '@getpaseo/plugin/client';
-import { useRef, useState } from 'react';
+import type { PluginScreenProps, PluginSurfaceProps } from '@getpaseo/plugin/client';
+import { useEffect, useRef, useState } from 'react';
 import { Linking, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { AutomationSnapshot } from '../shared/automation.ts';
 import type { BrowserPairing, BrowserSnapshot } from '../shared/browser.ts';
@@ -9,15 +9,112 @@ import { PresencePanel, QuestionList, todoQuestions, presenceLabel } from './pre
 import { isUnreadAutomaticAnswer } from '../shared/presence.ts';
 import { Btn, Card, Chip, Notice, useControlState, useStoreState, useUi } from './ui.tsx';
 
-type Section = 'overview' | 'sessions' | 'browser' | 'github' | 'todos' | 'activity';
+type Section = 'overview' | 'sessions' | 'browser' | 'usage' | 'github' | 'todos' | 'activity';
 type Run = (operation: () => Promise<unknown>) => Promise<void>;
 type Session = AutomationSnapshot['sessions'][number];
 const sections: Array<{ id: Section; title: string }> = [
   { id: 'overview', title: '概览' }, { id: 'sessions', title: '问答模式' },
-  { id: 'browser', title: '浏览器分组' }, { id: 'github', title: 'GitHub 订阅' },
+  { id: 'browser', title: '浏览器分组' }, { id: 'usage', title: '额度设置' },
+  { id: 'github', title: 'GitHub 订阅' },
   { id: 'todos', title: '人工待办' }, { id: 'activity', title: '最近动作' },
 ];
 const toolNames: Record<string, string> = { Read: '读取文件', Glob: '查找文件', Grep: '搜索内容', Edit: '编辑文件', Write: '写入文件', MultiEdit: '多处编辑', NotebookEdit: '编辑笔记本' };
+
+export function AdsPowerKeyCard() {
+  const { s, control, theme } = useUi();
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState<'save' | 'remove' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    control.usageSettings()
+      .then(res => { if (active) setConfigured(res.adspowerApiKeyConfigured); })
+      .catch(() => { if (active) setConfigured(false); });
+    return () => { active = false; };
+  }, [control]);
+
+  const save = async () => {
+    const candidate = value.trim();
+    if (!candidate || busy) return;
+    setBusy('save');
+    setError(null);
+    try {
+      const res = await control.saveAdsPowerApiKey(candidate);
+      setValue('');
+      setConfigured(res.adspowerApiKeyConfigured);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remove = async () => {
+    if (busy) return;
+    setBusy('remove');
+    setError(null);
+    try {
+      const res = await control.removeAdsPowerApiKey();
+      setValue('');
+      setConfigured(res.adspowerApiKeyConfigured);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const isConfigured = Boolean(configured);
+  return <Card
+    title="额度设置（AdsPower API key）"
+    trailing={<Chip label={configured === null ? '读取中' : isConfigured ? '已配置' : '未配置'} tone={isConfigured ? 'success' : 'neutral'} />}
+  >
+    <Text style={s.text}>当前状态：{configured === null ? '正在读取…' : isConfigured ? '已配置' : '未配置'}</Text>
+    <Text style={s.muted}>用于通过本机 AdsPower 本地 API（默认 http://127.0.0.1:50325）查询浏览器环境的名称。API key 只保存在本机插件状态里（文件权限 0600），不写日志，不返回给前端；保留环境变量 PASEO_ADSPOWER_API_KEY / ADSPOWER_API_KEY 作为后备来源。</Text>
+    <Text style={s.muted}>要准确显示浏览器环境名称，请在浏览器扩展选项页填写一次环境序号；单环境自动识别只在单个活跃环境且单个扩展上报时生效。</Text>
+    <TextInput
+      accessibilityLabel="AdsPower API key"
+      style={s.input}
+      value={value}
+      onChangeText={setValue}
+      placeholder={isConfigured ? '重新填写 AdsPower API key 以更换' : '填写 AdsPower API key'}
+      placeholderTextColor={theme.colors.foregroundMuted}
+      secureTextEntry
+      autoCapitalize="none"
+      autoCorrect={false}
+      autoComplete="off"
+      spellCheck={false}
+      contextMenuHidden
+    />
+    {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
+    <View style={s.wrap}>
+      <Btn
+        primary
+        label={isConfigured ? '重新填写并保存' : '保存 API key'}
+        disabled={!value.trim() || busy !== null}
+        busy={busy === 'save'}
+        onPress={() => void save()}
+      />
+      {isConfigured ? <Btn
+        danger
+        label="清除 API key"
+        disabled={busy !== null}
+        busy={busy === 'remove'}
+        onPress={() => void remove()}
+      /> : null}
+    </View>
+  </Card>;
+}
+
+export function UsageSettingsScreen(_props: PluginSurfaceProps) {
+  const { s } = useUi();
+  return <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
+    <Text style={s.h1}>额度设置</Text>
+    <AdsPowerKeyCard />
+  </ScrollView>;
+}
 
 function Browsers({ snapshot, native, busy, run }: { snapshot: BrowserSnapshot; native: AutomationSnapshot | null; busy: boolean; run: Run }) {
   const { s, control } = useUi();
@@ -46,6 +143,7 @@ function Browsers({ snapshot, native, busy, run }: { snapshot: BrowserSnapshot; 
         <TextInput accessibilityLabel="配对令牌" value={pairing.token} editable={false} selectTextOnFocus style={s.input} />
       </View> : null}
     </Card>
+    <AdsPowerKeyCard />
     {binding ? <Card title={`为「${binding.title}」选择 Paseo 名称`}>
       <Text style={s.text}>浏览器环境：{binding.instanceName}。绑定后分组使用所选 Paseo 会话名称。</Text>
       <TextInput accessibilityLabel="搜索绑定目标" placeholder="搜索 Paseo 会话名称" value={filter} onChangeText={setFilter} style={s.input} />
@@ -136,6 +234,7 @@ export function MainScreen({ params }: PluginScreenProps) {
     {section === 'sessions' ? presence ? <PresencePanel snapshot={presence} busy={busy} run={run} /> : <Text style={s.muted}>{presenceError ? '问答模式暂不可用，原因见页面顶部。其他模块不受影响。' : '正在读取问答模式状态…'}</Text> : null}
     {section === 'browser' && browser ? <Browsers snapshot={browser} native={automation} busy={busy} run={run} /> : null}
     {section === 'browser' && !browser ? <Text style={s.muted}>正在读取模块状态；连接错误会显示在页面顶部。</Text> : null}
+    {section === 'usage' ? <View style={{ gap: 12 }}><AdsPowerKeyCard /></View> : null}
     {section === 'github' ? <GitHubPanel params={params} /> : null}
     {section === 'todos' ? <View style={{ gap: 12 }}>
       <Text style={s.strong}>会话提问</Text>

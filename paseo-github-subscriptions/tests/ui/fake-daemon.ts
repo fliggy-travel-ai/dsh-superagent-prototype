@@ -17,6 +17,7 @@ export interface RpcLogEntry {
 export class FakeDaemon {
   automation = makeAutomation();
   browser = makeBrowser();
+  adspowerApiKeyConfigured = false;
   state: Snapshot;
   readonly log: RpcLogEntry[] = [];
   latencyMs = 150;
@@ -31,7 +32,12 @@ export class FakeDaemon {
   async rpc<I, O>(contract: PluginRpcContract, input: I): Promise<O> {
     await new Promise((resolve) => setTimeout(resolve, this.latencyMs));
     const parsed = contract.input.parse(input) as Record<string, unknown>;
-    this.log.push({ name: contract.name, at: Date.now(), summary: contract.name === saveToken.name ? `token(${String((parsed as { token: string }).token.length)} 字符)` : JSON.stringify(parsed).slice(0, 120) });
+    const summary = contract.name === saveToken.name
+      ? `token(${String((parsed as { token: string }).token.length)} 字符)`
+      : contract.name === 'browser.usage.save_api_key'
+        ? `apiKey(${String((parsed as { apiKey: string }).apiKey.length)} 字符)`
+        : JSON.stringify(parsed).slice(0, 120);
+    this.log.push({ name: contract.name, at: Date.now(), summary });
     if (this.down) throw new Error('插件服务未响应（fixture：模拟离线）');
     return contract.output.parse(this.handle(contract.name, parsed)) as O;
   }
@@ -48,6 +54,9 @@ export class FakeDaemon {
       case 'browser.snapshot': return this.browser;
       case 'browser.configure': this.browser = { ...this.browser, settings: input as unknown as BrowserSettings, connected: Boolean(input.enabled) }; return this.browser;
       case 'browser.pairing': return { url: `http://127.0.0.1:${this.browser.settings.port}/sync`, token: '演示配对令牌，无实际权限' };
+      case 'browser.usage.snapshot': return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured };
+      case 'browser.usage.save_api_key': this.adspowerApiKeyConfigured = Boolean(String(input.apiKey ?? '').trim()); return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured };
+      case 'browser.usage.remove_api_key': this.adspowerApiKeyConfigured = false; return { adspowerApiKeyConfigured: false };
       case 'browser.bind': {
         const binding = input as unknown as BrowserBindingInput;
         this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),

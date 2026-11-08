@@ -24,6 +24,7 @@ import { stalledPort } from './server/stalled-port.ts';
 import { webRequestAudit, type ResolveWebRequest } from './shared/web-request.ts';
 import { WebRequestLedger } from './server/web-request/ledger.ts';
 import { WebRequestExecutor } from './server/web-request/executor.ts';
+import { registerBrowserUsage } from './server/browser-usage.ts';
 
 export default function contribute(server: PluginServerContext) {
   let runtime: Runtime | null = null;
@@ -128,6 +129,7 @@ export default function contribute(server: PluginServerContext) {
   void readyAutomation().catch(() => {});
   void readyBrowser().catch(() => {});
   void readyPresence().catch(() => {});
+  const usageStore = registerBrowserUsage(server, readyBrowser, directory);
 
   server.handle(presenceRpc.presenceSnapshot, async () => (await readyPresence()).snapshot());
   server.handle(stalledSnapshot, async () => {
@@ -163,6 +165,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(browserRpc.browserConfigure, async input => (await readyBrowser()).configure(input));
   server.handle(browserRpc.browserBind, async input => (await readyBrowser()).bind(input));
   server.handle(browserRpc.browserPairing, async () => (await readyBrowser()).pairing());
+  server.handle(browserRpc.browserUsageSnapshot, async () => usageStore.settings());
+  server.handle(browserRpc.browserUsageSaveApiKey, async ({ apiKey }) => usageStore.saveApiKey(apiKey));
+  server.handle(browserRpc.browserUsageRemoveApiKey, async () => usageStore.removeApiKey());
   server.handle(webRequestAudit, async () => webExecutor.audit());
 
   server.handle(rpc.snapshot, async () => (await ready()).snapshot());

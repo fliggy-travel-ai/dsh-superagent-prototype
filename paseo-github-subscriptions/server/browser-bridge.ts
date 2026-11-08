@@ -26,8 +26,10 @@ export class BrowserBridge {
   private resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>;
   private syncQuestions?: PresenceRuntime['browserSync'];
   private answerWeb?: AnswerWebRequest;
+  private usageRoute?: (body: unknown) => void | Promise<void>;
 
   constructor(directory: string, resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>, syncQuestions?: PresenceRuntime['browserSync'], answerWeb?: AnswerWebRequest) { this.directory = directory; this.resolveAgent = resolveAgent; this.syncQuestions = syncQuestions; this.answerWeb = answerWeb; }
+  setUsageRoute(route: (body: unknown) => void | Promise<void>) { this.usageRoute = route; }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.tail.then(fn); this.tail = next.catch(() => {}); return next;
@@ -59,18 +61,19 @@ export class BrowserBridge {
       if (!ORIGIN.test(origin)) { res.writeHead(403).end(); return; }
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-      if (req.method === 'OPTIONS' && req.url === '/sync') {
+      if (req.method === 'OPTIONS' && (req.url === '/sync' || req.url === '/usage')) {
         res.writeHead(204, { 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'authorization, content-type', 'Access-Control-Max-Age': '60' }).end(); return;
       }
       const provided = req.headers.authorization ?? '';
       const expected = `Bearer ${this.token}`;
       const a = Buffer.from(provided), b = Buffer.from(expected);
       if (a.length !== b.length || !timingSafeEqual(a, b)) { res.writeHead(401).end(); return; }
-      if (req.method !== 'POST' || req.url !== '/sync' || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) { res.writeHead(404).end(); return; }
+      if (req.method !== 'POST' || (req.url !== '/sync' && req.url !== '/usage') || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) { res.writeHead(404).end(); return; }
       let size = 0; const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_BODY) { res.writeHead(413).end(); req.destroy(); } else chunks.push(chunk); });
       req.on('end', () => { if (size > MAX_BODY) return; void this.serial(async () => {
         try {
+          if (req.url === '/usage') { await this.usageRoute?.(JSON.parse(Buffer.concat(chunks).toString('utf8'))); res.writeHead(204).end(); return; }
           const input = BrowserSyncSchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
           const ids = new Set<string>();
           for (const s of input.sessions) {

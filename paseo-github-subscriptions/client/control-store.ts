@@ -1,6 +1,6 @@
 import type { PluginClientContext } from '@getpaseo/plugin/client';
 import { automationSnapshot, automationPause, automationPolicy, type AutomationSnapshot, type SessionPolicy } from '../shared/automation.ts';
-import { browserSnapshot, browserConfigure, browserBind, browserPairing } from '../shared/browser-contracts.ts';
+import { browserSnapshot, browserConfigure, browserBind, browserPairing, browserUsageSnapshot, browserUsageSaveApiKey, browserUsageRemoveApiKey } from '../shared/browser-contracts.ts';
 import type { BrowserSnapshot, BrowserSettings, BrowserBindingInput } from '../shared/browser.ts';
 import { presenceSnapshot, presenceConfigure, presenceAnswer, presenceRead, type PresenceSnapshot, type PresenceSettings, type QuestionAnswer, type QuestionRead } from '../shared/presence.ts';
 import { bluetoothList, bluetoothSelect, type BluetoothTarget } from '../shared/bluetooth.ts';
@@ -105,6 +105,9 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     configureBrowser: (settings: BrowserSettings) => write(() => browsing(() => client.rpc(browserConfigure, settings))),
     bind: (input: BrowserBindingInput) => write(() => browsing(() => client.rpc(browserBind, input))),
     pairing: () => client.rpc(browserPairing, {}),
+    usageSettings: () => client.rpc(browserUsageSnapshot, {}),
+    saveAdsPowerApiKey: (apiKey: string) => write(() => client.rpc(browserUsageSaveApiKey, { apiKey })),
+    removeAdsPowerApiKey: () => write(() => client.rpc(browserUsageRemoveApiKey, {})),
     configurePresence: (settings: PresenceSettings) => write(() => asking(() => client.rpc(presenceConfigure, settings))),
     answerQuestion: (answer: QuestionAnswer) => write(() => asking(() => client.rpc(presenceAnswer, answer))),
     markQuestionRead: (question: QuestionRead) => write(() => asking(() => client.rpc(presenceRead, question))),

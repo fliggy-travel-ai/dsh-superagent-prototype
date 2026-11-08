@@ -577,9 +577,23 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
     assert.equal(candidates[0]!.id, browserQ.id);
     assert.equal(candidates[0]!.observed, true);
 
-    // Paused -> delegateBrowserAnswer returns false
+    // Paused -> automatic delegation returns false, manual delegation and manual answer still work
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, paused: true });
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), false);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'automatic'), false);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    setup.runtime.cancelBrowserDecision(browserQ.id);
+
+    // Paused -> manual answer via runtime.answer is queued and dispatched on next browserSync
+    const standaloneWeb = webpage('two');
+    await setup.runtime.browserSync('browser-two', [standaloneWeb], [], [{ sessionId: 'two', title: '独立网页', url: 'https://claude.ai/code/session_two' }], ['two']);
+    const standaloneBrowserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser' && item.sessionId === 'two')!;
+    await setup.runtime.answer({ id: standaloneBrowserQ.id, answers: answer });
+    const pausedManualDispatched = await setup.runtime.browserSync('browser-two', [standaloneWeb], [], [{ sessionId: 'two', title: '独立网页', url: 'https://claude.ai/code/session_two' }], ['two']);
+    assert.equal(pausedManualDispatched.length, 1);
+    assert.equal(pausedManualDispatched[0]!.id, standaloneWeb.id);
+    assert.equal(pausedManualDispatched[0]!.source, 'manual');
+    assert.deepEqual(pausedManualDispatched[0]!.answers, answer);
+
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, paused: false });
 
     // Mode change after delegation cancels queued decision

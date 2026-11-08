@@ -36,8 +36,13 @@
       try { node?.dispatchEvent?.(event); } catch {}
     }
   }
-  function findAllowOnceMenuItem() {
-    const items = [...(document.querySelectorAll?.('[role="menuitem"]') || [])].filter(
+  function findAllowOnceMenuItem(moreButton) {
+    const buttonId = (moreButton?.getAttribute?.('id') || '').trim();
+    if (!buttonId) return null;
+    const menus = [...(document.querySelectorAll?.('[role="menu"]') || [])].filter(
+      menu => (menu.getAttribute?.('aria-labelledby') || '').trim() === buttonId && visible(menu),
+    );
+    const items = menus.flatMap(menu => [...(menu.querySelectorAll?.('[role="menuitem"]') || [])]).filter(
       item => !item.disabled && item.getAttribute?.('aria-disabled') !== 'true' && visible(item),
     );
     return items.find(item => label(item) === 'Allow once') || null;
@@ -75,10 +80,10 @@
         return;
       }
       moreButton.click();
-      let item = findAllowOnceMenuItem();
+      let item = findAllowOnceMenuItem(moreButton);
       if (!item) {
         await new Promise(resolve => setTimeout(resolve, 50));
-        item = findAllowOnceMenuItem();
+        item = findAllowOnceMenuItem(moreButton);
       }
       if (!item || !enabled || currentPath !== location.pathname || !card.isConnected) {
         closeMenu(moreButton);
