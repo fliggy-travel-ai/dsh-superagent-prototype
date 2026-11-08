@@ -14,6 +14,25 @@ type Item = { seq: number; messageId: string; delivery: 'auto' | 'steer'; text: 
 type Daemon = { list(id: string): Promise<{ id: string } | null>; import(id: string, cwd: string): Promise<{ id: string }>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
 const caps = ['prompt.message', 'prompt.steer', 'session.persistence'] as const;
 
+function endpointSecrets(endpoint: Endpoint): string[] {
+  const url = new URL(endpoint.url);
+  const queryValues = [...url.searchParams.values()];
+  const encodedValues = url.search.slice(1).split('&').map(part => part.includes('=') ? part.slice(part.indexOf('=') + 1) : '');
+  const values = [endpoint.url, ...queryValues, ...encodedValues,
+    ...Object.values(endpoint.headers).flatMap(value => [value, value.replace(/^Bearer\s+/i, '')])];
+  return values.filter(Boolean).sort((a, b) => b.length - a.length);
+}
+
+function redact(text: string, secrets: string[]): string {
+  return secrets.reduce((value, secret) => value.split(secret).join('[redacted]'), text);
+}
+
+function redactError(text: string, secrets: string[]): string {
+  return redact(text, secrets)
+    .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+    .replace(/([?&][^=\s&#]+)=([^&#\s]+)/g, '$1=[redacted]');
+}
+
 export function importRequest(id: string, cwd: string) {
   return { provider: rpc.CLOUD_SESSION_PROVIDER_ID, sessionId: `plugin:${JSON.stringify({ version: 1, data: { cloudSessionId: id } })}`, cwd, labels: { [rpc.CLOUD_SESSION_LABEL]: id } };
 }
@@ -96,23 +115,26 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const ensure = async (input: { cloudSessionId: string; title: string; cwd: string }, paseo: import('@getpaseo/client').PaseoApi) => {
     const previous = locks.get(input.cloudSessionId) ?? Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
-      const daemon = await connect();
+      const knownSecrets = [...sessions.values()].flatMap(session => session.endpoint ? endpointSecrets(session.endpoint) : []);
+      let daemon: Daemon | undefined;
       try {
+        daemon = await connect();
         let agent = await daemon.list(input.cloudSessionId); const created = !agent;
         if (!agent) { sessions.delete(input.cloudSessionId); agent = await daemon.import(input.cloudSessionId, input.cwd); await daemon.title(agent.id, input.title); }
         if (!sessions.get(input.cloudSessionId)?.endpoint) await paseo.agents.ref(agent.id).reload();
         if (!sessions.get(input.cloudSessionId)?.endpoint) throw new Error('not_opened');
         return { agentId: agent.id, serverId: daemon.serverId(), epoch, created };
       } catch (error) {
-        let message = error instanceof Error ? error.message : String(error);
-        for (const session of sessions.values()) {
-          const endpoint = session.endpoint;
-          if (!endpoint) continue;
-          for (const secret of [endpoint.url, ...Object.values(endpoint.headers).flatMap(value => [value, value.replace(/^Bearer\s+/i, '')])].filter(Boolean)) message = message.split(secret).join('[redacted]');
+        const message = error instanceof Error ? error.message : String(error);
+        const secrets = [...knownSecrets, ...[...sessions.values()].flatMap(session => session.endpoint ? endpointSecrets(session.endpoint) : [])];
+        const safe = redactError(message, secrets);
+        if (error instanceof Error && safe === message) throw error;
+        throw new Error(safe);
+      } finally {
+        if (daemon) {
+          try { await daemon.close(); } catch { throw new Error('本机 daemon 连接关闭失败'); }
         }
-        if (error instanceof Error && message === error.message) throw error;
-        throw new Error(message);
-      } finally { await daemon.close(); }
+      }
     });
     locks.set(input.cloudSessionId, operation); try { return await operation; } finally { if (locks.get(input.cloudSessionId) === operation) locks.delete(input.cloudSessionId); }
   };
@@ -143,9 +165,9 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       const response = await fetch(endpoint.url, { method: 'POST', redirect: 'error', headers: { ...endpoint.headers, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...(endpoint.session ? { 'Mcp-Session-Id': endpoint.session } : {}) }, body: JSON.stringify(message), signal: controller.signal });
       endpoint.session = response.headers.get('mcp-session-id') ?? endpoint.session;
       const body = await response.text(); const parts = (response.headers.get('content-type') ?? '').includes('text/event-stream') ? body.split(/\r?\n\r?\n/).map(block => block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).replace(/^ /, '')).join('\n')).filter(Boolean) : body.trim() ? [body] : [];
-      const secrets = [endpoint.url, ...Object.values(endpoint.headers).flatMap(value => [value, value.replace(/^Bearer\s+/i, '')])].filter(Boolean);
+      const secrets = endpointSecrets(endpoint);
       const clean = (value: unknown): unknown => {
-        if (typeof value === 'string') return secrets.reduce((text, secret) => text.split(secret).join('[redacted]'), value);
+        if (typeof value === 'string') return redact(value, secrets);
         if (Array.isArray(value)) return value.map(clean);
         if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [clean(key) as string, clean(entry)]));
         return value;
@@ -156,8 +178,8 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   return { provider, ensure, push, poll, ack, mcp, epoch, dispose() { sessions.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
 }
 
-export function registerCloudSession(server: PluginServerContext) {
-  const cloud = createCloudSession();
+export function registerCloudSession(server: PluginServerContext, create = createCloudSession) {
+  const cloud = create();
   server.registerProvider(cloud.provider);
   server.handle(rpc.ensureSession, (input, context) => cloud.ensure(input, context.paseo));
   server.handle(rpc.pushTimeline, input => cloud.push(input));

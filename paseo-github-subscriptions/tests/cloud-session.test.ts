@@ -3,15 +3,16 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { PaseoApi } from '@getpaseo/client';
+import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { ProviderEventSchema, type ProviderEvent, type ProviderInput } from '@getpaseo/plugin/server/provider';
-import { createCloudSession, importRequest } from '../server/cloud-session/index.ts';
+import { createCloudSession, importRequest, registerCloudSession } from '../server/cloud-session/index.ts';
 
 const cloudId = 'cse_abcdefgh1234';
 const token = 'fake-secret-token-1707';
 const input = (value: unknown) => value as ProviderInput;
 async function fixture(url: string) {
   const agents: { id: string; cloud: string; archived: boolean; title?: string }[] = [];
-  let imports = 0; let fail = false; let session = 0;
+  let imports = 0; let failure: string | undefined; let session = 0;
   let cloud: ReturnType<typeof createCloudSession>;
   let connection: Awaited<ReturnType<typeof cloud.provider.connect>>;
   const events: ProviderEvent[] = [];
@@ -20,13 +21,13 @@ async function fixture(url: string) {
   };
   const daemon = async () => ({
     list: async (id: string) => agents.find(a => a.cloud === id && !a.archived) ?? null,
-    import: async (id: string) => { if (fail) { fail = false; throw new Error('original import error'); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false }; agents.push(a); await open(); return a; },
+    import: async (id: string) => { if (failure) { const message = failure; failure = undefined; throw new Error(message); } imports++; const a = { id: `a${imports}`, cloud: id, archived: false }; agents.push(a); await open(); return a; },
     title: async (id: string, title: string) => { agents.find(a => a.id === id)!.title = title; }, serverId: () => 'server', close: async () => {},
   });
   const paseo = { agents: { ref: () => ({ reload: async () => { await open(); } }) } } as unknown as PaseoApi;
   const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
   await restart();
-  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, get imports() { return imports; }, failNext() { fail = true; }, restart, open, paseo, current: () => `s${session}` };
+  return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, get imports() { return imports; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
 }
 test('import uses the CLI-compatible persistence handle', () => {
   const request = importRequest(cloudId, '/tmp');
@@ -88,4 +89,51 @@ test('MCP forwards only to the session endpoint, handles JSON and SSE, and hides
     assert.ok(!JSON.stringify([first, second, f.events]).includes(token));
     f.cloud.dispose();
   } finally { server.close(); }
+});
+
+test('RPC error paths conceal endpoint credentials and query values', async () => {
+  const querySecret = 'fake-query-secret-1707';
+  let behavior: 'status' | 'invalid' | 'timeout' = 'status';
+  const server = createServer((_req, res) => {
+    if (behavior === 'timeout') return;
+    if (behavior === 'invalid') { res.setHeader('content-type', 'application/json'); res.end(`invalid ${token} ${querySecret}`); return; }
+    res.statusCode = 503; res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ error: { message: `unavailable ${token} ${querySecret}` } }));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const url = `http://127.0.0.1:${address.port}/mcp?callerAgentId=${querySecret}`;
+  const f = await fixture(url);
+  type Handler = (data: unknown, context: unknown) => unknown;
+  const handlers = new Map<string, Handler>();
+  const host = {
+    registerProvider() {},
+    handle(contract: { name: string }, handler: Handler) { handlers.set(contract.name, handler); },
+  } as unknown as PluginServerContext;
+  const dispose = registerCloudSession(host, () => f.cloud);
+  const invoke = async (name: string, data: unknown) => handlers.get(name)!(data, { paseo: f.paseo });
+  const assertSafe = (value: unknown) => {
+    const text = value instanceof Error ? value.message : JSON.stringify(value);
+    assert.ok(!text.includes(token)); assert.ok(!text.includes(querySecret));
+  };
+  try {
+    await f.cloud.ensure(ensureInput, f.paseo);
+    const args = { cloudSessionId: cloudId, message: { jsonrpc: '2.0', method: 'tools/list' }, timeoutMs: 1000 };
+    const status = await invoke('cloud-session.mcp', args) as { status: number; messages: unknown[] };
+    assert.equal(status.status, 503); assert.equal(status.messages.length, 1); assertSafe(status);
+    behavior = 'invalid';
+    await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request failed'; });
+    behavior = 'timeout';
+    await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request failed'; });
+    f.agents[0]!.archived = true;
+    f.failNext(`import failed ${token} ${querySecret} ${url}`);
+    await assert.rejects(invoke('cloud-session.ensure', ensureInput), error => { assertSafe(error); return error instanceof Error && error.message.includes('import failed'); });
+    await f.restart();
+    registerCloudSession(host, () => f.cloud);
+    f.failNext(`import failed Bearer ${token} ${url}`);
+    await assert.rejects(invoke('cloud-session.ensure', ensureInput), error => { assertSafe(error); return error instanceof Error && error.message.includes('import failed'); });
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    await f.open();
+    await assert.rejects(invoke('cloud-session.mcp', args), error => { assertSafe(error); return error instanceof Error && error.message === 'Paseo MCP request failed'; });
+  } finally { server.closeAllConnections(); server.close(); dispose(); f.cloud.dispose(); }
 });
