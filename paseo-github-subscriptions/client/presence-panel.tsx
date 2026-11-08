@@ -66,11 +66,6 @@ export function PresencePanel({ snapshot, busy, run }: { snapshot: PresenceSnaps
       <View style={s.wrap}>{hosts.map(host => <Btn key={host.id ?? 'local'} label={`${host.name}${host.online ? '' : '（离线）'}`}
         primary={settings.sourceHostId === host.id || (host.id === null && settings.sourceHostId === snapshot.hosts[0]?.id)} disabled={busy} onPress={() => { if (settings.sourceHostId !== host.id) save({ sourceHostId: host.id }); }} />)}</View>
       <Text style={s.muted}>在所选主机上检测蓝牙设备并播放语音提醒。{missing ? `已选主机（${settings.sourceHostId}）当前不在主机列表中。` : ''}</Text>
-      <Text style={s.muted}>提示音与晓晓中文语音；合成或播放失败时回退到系统语音。成功提醒只播放一次，提醒间隔至少三分钟。</Text>
-      {(snapshot.speech ?? []).slice(-5).reverse().map(event => <View key={`${event.id}:${event.at}`} style={{ gap: 3 }}>
-        <Text style={s.text}>{new Date(event.at).toLocaleTimeString()} · {event.played ? event.engine === 'system' ? '已播放系统语音（回退）' : '已完成语音播放' : event.cancelled ? '语音已取消' : '尚未确认播放'}</Text>
-        <Text style={s.muted}>{event.detail}{event.retryAt ? ` · ${new Date(event.retryAt).toLocaleTimeString()} 后重试` : ''}</Text>
-      </View>)}
     </Card>
     <BluetoothPanel key={settings.sourceHostId || 'local'} hostId={settings.sourceHostId} busy={busy} />
   </View>;
