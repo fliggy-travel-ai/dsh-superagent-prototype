@@ -279,29 +279,78 @@ chrome.tabGroups.onRemoved.addListener(groupId => {
 });
 chrome.tabs.onUpdated.addListener((_id, info) => { if (info.url || info.title || info.status === 'complete') schedule(); });
 chrome.tabs.onRemoved.addListener(schedule);
+const APPROVAL_RETRY_INTERVAL_MS = 5000;
+const APPROVAL_MAX_RETRY_DURATION_MS = 3 * 60 * 1000;
+const APPROVAL_MAX_CLICKS_PER_CARD = 36;
+const APPROVAL_DISMISSED_COOLDOWN_MS = 10000;
+const ALLOW_ONCE_RE = /^(?:allow once|allow just this once|yes, allow once|允许一次|只允许一次)$/i;
 let approvalWrites = Promise.resolve();
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'approval-reserve' || message?.type === 'approval-result') {
     const session = sessionId(sender.tab?.url);
     if (!session || sender.tab?.id == null || !/^[a-f0-9]{64}$/.test(message.digest || '')) return;
+    const cfg = globalThis.__paseoApprovalConfig || {};
+    const retryIntervalMs = cfg.retryIntervalMs ?? APPROVAL_RETRY_INTERVAL_MS;
+    const maxRetryDurationMs = cfg.maxRetryDurationMs ?? APPROVAL_MAX_RETRY_DURATION_MS;
+    const maxClicksPerCard = cfg.maxClicksPerCard ?? APPROVAL_MAX_CLICKS_PER_CARD;
+    const dismissedCooldownMs = cfg.dismissedCooldownMs ?? APPROVAL_DISMISSED_COOLDOWN_MS;
+    const cardId = typeof message.cardId === 'string' && message.cardId.trim().length > 0 && message.cardId.length <= 128
+      ? message.cardId.trim()
+      : undefined;
     const operation = approvalWrites.then(async () => {
       const stored = await chrome.storage.local.get(['approvalAudit', 'approvalEnabled']);
       const audit = Array.isArray(stored.approvalAudit) ? stored.approvalAudit : [];
-      const previous = audit.findLast(entry => entry.sessionId === session && entry.digest === message.digest);
-      let reservationId = previous?.reservationId;
       if (message.type === 'approval-reserve') {
-        const repeatBlocked = previous && (!['dismissed', 'skipped'].includes(previous.status) || !Number.isFinite(Date.parse(previous.observedAt)) || Date.now() - Date.parse(previous.observedAt) < 10000);
-        if (stored.approvalEnabled === false || repeatBlocked || typeof message.button !== 'string' || message.button.length > 100) return { allowed: false };
-        reservationId = crypto.randomUUID();
-        audit.push({ sessionId: session, tabId: sender.tab.id, digest: message.digest, reservationId, button: message.button, at: new Date().toISOString(), status: 'reserved' });
+        if (stored.approvalEnabled === false || typeof message.button !== 'string' || message.button.length > 100) return { allowed: false };
+        const now = Date.now();
+        const cardEntries = audit.filter(entry =>
+          entry.sessionId === session && (cardId ? entry.cardId === cardId : !entry.cardId && entry.digest === message.digest),
+        );
+        const previous = cardEntries.at(-1);
+        if (previous) {
+          if (previous.status === 'reserved') return { allowed: false };
+          const clickCount = cardEntries.filter(entry => entry.status !== 'skipped').length;
+          if (clickCount >= maxClicksPerCard) return { allowed: false };
+          const observedMs = Date.parse(previous.observedAt);
+          if (previous.status === 'dismissed') {
+            if (cardId || !Number.isFinite(observedMs) || now - observedMs < dismissedCooldownMs) return { allowed: false };
+          } else if (previous.status === 'skipped') {
+            if (!Number.isFinite(observedMs) || now - observedMs < dismissedCooldownMs) return { allowed: false };
+          } else if (previous.status === 'still-visible') {
+            if (!ALLOW_ONCE_RE.test(message.button.trim())) return { allowed: false };
+            if (!Number.isFinite(observedMs) || now - observedMs < retryIntervalMs) return { allowed: false };
+            const firstAttempt = cardEntries.find(entry => entry.status !== 'skipped') || cardEntries[0];
+            const firstMs = Date.parse(firstAttempt.at || firstAttempt.observedAt);
+            if (!Number.isFinite(firstMs) || now - firstMs > maxRetryDurationMs) return { allowed: false };
+          } else {
+            return { allowed: false };
+          }
+        }
+        const reservationId = crypto.randomUUID();
+        audit.push({
+          sessionId: session,
+          tabId: sender.tab.id,
+          digest: message.digest,
+          ...(cardId ? { cardId } : {}),
+          reservationId,
+          button: message.button,
+          at: new Date(now).toISOString(),
+          status: 'reserved',
+        });
+        await chrome.storage.local.set({ approvalAudit: audit.slice(-300) });
+        schedule();
+        return { allowed: true, reservationId };
       } else {
-        if (!previous || previous.tabId !== sender.tab.id || previous.reservationId !== message.reservationId || previous.status !== 'reserved' || !['dismissed', 'still-visible', 'skipped'].includes(message.status)) return { allowed: false };
+        const previous = audit.findLast(entry =>
+          entry.sessionId === session && entry.reservationId === message.reservationId && entry.digest === message.digest,
+        );
+        if (!previous || previous.tabId !== sender.tab.id || previous.status !== 'reserved' || !['dismissed', 'still-visible', 'skipped'].includes(message.status)) return { allowed: false };
         previous.status = message.status;
         previous.observedAt = new Date().toISOString();
+        await chrome.storage.local.set({ approvalAudit: audit.slice(-300) });
+        schedule();
+        return { allowed: true, reservationId: previous.reservationId };
       }
-      await chrome.storage.local.set({ approvalAudit: audit.slice(-300) });
-      schedule();
-      return { allowed: true, reservationId };
     });
     approvalWrites = operation.catch(() => {});
     void operation.then(respond, () => respond({ allowed: false }));
