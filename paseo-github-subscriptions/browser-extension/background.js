@@ -1,3 +1,4 @@
+if (typeof importScripts === 'function') importScripts('usage-reader.js');
 const sessionId = value => {
   try {
     const url = new URL(value);

@@ -7,11 +7,14 @@
 
 ## 1. 用户决定
 
-1. 只读页面上显示的内容，**不构造请求**。有 claude.ai 会话页面时，读会话下方的额度。没有会话页面时，扩展打开用量页面读取，读完关闭自己打开的页面。
-2. 读不到时不清空数字。额度区域写明“未打开浏览器，无法检测剩余额度，只展示上一次同步的额度”，并显示这份额度的同步时间。
-3. 每 10 分钟读一次。不加用户设置。环境长时间未连接时保留 3 天。
+1. 只读用量页面上显示的内容，**不构造请求**，不读会话页面下方的圆环（#1727 评论 6720771386：“那就统一打开一个用量页”）。
+2. 每个浏览器环境保持一个用量页面标签页：没有就在后台打开（`/settings/usage`，会跳转到 `/new#settings/usage`）；已有就复用；打开后保留，不反复打开和关闭。扩展记住自己维护的这个标签页编号。
+3. 每 10 分钟读取一次 5 小时和每周两个窗口；读取前只刷新扩展维护的这个用量页面标签页。
+4. 用户把这个标签页切走、改地址或关闭时，不强行改回，下一轮再按规则处理（地址不再是用量页面时，视为不再由扩展维护，另开一个）。
+5. 读不到时不清空数字。额度区域写明“未打开浏览器，无法检测剩余额度，只展示上一次同步的额度”，并显示这份额度的同步时间。
+6. 不加用户设置。环境长时间未连接时保留 3 天。
 
-硬性限制：扩展不点击，不刷新业务会话页面，不切换账号，不改设置。
+硬性限制：扩展不点击任何页面，不刷新业务会话页面或其他非维护页面，不切换账号，不改设置。
 
 ## 2. 真实页面取证
 
@@ -28,6 +31,7 @@
 - 页面上另有“Context 75%”和“75% used”，它们是上下文占用，不是额度。选择器不能匹配这些文字。
 - 文字里的时间是页面时区的本地时间。
 - 闲置会话页面的额度数字可能过时：11 分钟被动监听里，这个页面没有发出任何额度相关的 `/api` 请求。同期圆环文字没有变化，用量页面也还是 59%，所以这次没有观察到偏差，但也不能证明圆环会自动更新。监听只覆盖 HTTP 请求，不包括 WebSocket 推送。
+- **按用户最新决定（#1727 评论 6720771386），扩展不再读取会话页面下方的圆环，统一读取第 2.2 节的用量页面。** `session-usage-ring.html` 保留在测试夹具中，用于验证扩展不会向业务会话页面注入读取或把圆环当作数据源。
 
 ### 2.2 用量页面
 
@@ -55,9 +59,9 @@
 ## 3. 总体设计
 
 ```
-会话页面的圆环文字 / 后台用量页面的显示内容
+后台用量页面的显示内容（每个浏览器环境维护一个标签页，读取前只刷新该标签页）
         ↓ chrome.scripting.executeScript（只读 DOM）
-browser-extension/usage-reader.js（到期判断、解析、打开和关闭用量页面）
+browser-extension/usage-reader.js（到期判断、维护和刷新用量标签页、解析）
         ↓ 每分钟 POST http://127.0.0.1:<端口>/usage（复用配对令牌）
 server/browser-usage.ts（持久化、映射 UsageReport、registerUsageSource）
         ↓
@@ -101,7 +105,7 @@ Paseo 面板额度区域（每个浏览器环境一个账号）
 
 ## 5. 扩展：`usage-reader.js`
 
-运行在后台 Service Worker 中，用 `importScripts` 加载。文件内用 `globalThis.paseoUsage = { parseRing, parseReset, parseDialog, tick }` 暴露函数供测试。`typeof chrome === 'undefined'` 时不注册监听。文件自己注册闹钟和监听：
+运行在后台 Service Worker 中，用 `importScripts` 加载。文件内用 `globalThis.paseoUsage = { readDialog, parseReset, parseDialog, isUsageUrl, tick }` 暴露函数供测试。`typeof chrome === 'undefined'` 时不注册监听。文件自己注册闹钟和监听：
 
 ```js
 chrome.alarms.create('usage', { periodInMinutes: 1 });
@@ -113,12 +117,9 @@ void tick();
 
 ### 5.1 注入页面的函数（只读）
 
-用 `chrome.scripting.executeScript({ target: { tabId }, func })` 注入，函数内部不解析：
+用 `chrome.scripting.executeScript({ target: { tabId }, func })` 注入到扩展维护的用量页面标签页，函数内部不解析：
 
 ```js
-function readRing() {
-  return { label: document.querySelector('button[aria-label^="Usage:"]')?.getAttribute('aria-label') ?? null, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
-}
 function readDialog() {
   const root = document.querySelector('[data-testid="usage-page-pace"]');
   const rows = [...(root?.querySelectorAll('[role="meter"]') ?? [])].map(meter => {
@@ -132,9 +133,9 @@ function readDialog() {
 
 不要在 `Resets` 前加 `\b`：`textContent` 把标签和重置文字连在一起（`Current sessionResets at 6:50 AM`）。按产品分类的行向上查找时可能碰到相邻文字，`parseDialog` 只使用 `Current session` 和 `This week` 两行，所以不受影响。
 
-### 5.2 解析函数（纯函数，不碰 DOM）
+### 5.2 解析与校验函数（纯函数，不碰 DOM）
 
-- `parseRing(label)`：匹配 `^Usage:\s*(\d{1,3})% of 5-hour limit(?:,\s*(Resets .+))?$`，比例 0–100。不匹配返回 `null`。
+- `isUsageUrl(url)`：判断地址是否仍为 claude.ai 用量页面（`https://claude.ai/settings/usage` 或 `https://claude.ai/new#settings/usage`）。
 - `parseReset(text, now, tzOffset)`：`tzOffset` 取页面值，在页面本地时间上计算，返回 ISO 时间或 `null`。
   - `Resets at H:MM AM|PM`：当天该时刻；不晚于现在就加 1 天。
   - `Resets <星期全名> H:MM AM|PM`：下一个该星期的该时刻；不晚于现在就加 7 天。
@@ -145,23 +146,21 @@ function readDialog() {
 
 | 来源 | `usedPct` | `resetsAt` |
 |---|---|---|
-| 圆环 / `Current session` | 59 | `2026-11-08T11:50:00.000Z` |
+| `Current session` | 59 | `2026-11-08T11:50:00.000Z` |
 | `This week` | 46 | `2026-11-14T00:00:00.000Z` |
 
 ### 5.3 读取规则
 
-状态保存在 `chrome.storage.local` 的独立键 `usageState`：`nextReadAt`、`weeklyNextAt`、`failures`、`fiveHour`、`weekly`、`status`、`reason`、`observedAt`、`tab`。不碰其他键。
+状态保存在 `chrome.storage.local` 的独立键 `usageState`：`nextReadAt`、`failures`、`fiveHour`、`weekly`、`status`、`reason`、`observedAt`、`tab`。不碰其他键。
 
 `tick()` 的步骤：
 
 1. 读取 `pairing`、`instanceId`、`instanceName`。未配对或配对格式错误时结束，不读取，不打开页面，不发送。
-2. 清理遗留标签页（第 5.4 节）。
-3. `now >= nextReadAt` 时执行一次读取：
-   1. 查询 `https://claude.ai/code/session_*` 的标签页，只保留 `status === 'complete'`、`discarded` 为假、路径是 `/code/session_<id>` 的标签页，每个注入 `readRing`。
-   2. 取解析成功且重置时间在 5 小时 5 分钟之内的结果（超出说明圆环已过时）。有多个时取**比例最大**的值，因为闲置页面的值只会偏低。
-   3. 需要打开用量页面的条件：第 2 步没有有效结果；或 `now >= weeklyNextAt`（见第 8 节第 1 个问题，默认每 60 分钟）。
-   4. 读到用量页面时，两个窗口都用它的值，因为它比圆环新。
-4. 不管是否到期，都用当前状态 POST `/usage`（第 6.1 节）。网络失败时忽略，下一分钟重试。
+2. `now >= nextReadAt` 时执行一次用量页面读取（第 5.4 节）：
+   1. 检查扩展维护的用量页面标签页：已有且仍在用量页面地址时刷新该标签页；没有、已关闭或地址已不是用量页面时，在后台新建一个用量页面标签页。
+   2. 等待并读取 `Current session`（5 小时窗口）和 `This week`（每周窗口）两个窗口。
+   3. 读取成功时更新两个窗口的值，状态设为 `ok`；未登录或失败时保留已有的窗口旧值，更新 `status`、`reason` 和下次读取时间。
+3. 不管是否到期，都用当前状态 POST `/usage`（第 6.1 节）。网络失败时忽略，下一分钟重试。
 
 间隔：
 
@@ -171,15 +170,17 @@ function readDialog() {
 | 失败 | 按连续失败次数 20、40、60 分钟，最长 60 分钟 |
 | 未登录 | 30 分钟后 |
 
-每周窗口读取失败但圆环成功时：状态仍为 `ok`，`weeklyNextAt` 按上表退避，每周窗口保留旧值。
+### 5.4 维护、刷新与读取用量页面标签页
 
-### 5.4 打开和关闭用量页面
+复用或打开：
 
-打开：
-
-1. `chrome.windows.getAll({ windowTypes: ['normal'] })` 为空时不打开，记 `failed`、`no_window`。
-2. `usageState.tab` 已有未关闭的记录时不重复打开。
-3. `chrome.tabs.create({ url: 'https://claude.ai/settings/usage', active: false })`，**先把 `{ id, openedAt }` 写入 `usageState.tab`，再开始等待**。
+1. 如果 `usageState.tab?.id` 有记录，调用 `chrome.tabs.get(usageState.tab.id)` 检查该标签页：
+   - 标签页存在且 `isUsageUrl(tab.url)` 为真（`/settings/usage` 或 `/new#settings/usage`）：复用该标签页，只对它调用 `chrome.tabs.reload(tab.id)` 刷新。
+   - 标签页已不存在，或 `isUsageUrl(tab.url)` 为假（用户已把该标签页切走、改地址或关闭了弹窗）：**不刷新、不改回、不关闭该标签页**，视为不再由扩展维护，清除 `usageState.tab` 记录。
+2. 没有可复用的维护标签页时：
+   - `chrome.windows.getAll({ windowTypes: ['normal'] })` 为空时不打开，记 `failed`、`no_window`。
+   - 调用 `chrome.tabs.create({ url: 'https://claude.ai/settings/usage', active: false })` 在后台打开用量页面，**先把 `{ id, openedAt }` 写入 `usageState.tab`，再开始等待**。
+3. 打开后保留该标签页，不调用 `chrome.tabs.remove` 关闭，供下一轮复用。
 
 等待：每 1 秒注入一次 `readDialog`，最长 45 秒（扩展 API 调用同时让 Service Worker 保持运行）。
 
@@ -189,16 +190,9 @@ function readDialog() {
 | `path` 以 `/login` 开头 | `signed_out` |
 | 标题含 `Just a moment` | `failed`、`challenge` |
 | 45 秒内没有数据 | `failed`、`timeout` 或 `parse`（有 `rows` 但解析失败时为 `parse`） |
-| 标签页已被关闭（注入报错） | `failed`、`tab_closed` |
+| 等待期间标签页被关闭，或被用户改到非用量、非登录地址 | 清除 `usageState.tab`，不强行改回，记 `failed`、`tab_closed` |
 
 表中“登录页”和“安全验证页”两行没有实测，因为取证时不能退出登录。实现时用假数据测试，并在真机验收时留意。
-
-关闭规则（`finally` 中执行，Service Worker 重启后在 `tick()` 第 2 步对 `openedAt` 超过 2 分钟的记录再执行一次）：
-
-1. 只处理 `usageState.tab.id` 这一个标签页。
-2. `chrome.tabs.get` 取得当前信息。标签页已不存在时清除记录。
-3. URL 路径不是 `/new`（带 `#settings/usage`）、`/settings/usage`、`/login` 开头时，或 `tab.active` 为真时，**不关闭**，只清除记录。这表示用户已经在使用这个标签页。
-4. 其他情况调用 `chrome.tabs.remove(id)`，然后清除记录。
 
 ## 6. 插件
 
@@ -277,16 +271,18 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
 
 ### 7.1 `tests/browser-usage-reader.test.ts`（`node:vm` 加载 `usage-reader.js`，假 `chrome`）
 
-1. `parseRing`：样本 `session-usage-ring.html` 里的 `aria-label` 得到 59 和第 5.2 节的时间；不含 5-hour、超过 100、缺重置文字的情况。
-2. `parseReset`：当天、跨天、跨周；未知格式返回 `null`；用 `tzOffset` 300 和 0 各测一次。
-3. `parseDialog`：用 `usage-dialog.html` 提取的值得到两个窗口；只有一行、`valueText` 不含 `used` 时返回 `null`；不把 `Claude Code` 等分类行当成窗口。
-4. 选择：多个标签页取最大比例；跳过 `discarded`、未加载完成的标签页；重置时间超过 5 小时 5 分钟时视为无效。
-5. 打开条件：有效圆环且周窗口未到期时，不调用 `tabs.create`；无会话页面时调用一次，且 `active: false`；周窗口到期时调用一次；已有未关闭记录时不重复打开。
-6. 关闭规则：读完后 `tabs.remove` 被调用；用户把标签页切到前台或已跳转时不关闭；Service Worker 重启后清理遗留记录；不关闭不是自己打开的标签页。
-7. 到期和退避：10 分钟；失败 20、40、60 分钟；未登录 30 分钟。
-8. 未配对时不注入、不打开、不发送。
-9. POST 的地址是把配对地址的 `/sync` 换成 `/usage`，带令牌，每分钟一次，不到期时也发送。
-10. 全文检查：`usage-reader.js` 里调用的 `fetch` 只指向配对地址；不含 `.click(`、`dispatchEvent`、`location.`赋值。
+1. `parseReset`：当天、跨天、跨周；未知格式返回 `null`；用 `tzOffset` 300 和 0 各测一次。
+2. `readDialog` 与 `parseDialog`：用真实样本 `usage-dialog.html` 提取并解析出两个窗口（59% / `2026-11-08T11:50:00.000Z`、46% / `2026-11-14T00:00:00.000Z`）；不读会话圆环样本 `session-usage-ring.html`；只有一行、`valueText` 不含 `used`、比例超出 0–100 时返回 `null`；不把 `Claude Code` 等分类行当成窗口。
+3. 维护与复用用量标签页：首次读取没有维护标签页时调用 `tabs.create({ url: 'https://claude.ai/settings/usage', active: false })`，先把标签页编号写入存储再等待，读完后保留标签页不调用 `tabs.remove`；下一轮 10 分钟到期且标签页仍在 `/new#settings/usage`（或 `/settings/usage`）时，复用该标签页并只对它调用 `tabs.reload`，不新建标签页，不碰业务会话标签页。
+4. 用户切走、改地址或关闭标签页：
+   - 用户把维护的标签页改地址（如变为 `/new`、`/code/session_abc`、`https://example.com`）时，下一轮不刷新、不强行改回、不关闭原标签页，视为不再由扩展维护，另开一个后台用量页面并记住新标签页编号。
+   - 用户关闭维护的标签页后，下一轮另开一个后台用量页面。
+   - 等待读取期间标签页被关闭或被用户改到非用量、非登录地址时，清除旧标签页编号，记 `failed`（`tab_closed`），保留上次窗口数值。
+5. 异常情况：没有普通浏览器窗口时记 `failed`（`no_window`）且不创建标签页；登录页 `/login` 记 `signed_out`；标题含 `Just a moment` 记 `failed`（`challenge`）；有 `rows` 但无法解析记 `failed`（`parse`）；超时无数据记 `failed`（`timeout`）。
+6. 到期和退避：10 分钟；失败按连续次数 20、40、60 分钟（最长 60 分钟）；未登录 30 分钟。
+7. 未配对或配对格式无效时不注入、不打开、不刷新、不发送。
+8. POST 的地址是把配对地址的 `/sync` 换成 `/usage`，带令牌，每分钟一次，不到期时也发送。
+9. 全文检查：`usage-reader.js` 里调用的 `fetch` 只指向配对地址；不含 `.click(`、`dispatchEvent`、`location.` 赋值、`tabs.remove`。
 
 ### 7.2 `tests/browser-usage.test.ts`
 
@@ -300,27 +296,26 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
 
 通过标准：`npm run check` 全部通过。
 
-## 8. 仍需用户决定的问题
+## 8. 已决定的问题与已知限制
 
-1. **有会话页面时，每周窗口和闲置时的准确性怎样处理？** 会话下方的圆环只显示 5 小时窗口，每周窗口只有用量页面才有；另外闲置的会话页面可能不更新数字。
-   - 推荐：有会话页面时，每 10 分钟读圆环；另外每 60 分钟在后台打开一次用量页面（约 2–15 秒后关闭），读每周窗口并校准 5 小时窗口。
-   - 严格按原决定：只有没有会话页面时才打开用量页面。缺点是会话页面一直开着时，每周窗口一直没有数据。
-   - 只读用量页面：每 10 分钟打开一次。数字最准，但标签栏每 10 分钟闪现一次，不再读取圆环。
-   - 方案按推荐写。改变时只改常量 `weeklyNextAt` 的间隔或打开条件。
+1. **统一读取用量页面（#1727 评论 6720771386，用户决定“那就统一打开一个用量页”）**：
+   - 不读会话页面下方的圆环，只读用量页面。
+   - 每个浏览器环境保持一个用量页面标签页：没有就在后台打开一个，已有就复用，打开后保留，不再反复打开和关闭。
+   - 每 10 分钟读取一次 5 小时和每周两个窗口，读取前只刷新扩展维护的这个用量页面标签页，不刷新、不点击其他页面。
+   - 用户把这个标签页切走、改地址或关闭时，扩展不强行改回，下一轮再按规则处理（地址不再是用量页面时，视为不再由扩展维护，另开一个）。
 
 已知限制（不需要决定，除非有反馈）：
 
 - 只验证了英文界面。其他语言显示“页面格式无法识别”，并保留上一次的数字。如果有中文界面的环境要支持，需要该环境的页面样本。
 - 插件分不清“取消配对”和“浏览器关闭”，两者都显示“未打开浏览器”。
-- 闲置页面的圆环是否会自动更新没有确定。方案通过取最大值和定期读用量页面控制偏差。
 
 ## 9. 真机验收（Mac Mini，部署由主会话协调）
 
 1. 部署插件并重新加载，确认分组和问答正常。
 2. 在一个 SunBrowser 环境更新扩展，确认环境名称。
-3. 保持一个会话页面，等待最多 11 分钟。Paseo 面板出现该环境，5 小时窗口的值和圆环一致。
-4. 等每周读取触发（或用缩短常量的测试版），确认后台标签页出现后自动关闭，两个窗口和用量页面一致，重置时间相符。
-5. 关闭全部 claude.ai 标签页，等到下次读取，确认扩展打开用量页面并关闭它。
+3. 等待首次读取完成：确认扩展在后台打开一个 `/settings/usage`（跳转到 `/new#settings/usage`）标签页并保留不关闭；Paseo 面板出现该环境，5 小时窗口和每周窗口的值、重置时间与用量页面一致。
+4. 等待下一轮 10 分钟读取触发（或用缩短常量的测试版）：确认扩展复用并只刷新该用量页面标签页，不新建第二个标签页，不刷新业务会话标签页。
+5. 把该用量标签页改到其他地址（或关闭弹窗、关闭标签页），等到下一轮读取，确认扩展不强行改回原标签页，而是在后台另开一个新的用量标签页。
 6. 关闭浏览器，等待 8 分钟以内（2.5 分钟判定离线 + 最多 5 分钟 Paseo 缓存）。面板显示“未打开浏览器，无法检测剩余额度，只展示上一次同步的额度”、上次的数字、相对时间。**核对状态行在面板里显示完整，没有被截断或删除。**
 7. 重新加载插件后，第 6 步的显示还在。
 8. 确认浏览器的 Network 面板没有扩展发出的 claude.ai 请求，业务会话页面没有刷新，没有点击痕迹。

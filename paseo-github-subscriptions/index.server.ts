@@ -21,6 +21,7 @@ import { listBluetoothTargets, saveBluetoothTarget } from './server/bluetooth-ta
 import { stalledSnapshot } from './shared/stalled.ts';
 import { StalledRuntime } from './server/stalled.ts';
 import { stalledPort } from './server/stalled-port.ts';
+import { registerBrowserUsage } from './server/browser-usage.ts';
 
 export default function contribute(server: PluginServerContext) {
   // Replace this handoff with the BrowserBridge instance method after #1704 delivers it.
@@ -111,6 +112,7 @@ export default function contribute(server: PluginServerContext) {
   void readyAutomation().catch(() => {});
   void readyBrowser().catch(() => {});
   void readyPresence().catch(() => {});
+  registerBrowserUsage(server, readyBrowser, directory);
 
   server.handle(presenceRpc.presenceSnapshot, async () => (await readyPresence()).snapshot());
   server.handle(stalledSnapshot, async () => {
