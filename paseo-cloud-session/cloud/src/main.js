@@ -52,7 +52,7 @@ function safeReason(error, env) {
   let message=error instanceof Error ? error.message : String(error);
   const host=env.PASEO_MINI_HOST || '';
   if(host) { message=message.replaceAll(host,'[已隐藏]'); try {const u=new URL(host); for(const v of u.searchParams.values()) if(v) message=message.replaceAll(v,'[已隐藏]'); const frag=new URLSearchParams(u.hash.slice(1)); for(const v of frag.values()) if(v) message=message.replaceAll(v,'[已隐藏]');} catch {} }
-  return message.replace(/Bearer\s+[^\s,;]+/gi,'Bearer [已隐藏]').replace(/((?:token|password|authorization|offer|secret)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]').replace(/https?:\/\/[^\s"']+/gi,'[地址已隐藏]').replace(/[\r\n]+/g,' ').trim().slice(0,500) || '未知错误';
+  return message.replace(/Bearer\s+[^\s,;]+/gi,'Bearer [已隐藏]').replace(/((?:token|password|authorization|offer|secret)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]').replace(/(?:https?|wss?):\/\/[^\s"']+/gi,'[地址已隐藏]').replace(/[\r\n]+/g,' ').trim().slice(0,500) || '未知错误';
 }
 const context = env => ({cloudSessionId: env.CLAUDE_CODE_REMOTE_SESSION_ID});
 async function ensure(rpc, env, path, cwd = process.cwd()) { return rpc(ensureSession, {...context(env), title: await titleFor(path), cwd}); }
@@ -64,7 +64,7 @@ export function mapper() {
     const msg = row.message || {};
     if (row.type === 'user') {
       const text=inputText(msg.content);
-      if(text.trim() === '[Request interrupted by user]') {endTurn='canceled'; canceled=true;}
+      if(text.trim().startsWith('[Request interrupted by user')) {endTurn='canceled'; canceled=true;}
       else if(text.trim()) { canceled=false; startTurn=true; items.push({type:'user_message',id:row.uuid,text}); }
       if (Array.isArray(msg.content)) for (const b of msg.content) if (b.type === 'tool_result' && calls.has(b.tool_use_id)) {
         const prev = calls.get(b.tool_use_id), output = inputText(b.content), detail = {...prev.detail};
@@ -122,32 +122,34 @@ async function lock(dir, path) {
     try {const f=await open(file,'wx'); await f.writeFile(JSON.stringify(mine)); await f.close(); return {file,token,titleHandled:mine.titleHandled};}
     catch(e) {if(e.code!=='EEXIST') throw e;}
     let existing; try {existing=JSON.parse(await readFile(file,'utf8'));} catch {await sleep(50); continue;}
-    let alive=false; try {process.kill(existing.pid,0); alive=true;} catch(e) {if(e.code!=='ESRCH') return null;}
+    let alive=false; if(existing.pid>0) {try {process.kill(existing.pid,0); alive=true;} catch(e) {if(e.code!=='ESRCH') return null;}}
     if(alive && existing.path===path) return null;
-    if(alive) {
-      mine.titleHandled=!!existing.titleHandled; const tmp=join(dir,`forward-${token}.tmp`); await writeFile(tmp,JSON.stringify(mine)); await rename(tmp,file); return {file,token,titleHandled:mine.titleHandled};
-    }
-    await unlink(file).catch(()=>{});
+    mine.titleHandled=!!existing.titleHandled; const tmp=join(dir,`forward-${token}.tmp`); await writeFile(tmp,JSON.stringify(mine)); await rename(tmp,file); return {file,token,titleHandled:mine.titleHandled};
   }
   return null;
 }
-async function markTitle(lease) {const f=await open(lease.file,'r+'); try {const info=JSON.parse(await f.readFile('utf8')); if(info.token===lease.token) {info.titleHandled=true; const value=JSON.stringify(info); await f.write(value,0,'utf8'); await f.truncate(Buffer.byteLength(value));}} finally {await f.close();}}
+async function updateLease(lease, changes) {
+  const f=await open(lease.file,'r+'); try {const info=JSON.parse(await f.readFile('utf8')); if(info.token!==lease.token) return false; Object.assign(info,changes); const value=JSON.stringify(info); await f.write(value,0,'utf8'); await f.truncate(Buffer.byteLength(value)); return true;} finally {await f.close();}
+}
 async function ownsLock(lock) { try {return JSON.parse(await readFile(lock.file,'utf8')).token===lock.token;} catch {return false;} }
 async function remoteInit(rpc, env) {
   const init=await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',id:'cloud-init',method:'initialize',params:{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'paseo-cloud-session',version:'0.1.0'}}}});
   if(init.status>=400 || !init.messages.some(x=>x.id==='cloud-init' && x.result)) throw Error('Paseo MCP 初始化失败');
   await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',method:'notifications/initialized'}});
 }
-export async function updateTitle(rpc, env, agentId, title) {
-  await remoteInit(rpc,env);
+export async function updateTitle(rpc, env, agentId, title, state={attempted:false,initialized:false}) {
+  if(!state.attempted) {state.attempted=true; await remoteInit(rpc,env); state.initialized=true;}
+  if(!state.initialized) throw Error('Paseo MCP 初始化失败');
   const result=await rpc(forwardMcp,{...context(env),message:{jsonrpc:'2.0',id:'cloud-title',method:'tools/call',params:{name:'update_agent',arguments:{agentId,name:Array.from(title).slice(0,60).join('')}}}});
   const reply=result.messages.find(x=>x.id==='cloud-title');
-  if(result.status>=400 || !reply || reply.error || reply.result?.isError) throw Error('Paseo 标题更新失败');
+  if(result.status>=400 || !reply || reply.error || reply.result?.isError) throw Error('Paseo 标题更新失败：'+(reply?.error?.message || reply?.result?.content?.map?.(x=>x.text || '').join(' ') || `HTTP ${result.status}`));
 }
 export async function forward(path, env=process.env, rpc=createRpc(env), startOffset) {
   const lease=await lock(sessionDir(env),path); if(!lease) return;
   const queue=new ForwardQueue(rpc,env); let offset=startOffset ?? (await stat(path)).size, partial=Buffer.alloc(0), delay=500, registered=false, agentId, titlePending=null;
   let titleHandled=lease.titleHandled || (await titleFor(path,offset))!=='云端会话';
+  let titleAttempts=0, titleNext=0; const titleMcp={attempted:false,initialized:false};
+  if(titleHandled && !lease.titleHandled && !await updateLease(lease,{titleHandled:true})) return;
   const register=async()=>{const result=await ensure(rpc,env,path); registered=true; agentId=result.agentId; queue.epoch=result.epoch;};
   queue.onEpochChange=async()=>{registered=false; await register();};
   try { for (;;) {
@@ -156,11 +158,16 @@ export async function forward(path, env=process.env, rpc=createRpc(env), startOf
       const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {const row=JSON.parse(line); const value=queue.map(row); if(value) {queue.enqueue(value); if(!titleHandled && !titlePending) titlePending=value.items.find(x=>x.type==='user_message')?.text || null;}} catch {} } } } finally {await f.close();}
       if(!registered) await register();
       await queue.flush();
-      if(titlePending && !titleHandled) {try {await updateTitle(rpc,env,agentId,titlePending); titleHandled=true; titlePending=null; await markTitle(lease);} catch(error) {if(String(error).includes('not_opened')) registered=false;}}
+      if(titlePending && Date.now()>=titleNext) {
+        if(!titleHandled) {if(!await updateLease(lease,{titleHandled:true})) return; titleHandled=true;}
+        titleAttempts++;
+        try {await updateTitle(rpc,env,agentId,titlePending,titleMcp); titlePending=null;}
+        catch(error) {if(String(error).includes('not_opened')) registered=false; if(titleAttempts>=3) {const reason=safeReason(error,env); await updateLease(lease,{titleError:reason}); process.stderr.write(`Paseo 标题更新失败，已放弃：${reason}\n`); titlePending=null;} else titleNext=Date.now()+1000*2**(titleAttempts-1);}
+      }
       delay=500;
     } catch(error) { if(String(error).includes('not_opened')) registered=false; delay=Math.min(delay*2,10000); }
     await sleep(delay);
-  } } finally { if(await ownsLock(lease)) await unlink(lease.file).catch(()=>{}); }
+  } } finally { if(await ownsLock(lease)) {if(titleHandled) await updateLease(lease,{pid:0}).catch(()=>{}); else await unlink(lease.file).catch(()=>{});} }
 }
 export async function hook(input, env=process.env, rpc=createRpc(env), launch=true) {
   if(!eligible(env) || (input.source === 'subagent' || input.agent_id || input.agent_type) || !input.transcript_path) return '';

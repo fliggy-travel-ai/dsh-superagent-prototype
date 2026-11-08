@@ -23,3 +23,5 @@
 {"type": "user", "uuid": "00000000-0000-4000-8000-000000000023", "message": {"role": "user", "content": "[Request interrupted by user]"}}
 {"type": "last-prompt", "lastPrompt": "example", "leafUuid": "00000000-0000-4000-8000-000000000018", "sessionId": "00000000-0000-4000-8000-000000000001"}
 {"type": "cost-state", "sessionId": "00000000-0000-4000-8000-000000000001", "totalCostUSD": 0.01, "totalAPIDuration": 1000, "totalDuration": 2000, "startTime": 0, "modelUsage": {}, "hasUnknownModelCost": false}
+{"type":"user","uuid":"00000000-0000-4000-8000-000000000024","message":{"role":"user","content":"再做一项检查。"}}
+{"type":"user","uuid":"00000000-0000-4000-8000-000000000025","message":{"role":"user","content":"[Request interrupted by user for tool use]"}}
