@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { Platform, Pressable, Text, View, type TextStyle, type ViewStyle } from 'react-native';
 import type { SnapshotStore, StoreState } from './store.ts';
+import type { ControlStore } from './control-store.ts';
 
 type Theme = PluginHostProps['theme'];
 type Navigation = PluginSurfaceProps['navigation'];
@@ -18,6 +19,7 @@ export type Tone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger';
 
 export interface Env {
   store: SnapshotStore;
+  control: ControlStore;
   openScreen(input: { screenId: string; params?: Record<string, string> }): void;
 }
 
@@ -40,6 +42,11 @@ export function useUi(): UiValue {
 export function useStoreState(): StoreState {
   const { store } = useUi();
   return useSyncExternalStore(store.subscribe, store.getState);
+}
+
+export function useControlState() {
+  const { control } = useUi();
+  return useSyncExternalStore(control.subscribe, control.getState);
 }
 
 const mono = Platform.select({ ios: 'Menlo', default: 'monospace' });

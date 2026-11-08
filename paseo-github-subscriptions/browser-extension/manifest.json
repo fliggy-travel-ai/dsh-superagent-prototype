@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "开发自动化 · 自动同意与会话分组",
+  "version": "0.4.0",
+  "description": "安装后自动点击 Claude Code 网页权限窗口的同意按钮，并按会话名称分组。无需配对。",
+  "permissions": ["tabs", "tabGroups", "storage", "alarms", "scripting"],
+  "host_permissions": ["https://claude.ai/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "content_scripts": [{ "matches": ["https://claude.ai/*"], "js": ["title.js", "approval.js", "questions.js", "activity.js"], "run_at": "document_idle" }]
+}
