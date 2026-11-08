@@ -27,7 +27,9 @@ export const CloudSessionIdSchema = z.string().regex(/^cse_[A-Za-z0-9]{8,64}$/);
 export const EpochSchema = z.string().min(1);
 
 /**
- * Finds the agent for a cloud session or imports a new one. Calls for the same `cloudSessionId` run one at a time, so
+ * Finds the agent for a cloud session or imports a new one. A new agent gets its own local workspace in the resolved
+ * Mac directory, pinned, titled like the agent; the cloud session renames that workspace itself (Paseo
+ * `rename_workspace`) to `<Issue number>【<stage>】<demand name>` once it knows them. An existing agent keeps its workspace. Calls for the same `cloudSessionId` run one at a time, so
  * concurrent callers get the same agent. An archived agent does not count: the next call imports a new agent.
  * `title` is used only when a new agent is imported.
  *
@@ -42,7 +44,7 @@ export const EpochSchema = z.string().min(1);
 export const ensureSession = defineRpc({
   name: 'cloud-session.ensure',
   input: z.object({ cloudSessionId: CloudSessionIdSchema, title: z.string().min(1).max(60), cwd: z.string().min(1), fallbackCwd: z.string().min(1).optional() }),
-  output: z.object({ agentId: z.string(), serverId: z.string(), epoch: EpochSchema, created: z.boolean() }),
+  output: z.object({ agentId: z.string(), serverId: z.string(), workspaceId: z.string(), epoch: EpochSchema, created: z.boolean() }),
 });
 
 /**
@@ -118,4 +120,36 @@ export const forwardMcp = defineRpc({
   name: 'cloud-session.mcp',
   input: z.object({ cloudSessionId: CloudSessionIdSchema, message: z.record(z.string(), z.unknown()), timeoutMs: z.number().int().min(1_000).max(50_000).default(45_000) }),
   output: z.object({ status: z.number().int(), messages: z.array(z.record(z.string(), z.unknown())) }),
+});
+
+/** A permission dialog or question that Claude Code is showing in claude.ai for the cloud session. */
+export const PendingRequestSchema = z.object({
+  /** Claude Code tool use id; it identifies the request until the tool result appears. */
+  toolUseId: z.string().min(1),
+  toolName: z.string().min(1),
+  /** `question` for AskUserQuestion; `tool` for a tool permission dialog. */
+  kind: z.enum(['question', 'tool']),
+  /** Tool input as Claude Code shows it; for AskUserQuestion it holds `questions`. */
+  input: z.record(z.string(), z.unknown()),
+});
+
+/**
+ * Mirrors a pending claude.ai request onto the cloud session's agent as a Paseo permission request (the native question
+ * or approval component). The cloud program calls it from a non-blocking Claude Code PermissionRequest hook and returns
+ * no decision, so claude.ai shows its own dialog as usual. Repeating a call with the same `toolUseId` is a no-op.
+ */
+export const notifyPendingRequest = defineRpc({
+  name: 'cloud-session.request.notify',
+  input: z.object({ cloudSessionId: CloudSessionIdSchema, request: PendingRequestSchema }),
+  output: z.object({ shown: z.boolean() }),
+});
+
+/**
+ * Closes the Paseo request for `toolUseId` after the tool result appears in the cloud transcript, whichever side
+ * answered. Closing an unknown or already closed request is a no-op.
+ */
+export const resolvePendingRequest = defineRpc({
+  name: 'cloud-session.request.resolve',
+  input: z.object({ cloudSessionId: CloudSessionIdSchema, toolUseId: z.string().min(1), outcome: z.enum(['answered', 'denied', 'canceled']) }),
+  output: z.object({ closed: z.boolean() }),
 });
