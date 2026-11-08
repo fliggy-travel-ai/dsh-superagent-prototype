@@ -6,6 +6,7 @@ import { EventTypeSchema } from './shared/model.ts';
 import * as rpc from './shared/contracts.ts';
 import { Runtime } from './server/runtime.ts';
 import { connectDaemon } from './server/daemon.ts';
+import { registerCloudSession, createCloudSession, redactError, type AnswerWebRequest } from './server/cloud-session/index.ts';
 import { AutomationRuntime } from './server/automation.ts';
 import { automationPort } from './server/automation-port.ts';
 import { BrowserBridge } from './server/browser-bridge.ts';
@@ -22,10 +23,15 @@ import { StalledRuntime } from './server/stalled.ts';
 import { stalledPort } from './server/stalled-port.ts';
 
 export default function contribute(server: PluginServerContext) {
+  // Replace this handoff with the BrowserBridge instance method after #1704 delivers it.
+  const answerWebRequest: AnswerWebRequest = async () => ({ status: 'page_not_open' });
+  let disposeCloud: (() => void) | undefined;
+  try { disposeCloud = registerCloudSession(server, () => createCloudSession(undefined, answerWebRequest)); } catch (error) { console.error('云端会话模块注册失败：', redactError(error).replace(/[\r\n]+/g, ' ')); }
   let runtime: Runtime | null = null;
   let connection: Awaited<ReturnType<typeof connectDaemon>> | null = null;
   let stopped = false;
   let initializing: Promise<Runtime> | null = null;
+  let connecting: Promise<Awaited<ReturnType<typeof connectDaemon>>> | null = null;
   let automation: AutomationRuntime | null = null;
   let browser: BrowserBridge | null = null;
   let presence: PresenceRuntime | null = null;
@@ -37,10 +43,18 @@ export default function contribute(server: PluginServerContext) {
   const home = process.env.PASEO_HOME ?? join(homedir(), '.paseo');
   const directory = process.env.PASEO_GHSUB_STATE_DIR ?? join(home, 'github-subscriptions');
   const controller = new AbortController();
+  const readyConnection = () => {
+    if (stopped) return Promise.reject(new Error('插件已停止'));
+    connecting ??= connectDaemon(home, controller.signal).then(async value => {
+      if (stopped) { await value.close(); throw new Error('插件已停止'); }
+      connection = value;
+      return value;
+    }).catch(error => { connecting = null; throw error; });
+    return connecting;
+  };
   const initialize = async () => {
-    connection = await connectDaemon(home, controller.signal);
-    if (stopped) { await connection.close(); throw new Error('插件已停止'); }
-    runtime = new Runtime(directory, connection.paseo);
+    const active = await readyConnection();
+    runtime = new Runtime(directory, active.paseo);
     await runtime.start();
     if (stopped) await runtime.stop();
     return runtime;
@@ -49,8 +63,6 @@ export default function contribute(server: PluginServerContext) {
     if (stopped) return Promise.reject(new Error('插件已停止'));
     initializing ??= initialize().catch(async error => {
       await runtime?.stop();
-      await connection?.close();
-      connection = null;
       initializing = null;
       console.error('GitHub 订阅插件初始化失败：', runtime?.vault.redact(error) ?? (error instanceof Error ? error.message : '本机连接未就绪，后续操作会重试'));
       throw error;
@@ -62,7 +74,7 @@ export default function contribute(server: PluginServerContext) {
   const readyAutomation = () => {
     if (stopped) return Promise.reject(new Error('插件已停止'));
     automationInitializing ??= (async () => {
-      await ready();
+      await readyConnection();
       automation = new AutomationRuntime(directory, automationPort(connection!.paseo, connection!.approve));
       await automation.start();
       if (stopped) await automation.stop();
@@ -73,7 +85,7 @@ export default function contribute(server: PluginServerContext) {
   const readyPresence = () => {
     if (stopped) return Promise.reject(new Error('插件已停止'));
     presenceInitializing ??= (async () => {
-      await ready();
+      await readyConnection();
       presenceHosts = new PresenceHosts(connection!.client);
       presence = new PresenceRuntime(directory, presencePort(connection!, presenceHosts));
       await presence.start();
@@ -85,7 +97,7 @@ export default function contribute(server: PluginServerContext) {
   const readyBrowser = () => {
     if (stopped) return Promise.reject(new Error('插件已停止'));
     browserInitializing ??= (async () => {
-      await ready();
+      await readyConnection();
       browser = new BrowserBridge(directory, async agentId => {
         const agent = (await connection!.paseo.agents.ref(agentId).refresh())?.agent;
         return agent && !agent.archivedAt ? { id: agent.id, title: agent.title || '未命名 Paseo 会话' } : null;
@@ -102,7 +114,7 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(presenceRpc.presenceSnapshot, async () => (await readyPresence()).snapshot());
   server.handle(stalledSnapshot, async () => {
-    await readyPresence();
+    await Promise.all([readyPresence(), ready()]);
     stalled ??= new StalledRuntime(stalledPort(connection!.client, presenceHosts!, () => runtime!.storage.state.preferences.enabled && !runtime!.storage.state.preferences.shadow
       ? runtime!.storage.state.subscriptions.filter(subscription => !subscription.expiresAt || Date.parse(subscription.expiresAt) > Date.now()).map(subscription => subscription.agentId) : []));
     return stalled.snapshot();
@@ -166,12 +178,14 @@ export default function contribute(server: PluginServerContext) {
   const removeResolved = server.addHook('agent.permission.after', async ({ agent, requestId, resolution }) => { void readyAutomation().then(current => current.resolved(agent.id, requestId, resolution.behavior)).catch(() => {}); });
 
   return async () => {
+    disposeCloud?.();
     stopped = true;
     controller.abort();
     removeOpen();
     removeArchive();
     removeRequested();
     removeResolved();
+    try { await connecting; } catch {}
     try { await initializing; } catch {}
     await Promise.allSettled([automationInitializing, browserInitializing, presenceInitializing]);
     await Promise.allSettled([automation?.stop(), browser?.stop(), presence?.stop()]);
