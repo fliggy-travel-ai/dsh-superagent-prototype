@@ -22,6 +22,8 @@ test('审批仅接受当前会话的完整命令、工具和接受编辑模式',
   assert.ok(permissionReason(agent(), { ...request, name: 'AskUserQuestion' }, policy));
   assert.ok(permissionReason(agent(), { ...request, actions: [{ id: 'all', label: 'Always allow', behavior: 'allow' }] }, policy));
   assert.ok(permissionReason(agent(), { ...request, provider: 'claude-3' }, policy));
+  assert.ok(permissionReason({ ...agent(), provider: 'cloud-session', claudeProvider: false }, { ...request, provider: 'cloud-session' }, policy));
+  assert.ok(permissionReason(agent(), { ...request, provider: 'cloud-session' }, policy));
   assert.ok(permissionReason({ ...agent(), archivedAt: new Date().toISOString() }, request, policy));
   assert.ok(permissionReason(agent(), request, { ...policy, agentId: 'another-session' }));
   assert.ok(permissionReason(agent(), request, { ...policy, expiresAt: new Date(Date.now() - 1000).toISOString() }));

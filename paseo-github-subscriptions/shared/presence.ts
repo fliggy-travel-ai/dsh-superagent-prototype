@@ -22,19 +22,34 @@ export const QuestionPromptSchema = z.strictObject({
 export const BrowserQuestionSchema = z.strictObject({
   id: z.string().min(1).max(200), sessionId: z.string().regex(/^[A-Za-z0-9_-]+$/),
   fingerprint: z.string().min(1).max(128), prompts: z.array(QuestionPromptSchema).min(1).max(10),
+  toolUseId: z.string().min(1).max(200).optional(),
+  pages: z.number().int().min(1).max(10).optional(),
 });
-export const QuestionAnswerSchema = z.strictObject({ id: z.string(), answers: z.record(z.string(), z.array(z.string()).min(1).max(30)) });
+export const QuestionAnswerSchema = z.strictObject({
+  id: z.string(),
+  answers: z.record(z.string(), z.array(z.string()).max(30)),
+  otherAnswers: z.record(z.string(), z.string().max(2000)).optional(),
+});
 export const QuestionReadSchema = z.strictObject({ id: z.string(), fingerprint: z.string() });
 export const QuestionSchema = BrowserQuestionSchema.extend({
   source: z.enum(['native', 'browser']), title: z.string(), instanceId: z.string().optional(),
   url: z.string().optional(), at: z.string(),
   state: z.enum(['pending', 'submitted', 'resolved', 'unknown']), reason: z.string(),
-  answer: z.strictObject({ source: z.enum(['user', 'automatic']), answers: QuestionAnswerSchema.shape.answers, readAt: z.string().optional() }).optional(),
+  answer: z.strictObject({
+    source: z.enum(['user', 'automatic']),
+    answers: QuestionAnswerSchema.shape.answers,
+    otherAnswers: QuestionAnswerSchema.shape.otherAnswers,
+    readAt: z.string().optional(),
+  }).optional(),
+  delegatedTo: z.string().optional(),
   browserSubmittedAt: z.string().optional(),
 });
 export const BrowserDecisionSchema = z.strictObject({
   id: z.string(), sessionId: z.string(), fingerprint: z.string(),
-  answers: QuestionAnswerSchema.shape.answers, expiresAt: z.number(),
+  answers: QuestionAnswerSchema.shape.answers,
+  otherAnswers: QuestionAnswerSchema.shape.otherAnswers,
+  source: z.enum(['automatic', 'manual']).optional(),
+  expiresAt: z.number(),
 });
 export const PresenceSnapshotSchema = z.strictObject({
   settings: PresenceSettingsSchema, observation: PresenceObservationSchema,
@@ -53,7 +68,7 @@ export type QuestionRead = z.infer<typeof QuestionReadSchema>;
 export type BrowserDecision = z.infer<typeof BrowserDecisionSchema>;
 export type PresenceSnapshot = z.infer<typeof PresenceSnapshotSchema>;
 export const isUnreadAutomaticAnswer = (question: Question) => question.state === 'resolved' && question.answer?.source === 'automatic' && !question.answer.readAt;
-export const isQuestionTodo = (question: Question) => question.state !== 'resolved' || isUnreadAutomaticAnswer(question);
+export const isQuestionTodo = (question: Question) => !question.delegatedTo && (question.state !== 'resolved' || isUnreadAutomaticAnswer(question));
 export const presenceSnapshot = defineRpc({ name: 'presence.snapshot', input: z.object({}), output: PresenceSnapshotSchema });
 export const presenceConfigure = defineRpc({ name: 'presence.configure', input: PresenceSettingsSchema, output: PresenceSnapshotSchema });
 export const presenceAnswer = defineRpc({ name: 'presence.answer', input: QuestionAnswerSchema, output: PresenceSnapshotSchema });
