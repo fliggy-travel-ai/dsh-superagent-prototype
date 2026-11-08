@@ -21,12 +21,11 @@ import { listBluetoothTargets, saveBluetoothTarget } from './server/bluetooth-ta
 import { stalledSnapshot } from './shared/stalled.ts';
 import { StalledRuntime } from './server/stalled.ts';
 import { stalledPort } from './server/stalled-port.ts';
+import { webRequestAudit, type ResolveWebRequest } from './shared/web-request.ts';
+import { WebRequestLedger } from './server/web-request/ledger.ts';
+import { WebRequestExecutor } from './server/web-request/executor.ts';
 
 export default function contribute(server: PluginServerContext) {
-  // Replace this handoff with the BrowserBridge instance method after #1704 delivers it.
-  const answerWebRequest: AnswerWebRequest = async () => ({ status: 'page_not_open' });
-  let disposeCloud: (() => void) | undefined;
-  try { disposeCloud = registerCloudSession(server, () => createCloudSession(undefined, answerWebRequest)); } catch (error) { console.error('云端会话模块注册失败：', redactError(error).replace(/[\r\n]+/g, ' ')); }
   let runtime: Runtime | null = null;
   let connection: Awaited<ReturnType<typeof connectDaemon>> | null = null;
   let stopped = false;
@@ -43,6 +42,21 @@ export default function contribute(server: PluginServerContext) {
   const home = process.env.PASEO_HOME ?? join(homedir(), '.paseo');
   const directory = process.env.PASEO_GHSUB_STATE_DIR ?? join(home, 'github-subscriptions');
   const controller = new AbortController();
+  const webLedger = new WebRequestLedger();
+  const webExecutor = new WebRequestExecutor(directory, {
+    syncStatus: now => browser?.syncStatus(now) ?? { connected: false, hasFreshInstance: false, hasStaleInstance: false, freshSessions: [], activeSessions: [] },
+    freshSessions: now => browser?.freshSessions(now) ?? [],
+  }, {
+    browserCandidates: (instanceId, sessionId) => presence?.browserCandidates(instanceId, sessionId) ?? [],
+    isSessionObserved: (instanceId, sessionId) => presence?.isSessionObserved(instanceId, sessionId) ?? false,
+    delegateBrowserAnswer: (id, answers, otherAnswers, source) => presence?.delegateBrowserAnswer(id, answers, otherAnswers, source) ?? false,
+    cancelBrowserDecision: id => presence?.cancelBrowserDecision(id),
+    browserState: id => presence?.browserState(id) ?? null,
+  }, webLedger);
+  const answerWebRequest: AnswerWebRequest = async request => (await readyBrowser()).answerWebRequest(request);
+  const resolveWebRequest: ResolveWebRequest = input => webExecutor.confirmCloud(input);
+  let disposeCloud: (() => void) | undefined;
+  try { disposeCloud = registerCloudSession(server, () => createCloudSession(undefined, answerWebRequest, resolveWebRequest)); } catch (error) { console.error('云端会话模块注册失败：', redactError(error).replace(/[\r\n]+/g, ' ')); }
   const readyConnection = () => {
     if (stopped) return Promise.reject(new Error('插件已停止'));
     connecting ??= connectDaemon(home, controller.signal).then(async value => {
@@ -87,7 +101,7 @@ export default function contribute(server: PluginServerContext) {
     presenceInitializing ??= (async () => {
       await readyConnection();
       presenceHosts = new PresenceHosts(connection!.client);
-      presence = new PresenceRuntime(directory, presencePort(connection!, presenceHosts));
+      presence = new PresenceRuntime(directory, presencePort(connection!, presenceHosts), Date.now, webLedger);
       await presence.start();
       if (stopped) await presence.stop();
       return presence;
@@ -101,7 +115,10 @@ export default function contribute(server: PluginServerContext) {
       browser = new BrowserBridge(directory, async agentId => {
         const agent = (await connection!.paseo.agents.ref(agentId).refresh())?.agent;
         return agent && !agent.archivedAt ? { id: agent.id, title: agent.title || '未命名 Paseo 会话' } : null;
-      }, async (...input) => (await readyPresence()).browserSync(...input));
+      }, async (...input) => (await readyPresence()).browserSync(...input), async request => {
+        await readyPresence();
+        return webExecutor.answerWebRequest(request);
+      });
       await browser.start();
       if (stopped) await browser.stop();
       return browser;
@@ -146,6 +163,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(browserRpc.browserConfigure, async input => (await readyBrowser()).configure(input));
   server.handle(browserRpc.browserBind, async input => (await readyBrowser()).bind(input));
   server.handle(browserRpc.browserPairing, async () => (await readyBrowser()).pairing());
+  server.handle(webRequestAudit, async () => webExecutor.audit());
 
   server.handle(rpc.snapshot, async () => (await ready()).snapshot());
   server.handle(rpc.unsubscribe, async ({ id }) => (await ready()).remove(id));
