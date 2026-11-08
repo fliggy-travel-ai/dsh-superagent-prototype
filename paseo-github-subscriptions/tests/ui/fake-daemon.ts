@@ -54,9 +54,9 @@ export class FakeDaemon {
       case 'browser.snapshot': return this.browser;
       case 'browser.configure': this.browser = { ...this.browser, settings: input as unknown as BrowserSettings, connected: Boolean(input.enabled) }; return this.browser;
       case 'browser.pairing': return { url: `http://127.0.0.1:${this.browser.settings.port}/sync`, token: '演示配对令牌，无实际权限' };
-      case 'browser.usage.snapshot': return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured };
-      case 'browser.usage.save_api_key': this.adspowerApiKeyConfigured = Boolean(String(input.apiKey ?? '').trim()); return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured };
-      case 'browser.usage.remove_api_key': this.adspowerApiKeyConfigured = false; return { adspowerApiKeyConfigured: false };
+      case 'browser.usage.snapshot': return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
+      case 'browser.usage.save_api_key': this.adspowerApiKeyConfigured = Boolean(String(input.apiKey ?? '').trim()); return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
+      case 'browser.usage.remove_api_key': this.adspowerApiKeyConfigured = false; return { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' };
       case 'browser.bind': {
         const binding = input as unknown as BrowserBindingInput;
         this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),

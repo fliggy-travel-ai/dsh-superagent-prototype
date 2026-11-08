@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Linking, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { AutomationSnapshot } from '../shared/automation.ts';
 import type { BrowserPairing, BrowserSnapshot } from '../shared/browser.ts';
+import type { BrowserUsageSettings } from '../shared/browser-usage.ts';
 import { errorMessage } from './store.ts';
 import { GitHubPanel } from './screen/index.tsx';
 import { PresencePanel, QuestionList, todoQuestions, presenceLabel } from './presence-panel.tsx';
@@ -22,7 +23,7 @@ const toolNames: Record<string, string> = { Read: '读取文件', Glob: '查找�
 
 export function AdsPowerKeyCard() {
   const { s, control, theme } = useUi();
-  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [settings, setSettings] = useState<BrowserUsageSettings | null>(null);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState<'save' | 'remove' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -30,8 +31,8 @@ export function AdsPowerKeyCard() {
   useEffect(() => {
     let active = true;
     control.usageSettings()
-      .then(res => { if (active) setConfigured(res.adspowerApiKeyConfigured); })
-      .catch(() => { if (active) setConfigured(false); });
+      .then(res => { if (active) setSettings(res); })
+      .catch(() => { if (active) setSettings({ adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' }); });
     return () => { active = false; };
   }, [control]);
 
@@ -43,7 +44,7 @@ export function AdsPowerKeyCard() {
     try {
       const res = await control.saveAdsPowerApiKey(candidate);
       setValue('');
-      setConfigured(res.adspowerApiKeyConfigured);
+      setSettings(res);
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -58,7 +59,7 @@ export function AdsPowerKeyCard() {
     try {
       const res = await control.removeAdsPowerApiKey();
       setValue('');
-      setConfigured(res.adspowerApiKeyConfigured);
+      setSettings(res);
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -66,12 +67,22 @@ export function AdsPowerKeyCard() {
     }
   };
 
-  const isConfigured = Boolean(configured);
+  const isConfigured = Boolean(settings?.adspowerApiKeyConfigured);
+  const isFromEnv = settings?.adspowerApiKeySource === 'env';
+  const canClear = isConfigured && !isFromEnv;
+  const statusLabel = settings === null
+    ? '读取中'
+    : isFromEnv
+      ? '已配置（来自环境变量）'
+      : isConfigured
+        ? '已配置'
+        : '未配置';
+
   return <Card
     title="额度设置（AdsPower API key）"
-    trailing={<Chip label={configured === null ? '读取中' : isConfigured ? '已配置' : '未配置'} tone={isConfigured ? 'success' : 'neutral'} />}
+    trailing={<Chip label={statusLabel} tone={isConfigured ? 'success' : 'neutral'} />}
   >
-    <Text style={s.text}>当前状态：{configured === null ? '正在读取…' : isConfigured ? '已配置' : '未配置'}</Text>
+    <Text style={s.text}>当前状态：{settings === null ? '正在读取…' : statusLabel}</Text>
     <Text style={s.muted}>用于通过本机 AdsPower 本地 API（默认 http://127.0.0.1:50325）查询浏览器环境的名称。API key 只保存在本机插件状态里（文件权限 0600），不写日志，不返回给前端；保留环境变量 PASEO_ADSPOWER_API_KEY / ADSPOWER_API_KEY 作为后备来源。</Text>
     <Text style={s.muted}>要准确显示浏览器环境名称，请在浏览器扩展选项页填写一次环境序号；单环境自动识别只在单个活跃环境且单个扩展上报时生效。</Text>
     <TextInput
@@ -97,7 +108,7 @@ export function AdsPowerKeyCard() {
         busy={busy === 'save'}
         onPress={() => void save()}
       />
-      {isConfigured ? <Btn
+      {canClear ? <Btn
         danger
         label="清除 API key"
         disabled={busy !== null}

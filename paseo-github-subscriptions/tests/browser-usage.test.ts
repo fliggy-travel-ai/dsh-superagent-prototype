@@ -384,14 +384,14 @@ test('AdsPower 错误分类与精确匹配：未配置 API key、已配置 API k
     ]);
     assertNoAbsoluteTime(report);
 
-    // 2. 已配置 API key 但仍被拒绝 -> 原因显示“需要 api key”
+    // 2. 已配置 API key 但仍被拒绝 -> 原因显示“API key 无效，请在额度设置重新填写”
     await store.saveApiKey('wrong-key', now);
     await store.flushQueries();
     rec = await store.get('env-29', now);
-    assert.equal(rec?.adspowerError, '需要 api key');
+    assert.equal(rec?.adspowerError, 'API key 无效，请在额度设置重新填写');
     report = toUsageReport(rec, now, true);
     assert.equal(report.status, 'available');
-    assert.equal(report.details?.[0]?.value, 'AdsPower 查询失败（需要 api key）');
+    assert.equal(report.details?.[0]?.value, 'AdsPower 查询失败（API key 无效，请在额度设置重新填写）');
     assertNoAbsoluteTime(report);
 
     // 3. 被限流（Too many request per second） -> 原因显示“被限流”
@@ -655,8 +655,8 @@ test('额度设置 AdsPower API key：0600 落盘、不返回给前端、支持�
   try {
     const store = new BrowserUsageStore(dir, () => now, { adspowerMinIntervalMs: 0, fetchFn: fakeFetch });
 
-    // 1. 初始未配置：settings() 返回 { adspowerApiKeyConfigured: false }，上报触发“需要在额度设置填写 AdsPower API key”
-    assert.deepEqual(await store.settings(now), { adspowerApiKeyConfigured: false });
+    // 1. 初始未配置：settings() 返回 { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' }，上报触发“需要在额度设置填写 AdsPower API key”
+    assert.deepEqual(await store.settings(now), { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' });
     await store.record({
       instanceId: 'env-29',
       instanceName: '29',
@@ -669,7 +669,7 @@ test('额度设置 AdsPower API key：0600 落盘、不返回给前端、支持�
     await store.flushQueries();
     assert.equal((await store.get('env-29', now))?.adspowerError, '需要在额度设置填写 AdsPower API key');
 
-    // 2. 通过 controlStore / store.saveApiKey 保存 API key：前端只收到 { adspowerApiKeyConfigured: true }，不含明文或前缀，0600 落盘，且自动重查成功
+    // 2. 通过 controlStore / store.saveApiKey 保存 API key：前端收到 { adspowerApiKeyConfigured: true, adspowerApiKeySource: 'plugin' }，不含明文或前缀，0600 落盘，且自动重查成功
     const secretKey = 'adspower_secret_key_99887766';
     const clientControl = createControlStore(
       {
@@ -685,10 +685,10 @@ test('额度设置 AdsPower API key：0600 落盘、不返回给前端、支持�
 
     try {
       const savedStatus = await clientControl.saveAdsPowerApiKey(secretKey);
-      assert.deepEqual(savedStatus, { adspowerApiKeyConfigured: true });
+      assert.deepEqual(savedStatus, { adspowerApiKeyConfigured: true, adspowerApiKeySource: 'plugin' });
       assert.equal(JSON.stringify(savedStatus).includes(secretKey), false);
       const queriedStatus = await clientControl.usageSettings();
-      assert.deepEqual(queriedStatus, { adspowerApiKeyConfigured: true });
+      assert.deepEqual(queriedStatus, { adspowerApiKeyConfigured: true, adspowerApiKeySource: 'plugin' });
       assert.equal(JSON.stringify(queriedStatus).includes(secretKey), false);
 
       await store.flushQueries();
@@ -701,17 +701,17 @@ test('额度设置 AdsPower API key：0600 落盘、不返回给前端、支持�
 
       // 3. 重新填写新 API key
       const newKey = 'adspower_new_key_11223344';
-      assert.deepEqual(await clientControl.saveAdsPowerApiKey(newKey), { adspowerApiKeyConfigured: true });
+      assert.deepEqual(await clientControl.saveAdsPowerApiKey(newKey), { adspowerApiKeyConfigured: true, adspowerApiKeySource: 'plugin' });
 
-      // 4. 清除 API key：无环境变量时变为未配置，状态文件中不再包含 key
-      assert.deepEqual(await clientControl.removeAdsPowerApiKey(), { adspowerApiKeyConfigured: false });
+      // 4. 清除 API key：无环境变量时变为未配置（source: 'none'），状态文件中不再包含 key
+      assert.deepEqual(await clientControl.removeAdsPowerApiKey(), { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' });
       const diskText = await readFile(join(dir, 'browser-usage.json'), 'utf8');
       assert.equal(diskText.includes(secretKey), false);
       assert.equal(diskText.includes(newKey), false);
 
-      // 5. 环境变量作为后备来源：设置 PASEO_ADSPOWER_API_KEY 后，即使插件内已清除 key，仍识别为已配置并携带环境变量 key
+      // 5. 环境变量作为后备来源：设置 PASEO_ADSPOWER_API_KEY 后，即使插件内已清除 key，仍识别为已配置（source: 'env'）并携带环境变量 key
       process.env.PASEO_ADSPOWER_API_KEY = 'env_fallback_key_5566';
-      assert.deepEqual(await clientControl.usageSettings(), { adspowerApiKeyConfigured: true });
+      assert.deepEqual(await clientControl.usageSettings(), { adspowerApiKeyConfigured: true, adspowerApiKeySource: 'env' });
       await store.record({
         instanceId: 'env-30',
         instanceName: '30',
@@ -1219,4 +1219,381 @@ test('真实 BrowserBridge /usage 路由：OPTIONS 预检、鉴权、参数校�
     await bridge.stop();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('批量 user/list?page_size=100 未命中时自动使用 serial_number 或 user_id 过滤参数二次查询，仍走全局限速队列', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-fallback-filter-'));
+  const now = Date.parse('2026-11-08T12:00:00.000Z');
+  const calls: string[] = [];
+  const sleptMs: number[] = [];
+
+  try {
+    const store = new BrowserUsageStore(dir, () => now, {
+      sleepFn: async ms => {
+        sleptMs.push(ms);
+      },
+      fetchFn: async input => {
+        const url = new URL(String(input));
+        calls.push(url.pathname + url.search);
+        if (url.searchParams.get('page_size') === '100') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                code: 0,
+                data: {
+                  list: [{ user_id: 'k1', serial_number: '1', name: '第 1 号环境' }],
+                },
+              };
+            },
+          } as Response;
+        }
+        if (url.searchParams.get('serial_number') === '105') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                code: 0,
+                data: {
+                  list: [{ user_id: 'k105', serial_number: '105', name: '第 105 号分页外环境' }],
+                },
+              };
+            },
+          } as Response;
+        }
+        if (url.searchParams.get('user_id') === 'k205id') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                code: 0,
+                data: {
+                  list: [{ user_id: 'k205id', serial_number: '205', name: '第 205 号 ID 过滤环境' }],
+                },
+              };
+            },
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { code: 0, data: { list: [] } };
+          },
+        } as Response;
+      },
+    });
+
+    await store.record({
+      instanceId: 'env-105',
+      instanceName: '未命名浏览器环境',
+      adspowerProfile: '105',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 22, resetsAt: null, observedAt: new Date(now).toISOString() },
+      weekly: null,
+    }, now);
+    await store.flushQueries();
+
+    assert.deepEqual(calls, [
+      '/api/v1/user/list?page_size=100',
+      '/api/v1/user/list?serial_number=105',
+    ]);
+    assert.equal(sleptMs.length, 1);
+    assert.ok(sleptMs[0]! >= 1000, `二次过滤查询同样走全局限速队列，等待 ${sleptMs[0]}ms`);
+    const rec105 = await store.get('env-105', now);
+    assert.equal(rec105?.displayName, '第 105 号分页外环境');
+    assert.equal(rec105?.labelSource, 'adspower_name');
+    assert.equal(rec105?.adspowerError, undefined);
+
+    // 按 user_id 过滤参数二次查询同样生效
+    await store.record({
+      instanceId: 'env-205',
+      instanceName: '未命名浏览器环境',
+      adspowerProfile: 'k205id',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 32, resetsAt: null, observedAt: new Date(now).toISOString() },
+      weekly: null,
+    }, now);
+    await store.flushQueries();
+    assert.equal(calls.at(-1), '/api/v1/user/list?user_id=k205id');
+    const rec205 = await store.get('env-205', now);
+    assert.equal(rec205?.displayName, '第 205 号 ID 过滤环境');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('保存或清除 API key 时递增版本号：丢弃旧版本在途查询结果并立即启动新版本查询', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-key-version-'));
+  const now = Date.parse('2026-11-08T12:00:00.000Z');
+  let resolveOldQuery!: (res: Response) => void;
+  const oldHungQuery = new Promise<Response>(resolve => {
+    resolveOldQuery = resolve;
+  });
+  const authSeen: Array<string | undefined> = [];
+
+  try {
+    const store = new BrowserUsageStore(dir, () => now, {
+      adspowerMinIntervalMs: 0,
+      fetchFn: async (_input, init) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        authSeen.push(headers.authorization);
+        // 第一次无 key 请求挂起，模拟慢旧请求
+        if (authSeen.length === 1) {
+          return oldHungQuery;
+        }
+        // 新版本带新 key 的请求立即返回正确名称
+        if (headers.authorization === 'Bearer fresh-valid-key') {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                code: 0,
+                data: { list: [{ user_id: 'k29', serial_number: '29', name: '新版本 Key 解析名称' }] },
+              };
+            },
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { code: -1, msg: 'Need api key' };
+          },
+        } as Response;
+      },
+    });
+
+    // 1. 触发旧版本（无 key）在途查询，处于挂起状态
+    await store.record({
+      instanceId: 'env-29',
+      instanceName: '29',
+      adspowerProfile: '29',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 20, resetsAt: null, observedAt: new Date(now).toISOString() },
+      weekly: null,
+    }, now);
+    assert.equal(authSeen.length, 1);
+    assert.equal(authSeen[0], undefined);
+
+    // 2. 旧查询尚未返回时调用 saveApiKey：递增版本号并立即启动新版本查询（不被旧在途查询挡住）
+    await store.saveApiKey('fresh-valid-key', now);
+
+    // 3. 让旧版本查询晚于新版本发起后才返回错误（或旧名称）：旧版本结果必须被丢弃，不能覆盖新版本结果
+    resolveOldQuery({
+      ok: true,
+      status: 200,
+      async json() {
+        return { code: -1, msg: 'Need api key' };
+      },
+    } as Response);
+    await store.flushQueries();
+
+    assert.equal(authSeen.length, 2);
+    assert.equal(authSeen[1], 'Bearer fresh-valid-key');
+    const rec = await store.get('env-29', now);
+    assert.equal(rec?.displayName, '新版本 Key 解析名称');
+    assert.equal(rec?.adspowerError, undefined);
+
+    // 4. 调用 removeApiKey 同样递增版本号并立即重查
+    await store.removeApiKey(now);
+    await store.flushQueries();
+    assert.equal(authSeen.at(-1), undefined);
+    const recAfterRemove = await store.get('env-29', now);
+    assert.equal(recAfterRemove?.displayName, '新版本 Key 解析名称');
+    assert.equal(recAfterRemove?.adspowerError, '需要在额度设置填写 AdsPower API key');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('额度模块 stop()：设置停止标志、中止在途请求，停止后后台查询结果不写入内存或磁盘', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-stop-'));
+  const now = Date.parse('2026-11-08T12:00:00.000Z');
+  let signalAborted = false;
+  let resolveHung!: (res: Response) => void;
+  const hung = new Promise<Response>(resolve => {
+    resolveHung = resolve;
+  });
+
+  try {
+    const store = new BrowserUsageStore(dir, () => now, {
+      adspowerMinIntervalMs: 0,
+      fetchFn: async (_url, init) => {
+        init?.signal?.addEventListener('abort', () => {
+          signalAborted = true;
+        });
+        return hung;
+      },
+    });
+
+    await store.record({
+      instanceId: 'env-stop',
+      instanceName: '29',
+      adspowerProfile: '29',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 12, resetsAt: null, observedAt: new Date(now).toISOString() },
+      weekly: null,
+    }, now);
+
+    // 调用 stop()，中止在途请求；随后即使旧 Promise 被 resolve，也不得更新记录或写盘
+    const stopPromise = store.stop();
+    assert.equal(signalAborted, true);
+    resolveHung({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          code: 0,
+          data: { list: [{ user_id: 'k29', serial_number: '29', name: '停止后不应写入的名称' }] },
+        };
+      },
+    } as Response);
+    await stopPromise;
+
+    const rec = await store.get('env-stop', now);
+    assert.equal(rec?.displayName, '29');
+    assert.equal(rec?.adspowerName, undefined);
+    const disk = JSON.parse(await readFile(join(dir, 'browser-usage.json'), 'utf8'));
+    assert.equal(disk.records[0]?.displayName, '29');
+    assert.equal(disk.records[0]?.adspowerName, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置（来自环境变量）”并隐藏清除按钮，来自插件设置时显示清除按钮', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const React = (await import('react')).default;
+  const { isValidElement } = await import('react');
+  const { AdsPowerKeyCard } = await import('../client/dashboard.tsx');
+  const { bind } = await import('../client/ui.tsx');
+
+  const mockTheme = {
+    colors: {
+      surface0: '#ffffff',
+      surface1: '#f6f6f6',
+      surface2: '#ececee',
+      border: '#e4e4e7',
+      foreground: '#1f1f22',
+      foregroundMuted: '#8a8a90',
+      accent: '#2f6bf0',
+      accentForeground: '#ffffff',
+      statusSuccess: '#2e9a52',
+      statusWarning: '#c27a07',
+      statusDanger: '#d6403a',
+    },
+  };
+
+  interface NodeTree {
+    type: string;
+    props: Record<string, unknown>;
+    children: Array<NodeTree | string>;
+  }
+
+  const contextValues = new Map<unknown, unknown>();
+  const dispatcher = (
+    (React as unknown as { __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE?: { H: Record<string, unknown> } })
+      .__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE
+  );
+
+  function renderTree(element: unknown): NodeTree | string {
+    if (element === null || element === undefined || typeof element === 'boolean') return '';
+    if (typeof element === 'string' || typeof element === 'number') return String(element);
+    if (Array.isArray(element)) {
+      return { type: 'Fragment', props: {}, children: element.map(renderTree).filter(c => c !== '') };
+    }
+    if (!isValidElement(element)) return '';
+    const el = element as { type: unknown; props: Record<string, unknown> };
+    if (typeof el.type === 'function') {
+      return renderTree((el.type as (props: Record<string, unknown>) => unknown)(el.props));
+    }
+    if (typeof el.type === 'object' && el.type !== null && 'value' in el.props) {
+      contextValues.set((el.type as { _context?: unknown })._context ?? el.type, el.props.value);
+      return renderTree(el.props.children);
+    }
+    const rawChildren = el.props.children;
+    const childList = Array.isArray(rawChildren) ? rawChildren : rawChildren !== undefined ? [rawChildren] : [];
+    return {
+      type: String(el.type),
+      props: el.props,
+      children: childList.map(renderTree).filter(c => c !== ''),
+    };
+  }
+
+  function collectText(node: NodeTree | string): string {
+    if (typeof node === 'string') return node;
+    return node.children.map(collectText).join('');
+  }
+
+  function renderWithSettings(settingsState: { adspowerApiKeyConfigured: boolean; adspowerApiKeySource: 'plugin' | 'env' | 'none' }): string {
+    const hookStates: unknown[] = [Date.now(), settingsState, '', null, null];
+    let hookCursor = 0;
+    const prevH = dispatcher?.H;
+    if (dispatcher) {
+      dispatcher.H = {
+        useState(init: unknown) {
+          const idx = hookCursor++;
+          if (idx >= hookStates.length) {
+            hookStates[idx] = typeof init === 'function' ? (init as () => unknown)() : init;
+          }
+          return [hookStates[idx], () => {}];
+        },
+        useEffect() {},
+        useMemo(fn: () => unknown) { return fn(); },
+        useContext(ctx: { _currentValue?: unknown }) {
+          return contextValues.has(ctx) ? contextValues.get(ctx) : ctx._currentValue;
+        },
+      };
+    }
+    try {
+      const Bound = bind(
+        {
+          store: { subscribe: () => () => {}, getState: () => ({} as never) } as never,
+          control: {
+            subscribe: () => () => {},
+            getState: () => ({} as never),
+            usageSettings: async () => settingsState,
+          } as never,
+          openScreen: () => {},
+        },
+        () => React.createElement(AdsPowerKeyCard),
+      );
+      const tree = renderTree(
+        React.createElement(Bound as unknown as React.ComponentType<Record<string, unknown>>, {
+          theme: mockTheme,
+          host: { id: 'h1', label: 'Host' },
+          layout: { compact: false, platform: 'web' },
+        }),
+      );
+      return collectText(tree);
+    } finally {
+      if (dispatcher && prevH) dispatcher.H = prevH;
+    }
+  }
+
+  // 1. 来自环境变量：显示“已配置（来自环境变量）”，且隐藏“清除 API key”按钮
+  const envText = renderWithSettings({ adspowerApiKeyConfigured: true, adspowerApiKeySource: 'env' });
+  assert.ok(envText.includes('已配置（来自环境变量）'));
+  assert.equal(envText.includes('清除 API key'), false);
+
+  // 2. 来自插件设置：显示“已配置”，且显示“清除 API key”按钮
+  const pluginText = renderWithSettings({ adspowerApiKeyConfigured: true, adspowerApiKeySource: 'plugin' });
+  assert.ok(pluginText.includes('当前状态：已配置'));
+  assert.equal(pluginText.includes('已配置（来自环境变量）'), false);
+  assert.ok(pluginText.includes('清除 API key'));
+
+  // 3. 未配置：显示“未配置”，且隐藏“清除 API key”按钮
+  const noneText = renderWithSettings({ adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' });
+  assert.ok(noneText.includes('当前状态：未配置'));
+  assert.equal(noneText.includes('清除 API key'), false);
 });

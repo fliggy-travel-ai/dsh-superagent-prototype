@@ -211,7 +211,7 @@ export default function contribute(server: PluginServerContext) {
     try { await connecting; } catch {}
     try { await initializing; } catch {}
     await Promise.allSettled([automationInitializing, browserInitializing, presenceInitializing]);
-    await Promise.allSettled([automation?.stop(), browser?.stop(), presence?.stop()]);
+    await Promise.allSettled([automation?.stop(), browser?.stop(), presence?.stop(), usageStore.stop()]);
     await presenceHosts?.stop();
     await runtime?.stop();
     await connection?.close();
