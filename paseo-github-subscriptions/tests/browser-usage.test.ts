@@ -191,6 +191,24 @@ test('toUsageReport 覆盖第 6.3 节全部状态行、重置时间已过提示�
   ]);
   assertNoAbsoluteTime(onlineOk);
 
+  // 5b. 在线，ok，5 小时窗口未开始（0%、resetsAt 为 null）且每周窗口有重置时间
+  const notStartedFiveHour = toUsageReport({
+    instanceId: 'env-1',
+    instanceName: '环境 1',
+    lastPostAt: now - 30_000,
+    status: 'ok',
+    fiveHour: { usedPct: 0, resetsAt: null, observedAt },
+    weekly: { usedPct: 46, resetsAt: weeklyReset, observedAt },
+  }, now, true);
+  assert.equal(notStartedFiveHour.status, 'available');
+  assert.equal(notStartedFiveHour.windows[0].usedPct, 0);
+  assert.equal(notStartedFiveHour.windows[0].remainingPct, 100);
+  assert.equal(notStartedFiveHour.windows[0].resetsAt, null);
+  assert.equal(notStartedFiveHour.windows[0].tone, 'ok');
+  assert.equal(notStartedFiveHour.windows[1].usedPct, 46);
+  assert.equal(notStartedFiveHour.windows[1].resetsAt, weeklyReset);
+  assertNoAbsoluteTime(notStartedFiveHour);
+
   // 6. 在线，signed_out，有数据
   const signedOutWithData = toUsageReport({
     instanceId: 'env-1',

@@ -123,15 +123,16 @@ void tick();
 function readDialog() {
   const root = document.querySelector('[data-testid="usage-page-pace"]');
   const rows = [...(root?.querySelectorAll('[role="meter"]') ?? [])].map(meter => {
+    const labelEl = document.getElementById(meter.getAttribute('aria-labelledby'));
     let row = meter;
-    for (let i = 0; i < 6 && row.parentElement && !/Resets /.test(row.textContent); i++) row = row.parentElement;
-    return { label: document.getElementById(meter.getAttribute('aria-labelledby'))?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
+    for (let i = 0; i < 6 && labelEl && row.parentElement && !row.contains(labelEl); i++) row = row.parentElement;
+    return { label: labelEl?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
   });
   return { path: location.pathname, title: document.title, rows, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
 }
 ```
 
-不要在 `Resets` 前加 `\b`：`textContent` 把标签和重置文字连在一起（`Current sessionResets at 6:50 AM`）。按产品分类的行向上查找时可能碰到相邻文字，`parseDialog` 只使用 `Current session` 和 `This week` 两行，所以不受影响。
+不要在 `Resets` 前加 `\b`：`textContent` 把标签和重置文字连在一起（`Current sessionResets at 6:50 AM`）。向上查找只到包含本行标签元素（`aria-labelledby` 指向的节点）的那一层行容器为止，避免 5 小时窗口尚未开始（显示 `Starts with your first message`、无 `Resets` 文字）时越过本行读到每周窗口的重置时间。
 
 ### 5.2 解析与校验函数（纯函数，不碰 DOM）
 

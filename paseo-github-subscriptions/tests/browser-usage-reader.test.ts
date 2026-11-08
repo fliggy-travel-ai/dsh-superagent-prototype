@@ -13,6 +13,7 @@ interface FakeElement {
   children: Array<FakeElement | string>;
   parentElement: FakeElement | null;
   readonly textContent: string;
+  contains(other: FakeElement | null): boolean;
   getAttribute(name: string): string | null;
   querySelector(selector: string): FakeElement | null;
   querySelectorAll(selector: string): FakeElement[];
@@ -35,6 +36,12 @@ function parseHtmlDocument(html: string, pathname = '/new', title = 'New session
       parentElement,
       get textContent(): string {
         return node.children.map(child => typeof child === 'string' ? child : child.textContent).join('');
+      },
+      contains(other: FakeElement | null): boolean {
+        for (let current = other; current; current = current.parentElement) {
+          if (current === node) return true;
+        }
+        return false;
       },
       getAttribute(name: string) {
         return Object.prototype.hasOwnProperty.call(node.attrs, name) ? node.attrs[name] : null;
@@ -227,6 +234,32 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   assert.equal(isUsageUrl('https://claude.ai/code/session_abc'), false);
   assert.equal(isUsageUrl('https://claude.ai/login'), false);
   assert.equal(isUsageUrl('https://example.com/settings/usage'), false);
+
+  // 5 小时窗口尚未开始（显示 "Starts with your first message"、0% used）且每周行有 Resets 时，不越过本行误读每周重置时间
+  const notStartedHtml = dialogFixtureHtml
+    .replace('<span>Resets at 6:50 AM</span>', '<span>Starts with your first message</span>')
+    .replace('aria-valuenow="59" aria-valuetext="59% used" aria-labelledby="_r_55_"', 'aria-valuenow="0" aria-valuetext="0% used" aria-labelledby="_r_55_"')
+    .replace('<span>59% used</span>', '<span>0% used</span>');
+  const notStartedDom = parseHtmlDocument(notStartedHtml, '/new', 'New session - Claude');
+  const notStartedExtracted = runInNewContext(`(${readDialog.toString()})()`, {
+    document: notStartedDom.document,
+    location: notStartedDom.location,
+    Date: FakeDate,
+  });
+  const notStartedParsed = structuredClone(parseDialog(notStartedExtracted));
+  assert.deepEqual(notStartedParsed, {
+    observedAt: '2026-11-08T11:07:20.885Z',
+    fiveHour: {
+      usedPct: 0,
+      resetsAt: null,
+      observedAt: '2026-11-08T11:07:20.885Z',
+    },
+    weekly: {
+      usedPct: 46,
+      resetsAt: '2026-11-14T00:00:00.000Z',
+      observedAt: '2026-11-08T11:07:20.885Z',
+    },
+  });
 });
 
 function createHarness(initialState: Record<string, any> = {}) {

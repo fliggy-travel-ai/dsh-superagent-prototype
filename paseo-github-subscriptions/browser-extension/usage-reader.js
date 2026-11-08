@@ -5,9 +5,10 @@
   function readDialog() {
     const root = document.querySelector('[data-testid="usage-page-pace"]');
     const rows = [...(root?.querySelectorAll('[role="meter"]') ?? [])].map(meter => {
+      const labelEl = document.getElementById(meter.getAttribute('aria-labelledby'));
       let row = meter;
-      for (let i = 0; i < 6 && row.parentElement && !/Resets /.test(row.textContent); i++) row = row.parentElement;
-      return { label: document.getElementById(meter.getAttribute('aria-labelledby'))?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
+      for (let i = 0; i < 6 && labelEl && row.parentElement && !row.contains(labelEl); i++) row = row.parentElement;
+      return { label: labelEl?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
     });
     return { path: location.pathname, title: document.title, rows, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
   }
