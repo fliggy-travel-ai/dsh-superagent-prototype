@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Readable, Writable, PassThrough } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { ProviderEventSchema } from '../node_modules/@getpaseo/plugin/dist/server/provider.js';
-import { mapper, ForwardQueue, hook, install, wait, mcp, createRpc, updateTitle, forward } from '../dist/paseo-cloud-session.mjs';
+import { mapper, ForwardQueue, hook, install, wait, mcp, createRpc, updateTitle, forward, permissionHook, notifyRequest } from '../dist/paseo-cloud-session.mjs';
 const env={PASEO_MINI_HOST:'https://app.paseo.sh/#offer=FAKE-SECRET',CLAUDE_CODE_REMOTE_SESSION_ID:'cse_test12345678'};
 const rows=(await readFile(new URL('../../fixtures/transcript-sample.jsonl',import.meta.url),'utf8')).trim().split('\n').map(JSON.parse);
 test('样例映射两轮、文本和工具结果',()=>{
@@ -26,10 +27,10 @@ test('注册条件与不可达输出',async()=>{
  assert.equal(invoked,0); const result=await hook(input,env,rpc,false); assert.equal(result.trim().split('\n').length,1); assert.ok(!result.includes(env.PASEO_MINI_HOST));
 });
 test('安装保留配置且重复运行不重复',async()=>{
- const home=await mkdtemp(join(tmpdir(),'paseo-install-test-')); try {await mkdir(join(home,'.claude')); await writeFile(join(home,'.claude/settings.json'),JSON.stringify({other:7,hooks:{SessionStart:[{hooks:[{type:'command',command:'existing'}]}]}})); let added=0;
+ const home=await mkdtemp(join(tmpdir(),'paseo-install-test-')); try {await mkdir(join(home,'.claude')); await writeFile(join(home,'.claude/settings.json'),JSON.stringify({other:7,hooks:{SessionStart:[{hooks:[{type:'command',command:'existing'}]}],PermissionRequest:[{hooks:[{type:'command',command:'existing-permission'}]}]}})); let added=0;
  const run=(_cmd,args)=>{if(args[1]==='get' && !added) throw Error(); if(args[1]==='add') added++;};
  await install(home,'/opt/example.mjs',run); await install(home,'/opt/example.mjs',run);
- const settings=JSON.parse(await readFile(join(home,'.claude/settings.json'),'utf8')); assert.equal(settings.other,7); assert.equal(settings.hooks.SessionStart.length,2); assert.equal(added,1);
+ const settings=JSON.parse(await readFile(join(home,'.claude/settings.json'),'utf8')); assert.equal(settings.other,7); assert.equal(settings.hooks.SessionStart.length,2); assert.equal(settings.hooks.PermissionRequest.length,2); assert.equal(settings.hooks.PermissionRequest[0].hooks[0].command,'existing-permission'); assert.match(settings.hooks.PermissionRequest[1].hooks[0].command,/hook-permission-request/); assert.equal(added,1);
  } finally {await rm(home,{recursive:true,force:true});}
 });
 test('断线失败后恢复，按顺序补推未成功条目',async()=>{
@@ -58,9 +59,9 @@ test('MCP 初始化代理后转发工具并保留响应',async()=>{
 
 test('成功注册使用首条用户文本并写入环境文件',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'paseo-hook-test-')); try { const path=join(dir,'session.jsonl'), envFile=join(dir,'env'); await writeFile(path,rows.map(x=>JSON.stringify(x)).join('\n')); let input; const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_hook'+Date.now(),CLAUDE_ENV_FILE:envFile};
- const out=await hook({source:'startup',transcript_path:path},e,async(_c,v)=>{input=v;return {agentId:'agent-example',serverId:'server-example',epoch:'one',created:true};},false);
+ const out=await hook({source:'startup',transcript_path:path},e,async(_c,v)=>{input=v;return {agentId:'agent-example',serverId:'server-example',workspaceId:'workspace-example',epoch:'one',created:true};},false);
  assert.equal(input.title,rows.find(x=>x.type==='user' && typeof x.message?.content==='string' && !x.isMeta).message.content.slice(0,60));
- assert.match(await readFile(envFile,'utf8'),/export PASEO_AGENT_ID='agent-example'/); assert.match(out,/agent-example/); assert.ok(!out.includes(env.PASEO_MINI_HOST));
+ const exported=await readFile(envFile,'utf8'); assert.match(exported,/export PASEO_AGENT_ID='agent-example'/); assert.match(exported,/export PASEO_WORKSPACE_ID='workspace-example'/); assert.match(out,/workspace-example/); assert.match(out,/rename_workspace/); assert.match(out,/agent-example/); assert.ok(!out.includes(env.PASEO_MINI_HOST));
  } finally {await rm(dir,{recursive:true,force:true});}
 });
 
@@ -198,4 +199,51 @@ test('ensure 在配置和未配置备用目录时传入正确字段',async()=>{
  await hook({source:'startup',transcript_path:'missing'}, {...base,PASEO_CLOUD_SESSION_FALLBACK_CWD:''},rpc,false);
  assert.equal(seen[0].cwd,'/cloud/work/project'); assert.equal(seen[0].fallbackCwd,'/mac/fallback');
  assert.equal(seen[1].cwd,process.cwd()); assert.equal(Object.hasOwn(seen[1],'fallbackCwd'),false);
+});
+
+test('MCP 初始化说明含工作区编号和阶段改名要求',async()=>{
+ const input=Readable.from([JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize'})+'\n']); let outputText=''; const output=new Writable({write(c,_e,cb){outputText+=c;cb();}});
+ await mcp({...env,PASEO_WORKSPACE_ID:'workspace-example'},async()=>{},input,output);
+ const text=JSON.parse(outputText).result.instructions; assert.match(text,/workspace-example/); assert.match(text,/rename_workspace/); assert.match(text,/需求阶段变化/);
+});
+
+test('权限钩子立即返回并由分离后台进程通知，工具 ID 从记录查找',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'paseo-notify-test-')), file=join(dir,'log'), transcript=join(dir,'transcript'), worker=join(dir,'worker.mjs');
+ const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_notify'+Date.now(),TEST_OUTPUT:file};
+ await writeFile(transcript,[{type:'assistant',message:{content:[{type:'tool_use',name:'AskUserQuestion',id:'old-id',input:{}}]}},{type:'assistant',message:{content:[{type:'tool_use',name:'AskUserQuestion',id:'new-id',input:{}}]}}].map(JSON.stringify).join('\n')+'\n');
+ const bundle=pathToFileURL(join(process.cwd(),'dist/paseo-cloud-session.mjs')).href;
+ await writeFile(worker,`import {notifyRequest} from ${JSON.stringify(bundle)}; import {writeFile} from 'node:fs/promises'; let data=''; for await(const c of process.stdin) data+=c; await new Promise(r=>setTimeout(r,1200)); await notifyRequest(JSON.parse(data),process.env,async(c,v)=>{await writeFile(process.env.TEST_OUTPUT,JSON.stringify({method:c.name,input:v})); return {shown:true};});`);
+ const input={hook_event_name:'PermissionRequest',session_id:'example',transcript_path:transcript,tool_name:'AskUserQuestion',tool_input:{questions:[{question:'问题？'}]}};
+ try {const start=Date.now(); permissionHook(input,e,(_exe,_args,opts)=>spawn(process.execPath,[worker],opts)); assert.ok(Date.now()-start<1000); await waitFor(async()=>{try{await statFile(file); return true;}catch{return false;}}); const record=JSON.parse(await readFile(file,'utf8')); assert.equal(record.method,'cloud-session.request.notify'); assert.equal(record.input.request.toolUseId,'new-id'); assert.equal(record.input.request.kind,'question'); assert.deepEqual(record.input.request.input,input.tool_input);}
+ finally {await rm(dir,{recursive:true,force:true});}
+});
+const statFile=async path=>readFile(path);
+
+test('权限钩子不可达时进程立即退出且无输出与决定',async()=>{
+ const e={...process.env,PASEO_MINI_HOST:'ws://127.0.0.1:1',CLAUDE_CODE_REMOTE_SESSION_ID:'cse_permission'+Date.now(),PASEO_AGENT_ID:''};
+ const child=spawn(process.execPath,['dist/paseo-cloud-session.mjs','hook-permission-request'],{env:e,stdio:['pipe','pipe','pipe']}); let stdout='',stderr=''; child.stdout.on('data',x=>stdout+=x); child.stderr.on('data',x=>stderr+=x);
+ const start=Date.now(); child.stdin.end(JSON.stringify({tool_name:'Read',tool_use_id:'example-id',tool_input:{file_path:'example'}}));
+ const code=await Promise.race([new Promise((resolve,reject)=>{child.on('exit',resolve);child.on('error',reject);}),new Promise((_,reject)=>setTimeout(()=>{child.kill();reject(Error('permission hook timed out'));},2000).unref())]);
+ assert.equal(code,0); assert.ok(Date.now()-start<1000); assert.equal(stdout,''); assert.ok(!stderr.includes(e.PASEO_MINI_HOST)); assert.ok(!stderr.includes('decision'));
+});
+
+test('工具结果在通知前后到达都能关闭已通知请求',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'paseo-resolve-test-')), path=join(dir,'transcript'); await writeFile(path,'');
+ const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_resolve'+Date.now()}; const lock=join(tmpdir(),'paseo-cloud-session-'+createHash('sha256').update(e.CLAUDE_CODE_REMOTE_SESSION_ID).digest('hex'),'forward.pid');
+ const seen=[]; const rpc=async(c,v)=>{if(c.name.endsWith('ensure')) return {agentId:'a',workspaceId:'w',epoch:'e'}; if(c.name.endsWith('timeline.push')) return {accepted:v.items.length,epoch:'e'}; if(c.name.endsWith('request.notify')) {seen.push({type:'notify',value:v}); return {shown:true};} if(c.name.endsWith('request.resolve')) {seen.push({type:'resolve',value:v}); return {closed:true};} throw Error('unexpected RPC');};
+ const task=forward(path,e,rpc,0);
+ try {await waitFor(async()=>{try{return JSON.parse(await readFile(lock,'utf8')).path===path;}catch{return false;}});
+  const result=(id,content,isError=false,interrupted=false)=>({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content,is_error:isError}]},toolUseResult:{interrupted}});
+  await writeFile(path,[result('a','Permission denied: unable to open file',true),result('b','Permission denied by user',true),result('c','interrupted',true,true)].map(JSON.stringify).join('\n')+'\n');
+  await new Promise(r=>setTimeout(r,700));
+  for(const id of ['a','b','c']) await notifyRequest({tool_name:'Bash',tool_use_id:id,tool_input:{command:'example'}},e,rpc);
+  await waitFor(()=>seen.filter(x=>x.type==='resolve').length===3); assert.ok(seen.filter(x=>x.type==='notify').every(x=>x.value.request.kind==='tool'));
+  assert.deepEqual(seen.filter(x=>x.type==='resolve').map(x=>[x.value.toolUseId,x.value.outcome]),[['a','answered'],['b','denied'],['c','canceled']]);
+ } finally {try {await writeFile(lock,JSON.stringify({pid:process.pid,path:'finished',token:'finished'}));} catch {} await task; await rm(dir,{recursive:true,force:true});}
+});
+
+test('权限钩子不为不符合注册条件的会话启动后台进程',()=>{
+ let count=0; const launch=()=>{count++;throw Error('unexpected launch');}; const input={tool_name:'Read',tool_input:{file_path:'example'}};
+ for(const e of [{...env,PASEO_MINI_HOST:''},{...env,CLAUDE_CODE_REMOTE_SESSION_ID:''},{...env,PASEO_AGENT_ID:'other'}]) permissionHook(input,e,launch);
+ permissionHook({...input,agent_id:'subagent'},env,launch); assert.equal(count,0);
 });
