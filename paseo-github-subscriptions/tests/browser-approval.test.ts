@@ -71,3 +71,219 @@ test('只点权限窗口，不点永久授权、禁用按钮、代码正文或�
   }
   const generic = await page({ title: 'Allow', text: 'Allow Claude to run this command? Allow Deny' }); assert.equal(generic.count(), 1);
 });
+
+class DomNode {
+  parentElement: DomNode | null = null;
+  children: DomNode[] = [];
+  tagName: string;
+  attrs: Record<string, string> = {};
+  disabled = false;
+  hidden = false;
+  clicks = 0;
+  events: any[] = [];
+  onClick: (() => void) | null = null;
+  private textParts: Array<DomNode | string> = [];
+
+  constructor(tagName: string, rawAttrs: Record<string, any> = {}, childSpecs: any[] = []) {
+    this.tagName = tagName.toUpperCase();
+    for (const [k, v] of Object.entries(rawAttrs)) {
+      if (k === '.disabled') this.disabled = Boolean(v);
+      else this.attrs[k] = String(v);
+    }
+    if ('disabled' in this.attrs) this.disabled = true;
+    for (const spec of childSpecs) {
+      if (typeof spec === 'string') {
+        this.textParts.push(spec);
+      } else if (Array.isArray(spec)) {
+        const child = DomNode.fromTuple(spec);
+        child.parentElement = this;
+        this.children.push(child);
+        this.textParts.push(child);
+      }
+    }
+  }
+
+  static fromTuple(tuple: any[]): DomNode {
+    const [tag, attrs, ...children] = tuple;
+    return new DomNode(tag, attrs || {}, children);
+  }
+
+  appendChild(child: DomNode) {
+    child.parentElement = this;
+    this.children.push(child);
+    this.textParts.push(child);
+    return child;
+  }
+
+  get isConnected(): boolean {
+    let cur: DomNode | null = this;
+    while (cur?.parentElement) cur = cur.parentElement;
+    return cur?.tagName === 'HTML';
+  }
+
+  get innerText(): string {
+    return this.textParts.map(part => (typeof part === 'string' ? part : part.innerText)).filter(Boolean).join(' ');
+  }
+
+  get textContent(): string {
+    return this.innerText;
+  }
+
+  getAttribute(name: string): string | null {
+    return Object.hasOwn(this.attrs, name) ? this.attrs[name]! : null;
+  }
+
+  getBoundingClientRect() {
+    return this.hidden ? { width: 0, height: 0 } : { width: 100, height: 24 };
+  }
+
+  matches(selector: string): boolean {
+    return selector.split(',').some(raw => {
+      const part = raw.trim();
+      if (!part) return false;
+      const tagMatch = part.match(/^[a-z0-9]+/i);
+      if (tagMatch && this.tagName.toLowerCase() !== tagMatch[0].toLowerCase()) return false;
+      const attrRe = /\[([a-z0-9_-]+)(?:="([^"]*)")?\]/gi;
+      let m: RegExpExecArray | null;
+      while ((m = attrRe.exec(part)) !== null) {
+        const attrName = m[1]!;
+        const attrVal = m[2];
+        if (!Object.hasOwn(this.attrs, attrName)) return false;
+        if (attrVal !== undefined && this.attrs[attrName] !== attrVal) return false;
+      }
+      if (part.includes(':checked')) return false;
+      return true;
+    });
+  }
+
+  closest(selector: string): DomNode | null {
+    for (let cur: DomNode | null = this; cur; cur = cur.parentElement) {
+      if (cur.matches(selector)) return cur;
+    }
+    return null;
+  }
+
+  descendants(): DomNode[] {
+    return this.children.flatMap(child => [child, ...child.descendants()]);
+  }
+
+  querySelectorAll(selector: string): DomNode[] {
+    return this.descendants().filter(node => node.matches(selector));
+  }
+
+  querySelector(selector: string): DomNode | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  click() {
+    this.clicks++;
+    this.onClick?.();
+  }
+
+  dispatchEvent(event: any) {
+    this.events.push(event);
+    return true;
+  }
+}
+
+test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once，无该项时按 Escape 关闭并记 skipped，永不点 Always allow', async () => {
+  const mcpCardFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
+  const mcpMenuFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-menu.json', import.meta.url), 'utf8'));
+
+  async function runMcpScenario(menuItems: Array<{ role: string; text: string; 'aria-keyshortcuts'?: string }>, dismissOnClick = true) {
+    const cardTree = DomNode.fromTuple(mcpCardFixture.tree);
+    const body = new DomNode('body', {}, []);
+    body.appendChild(cardTree);
+    const html = new DomNode('html', {}, []);
+    html.appendChild(body);
+
+    const allButtons = html.querySelectorAll('button');
+    const denyButton = allButtons.find(b => b.innerText.includes('Deny'))!;
+    const alwaysAllowButton = allButtons.find(b => b.innerText.includes('Always allow'))!;
+    const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
+
+    const createdMenuItems: DomNode[] = [];
+    moreButton.onClick = () => {
+      const menu = new DomNode('div', { role: mcpMenuFixture.menu.role, ...mcpMenuFixture.menu.attrs }, []);
+      for (const itemSpec of menuItems) {
+        const item = new DomNode('div', {
+          role: itemSpec.role,
+          ...(itemSpec['aria-keyshortcuts'] ? { 'aria-keyshortcuts': itemSpec['aria-keyshortcuts'] } : {}),
+        }, [itemSpec.text]);
+        item.onClick = () => {
+          if (dismissOnClick) cardTree.parentElement = null;
+        };
+        createdMenuItems.push(item);
+        menu.appendChild(item);
+      }
+      body.appendChild(menu);
+    };
+
+    const timers: (() => void)[] = [];
+    const audit: Array<{ button: string; status: string }> = [];
+    const context = {
+      document: {
+        documentElement: html,
+        body,
+        activeElement: moreButton,
+        querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+        querySelector: (sel: string) => html.querySelector(sel),
+        dispatchEvent: (ev: any) => body.dispatchEvent(ev),
+      },
+      location: { origin: 'https://claude.ai', pathname: '/code/session_mcp123' },
+      chrome: {
+        storage: {
+          local: { get: async () => ({ approvalEnabled: true }) },
+          onChanged: { addListener: () => {} },
+        },
+        runtime: {
+          sendMessage: async (message: any) => {
+            if (message.type === 'approval-reserve') {
+              audit.push({ button: message.button, status: 'reserved' });
+              return { allowed: true, reservationId: 'res-mcp-1' };
+            }
+            if (message.type === 'approval-result') {
+              audit[audit.length - 1]!.status = message.status;
+            }
+          },
+        },
+      },
+      crypto: { subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() } },
+      TextEncoder,
+      Uint8Array,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+      MutationObserver: class { observe() {} },
+      setTimeout: (fn: () => void) => { timers.push(fn); },
+      setInterval: () => {},
+      Date,
+      WeakMap,
+    };
+
+    runInNewContext(source, context);
+    for (let step = 0; step < 20; step++) {
+      while (timers.length) timers.shift()!();
+      await Promise.resolve();
+    }
+
+    return { denyButton, alwaysAllowButton, moreButton, createdMenuItems, body, audit };
+  }
+
+  // 1. 菜单含 Allow once（真实样本）：打开菜单并只点击 Allow once，不点 Always allow 或 Deny
+  const okRun = await runMcpScenario(mcpMenuFixture.menu.items, true);
+  assert.equal(okRun.alwaysAllowButton.clicks, 0);
+  assert.equal(okRun.denyButton.clicks, 0);
+  assert.equal(okRun.moreButton.clicks, 1);
+  assert.equal(okRun.createdMenuItems.length, 1);
+  assert.equal(okRun.createdMenuItems[0]!.clicks, 1);
+  assert.deepEqual(okRun.audit, [{ button: 'Allow once', status: 'dismissed' }]);
+
+  // 2. 菜单中只有 Always allow、没有 Allow once：按 Escape 关闭菜单并记 skipped，永不点 Always allow
+  const missingRun = await runMcpScenario([{ role: 'menuitem', text: 'Always allow' }], true);
+  assert.equal(missingRun.alwaysAllowButton.clicks, 0);
+  assert.equal(missingRun.denyButton.clicks, 0);
+  assert.equal(missingRun.moreButton.clicks, 1);
+  assert.equal(missingRun.createdMenuItems[0]!.clicks, 0);
+  const escapeEvents = [...missingRun.moreButton.events, ...missingRun.body.events].filter(ev => ev?.key === 'Escape');
+  assert.ok(escapeEvents.length >= 1);
+  assert.deepEqual(missingRun.audit, [{ button: 'Allow once', status: 'skipped' }]);
+});

@@ -15,14 +15,32 @@
   const allow = /^(?:allow|允许)$/i;
   const permission = /(?:permission|allow claude|授权|权限|允许 Claude)/i;
   const permanent = /always|don't ask again|do not ask again|remember|this session|始终|不再询问|记住|本次会话/i;
-  function eligible(button, scope, text) {
-    if (button.disabled || button.getAttribute('aria-disabled') === 'true' || !visible(button)) return false;
-    if (scope.querySelector('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"],[role="switch"][aria-checked="true"],[aria-pressed="true"]')) return false;
-    if (scope.querySelector('input[type="radio"],[role="radio"],[role="radiogroup"],select,[role="listbox"]')) return false;
-    const heading = scope.querySelector('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
+  function cardSafe(scope, text) {
+    if (scope.querySelector?.('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"],[role="switch"][aria-checked="true"],[aria-pressed="true"]')) return false;
+    if (scope.querySelector?.('input[type="radio"],[role="radio"],[role="radiogroup"],select,[role="listbox"]')) return false;
+    const heading = scope.querySelector?.('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
     if (/\bplan\b|\bproceed\b|计划|方案确认/i.test(heading)) return false;
     if (/AskUserQuestion|ExitPlanMode|\(Recommended\)|\(推荐\)|请选择|Which option|Choose an answer/i.test(text)) return false;
+    return true;
+  }
+  function eligible(button, scope, text) {
+    if (button.disabled || button.getAttribute('aria-disabled') === 'true' || !visible(button) || !cardSafe(scope, text)) return false;
+    const heading = scope.querySelector?.('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
     return once.test(label(button)) || (allow.test(label(button)) && permission.test(heading) && !permanent.test(text));
+  }
+  function closeMenu(target) {
+    const event = typeof KeyboardEvent === 'function'
+      ? new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true })
+      : { type: 'keydown', key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true };
+    for (const node of [document.activeElement, target, document.body, document]) {
+      try { node?.dispatchEvent?.(event); } catch {}
+    }
+  }
+  function findAllowOnceMenuItem() {
+    const items = [...(document.querySelectorAll?.('[role="menuitem"]') || [])].filter(
+      item => !item.disabled && item.getAttribute?.('aria-disabled') !== 'true' && visible(item),
+    );
+    return items.find(item => label(item) === 'Allow once') || null;
   }
   async function clickOnce(button, scope, text) {
     busy = true;
@@ -41,6 +59,35 @@
       button.click();
       await new Promise(resolve => setTimeout(resolve, 1500));
       await report(!button.isConnected || !visible(button) ? 'dismissed' : 'still-visible');
+    } catch {} finally { busy = false; }
+  }
+  async function clickMenuOnce(moreButton, card, text) {
+    busy = true;
+    try {
+      const currentPath = location.pathname;
+      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${currentPath}\n${text}`));
+      const digest = [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+      const reservation = await chrome.runtime.sendMessage({ type: 'approval-reserve', digest, button: 'Allow once' });
+      if (!reservation?.allowed) return;
+      const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
+      if (!enabled || currentPath !== location.pathname || !card.isConnected || !moreButton.isConnected || moreButton.disabled || moreButton.getAttribute?.('aria-disabled') === 'true' || !visible(moreButton) || (card.innerText || card.textContent || '') !== text || !cardSafe(card, text)) {
+        await report('skipped');
+        return;
+      }
+      moreButton.click();
+      let item = findAllowOnceMenuItem();
+      if (!item) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        item = findAllowOnceMenuItem();
+      }
+      if (!item || !enabled || currentPath !== location.pathname || !card.isConnected) {
+        closeMenu(moreButton);
+        await report('skipped');
+        return;
+      }
+      item.click();
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      await report(!card.isConnected || !visible(card) || !moreButton.isConnected || !visible(moreButton) ? 'dismissed' : 'still-visible');
     } catch {} finally { busy = false; }
   }
   function scan() {
@@ -62,6 +109,19 @@
         void clickOnce(button, scope, text);
         return;
       }
+    }
+    const cards = [...(document.querySelectorAll('[data-approval-card-root]') || [])].filter(
+      card => card.getAttribute?.('role') === 'group' && /^Permission request:/i.test((card.getAttribute?.('aria-label') || '').trim()) && visible(card),
+    );
+    for (const card of cards) {
+      const text = card.innerText || card.textContent || '';
+      if (text.length > 16000 || !cardSafe(card, text)) continue;
+      const peers = [...card.querySelectorAll('button,[role="button"]')].filter(visible);
+      if (peers.some(peer => once.test(label(peer))) || !peers.some(peer => deny.test(label(peer)))) continue;
+      const moreButton = peers.find(peer => (peer.getAttribute?.('aria-label') || '').trim() === 'More allow options' && !peer.disabled && peer.getAttribute?.('aria-disabled') !== 'true');
+      if (!moreButton) continue;
+      void clickMenuOnce(moreButton, card, text);
+      return;
     }
   }
   function schedule() {
