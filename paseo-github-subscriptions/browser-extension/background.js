@@ -283,44 +283,66 @@ const APPROVAL_RETRY_INTERVAL_MS = 5000;
 const APPROVAL_MAX_RETRY_DURATION_MS = 3 * 60 * 1000;
 const APPROVAL_MAX_CLICKS_PER_CARD = 36;
 const APPROVAL_DISMISSED_COOLDOWN_MS = 10000;
+const APPROVAL_RESERVED_TIMEOUT_MS = 30 * 1000;
+const APPROVAL_LABEL_MIN_INTERVAL_MS = 5000;
+const APPROVAL_SESSION_WINDOW_MS = 60 * 1000;
+const APPROVAL_MAX_CLICKS_PER_SESSION_WINDOW = 12;
 const ALLOW_ONCE_RE = /^(?:allow once|allow just this once|yes, allow once|允许一次|只允许一次)$/i;
+const numCfg = (key, fallback, min = 0) => {
+  const raw = globalThis.__paseoApprovalConfig?.[key];
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= min ? raw : fallback;
+};
 let approvalWrites = Promise.resolve();
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === 'approval-reserve' || message?.type === 'approval-result') {
     const session = sessionId(sender.tab?.url);
     if (!session || sender.tab?.id == null || !/^[a-f0-9]{64}$/.test(message.digest || '')) return;
-    const cfg = globalThis.__paseoApprovalConfig || {};
-    const retryIntervalMs = cfg.retryIntervalMs ?? APPROVAL_RETRY_INTERVAL_MS;
-    const maxRetryDurationMs = cfg.maxRetryDurationMs ?? APPROVAL_MAX_RETRY_DURATION_MS;
-    const maxClicksPerCard = cfg.maxClicksPerCard ?? APPROVAL_MAX_CLICKS_PER_CARD;
-    const dismissedCooldownMs = cfg.dismissedCooldownMs ?? APPROVAL_DISMISSED_COOLDOWN_MS;
+    const retryIntervalMs = numCfg('retryIntervalMs', APPROVAL_RETRY_INTERVAL_MS, 1);
+    const maxRetryDurationMs = numCfg('maxRetryDurationMs', APPROVAL_MAX_RETRY_DURATION_MS, 1);
+    const maxClicksPerCard = numCfg('maxClicksPerCard', APPROVAL_MAX_CLICKS_PER_CARD, 1);
+    const dismissedCooldownMs = numCfg('dismissedCooldownMs', APPROVAL_DISMISSED_COOLDOWN_MS, 1);
+    const reservedTimeoutMs = numCfg('reservedTimeoutMs', APPROVAL_RESERVED_TIMEOUT_MS, 1);
+    const labelMinIntervalMs = numCfg('labelMinIntervalMs', APPROVAL_LABEL_MIN_INTERVAL_MS, 0);
+    const sessionWindowMs = numCfg('sessionWindowMs', APPROVAL_SESSION_WINDOW_MS, 1);
+    const maxClicksPerSessionWindow = numCfg('maxClicksPerSessionWindow', APPROVAL_MAX_CLICKS_PER_SESSION_WINDOW, 1);
     const cardId = typeof message.cardId === 'string' && message.cardId.trim().length > 0 && message.cardId.length <= 128
       ? message.cardId.trim()
+      : undefined;
+    const labelDigest = typeof message.labelDigest === 'string' && /^[a-f0-9]{64}$/.test(message.labelDigest)
+      ? message.labelDigest
       : undefined;
     const operation = approvalWrites.then(async () => {
       const stored = await chrome.storage.local.get(['approvalAudit', 'approvalEnabled']);
       const audit = Array.isArray(stored.approvalAudit) ? stored.approvalAudit : [];
+      const now = Date.now();
+      for (const entry of audit) {
+        if (entry.status === 'reserved') {
+          const atMs = Date.parse(entry.at);
+          if (!Number.isFinite(atMs) || now - atMs >= reservedTimeoutMs) {
+            entry.status = 'still-visible';
+            entry.observedAt = new Date(Number.isFinite(atMs) ? atMs + reservedTimeoutMs : now).toISOString();
+          }
+        }
+      }
       if (message.type === 'approval-reserve') {
         if (stored.approvalEnabled === false || typeof message.button !== 'string' || message.button.length > 100) return { allowed: false };
-        const now = Date.now();
         const cardEntries = audit.filter(entry =>
           entry.sessionId === session && (cardId ? entry.cardId === cardId : !entry.cardId && entry.digest === message.digest),
         );
-        const previous = cardEntries.at(-1);
-        if (previous) {
-          if (previous.status === 'reserved') return { allowed: false };
-          const clickCount = cardEntries.filter(entry => entry.status !== 'skipped').length;
-          if (clickCount >= maxClicksPerCard) return { allowed: false };
-          const observedMs = Date.parse(previous.observedAt);
-          if (previous.status === 'dismissed') {
-            if (cardId || !Number.isFinite(observedMs) || now - observedMs < dismissedCooldownMs) return { allowed: false };
-          } else if (previous.status === 'skipped') {
-            if (!Number.isFinite(observedMs) || now - observedMs < dismissedCooldownMs) return { allowed: false };
-          } else if (previous.status === 'still-visible') {
+        const lastEntry = cardEntries.at(-1);
+        if (lastEntry) {
+          if (lastEntry.status === 'reserved') return { allowed: false };
+          if (cardEntries.length >= maxClicksPerCard) return { allowed: false };
+          const lastObservedMs = Date.parse(lastEntry.observedAt || lastEntry.at);
+          const effectivePrevious = cardEntries.findLast(entry => entry.status !== 'skipped');
+          if (effectivePrevious?.status === 'dismissed') {
+            if (cardId || !Number.isFinite(lastObservedMs) || now - lastObservedMs < dismissedCooldownMs) return { allowed: false };
+          } else if (effectivePrevious?.status === 'still-visible' || lastEntry.status === 'skipped') {
             if (!ALLOW_ONCE_RE.test(message.button.trim())) return { allowed: false };
             if (!message.resetRetryWindow) {
-              if (!Number.isFinite(observedMs) || now - observedMs < retryIntervalMs) return { allowed: false };
-              const windowStartEntry = cardEntries.findLast(entry => entry.retryWindowStartAt) || cardEntries.find(entry => entry.status !== 'skipped') || cardEntries[0];
+              const requiredWait = effectivePrevious?.status === 'still-visible' ? retryIntervalMs : Math.min(retryIntervalMs, dismissedCooldownMs);
+              if (!Number.isFinite(lastObservedMs) || now - lastObservedMs < requiredWait) return { allowed: false };
+              const windowStartEntry = cardEntries.findLast(entry => entry.retryWindowStartAt) || cardEntries[0];
               const firstMs = Date.parse(windowStartEntry.retryWindowStartAt || windowStartEntry.at || windowStartEntry.observedAt);
               if (!Number.isFinite(firstMs) || now - firstMs > maxRetryDurationMs) return { allowed: false };
             }
@@ -328,12 +350,31 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
             return { allowed: false };
           }
         }
+        if (labelDigest) {
+          const sameLabelEntries = audit.filter(entry => entry.sessionId === session && entry.labelDigest === labelDigest);
+          const lastLabelEntry = sameLabelEntries.at(-1);
+          if (lastLabelEntry) {
+            if (lastLabelEntry.status === 'reserved') return { allowed: false };
+            const lastLabelMs = Date.parse(lastLabelEntry.observedAt || lastLabelEntry.at);
+            const isSameCardVisibilityReset = Boolean(message.resetRetryWindow && cardId && lastLabelEntry.cardId === cardId);
+            if (!isSameCardVisibilityReset && (!Number.isFinite(lastLabelMs) || now - lastLabelMs < labelMinIntervalMs)) {
+              return { allowed: false };
+            }
+          }
+        }
+        const recentSessionEntries = audit.filter(entry => {
+          if (entry.sessionId !== session) return false;
+          const entryMs = Date.parse(entry.at || entry.observedAt);
+          return Number.isFinite(entryMs) && now - entryMs < sessionWindowMs;
+        });
+        if (recentSessionEntries.length >= maxClicksPerSessionWindow) return { allowed: false };
         const reservationId = crypto.randomUUID();
         audit.push({
           sessionId: session,
           tabId: sender.tab.id,
           digest: message.digest,
           ...(cardId ? { cardId } : {}),
+          ...(labelDigest ? { labelDigest } : {}),
           ...(message.resetRetryWindow ? { retryWindowStartAt: new Date(now).toISOString() } : {}),
           reservationId,
           button: message.button,
@@ -349,7 +390,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         );
         if (!previous || previous.tabId !== sender.tab.id || previous.status !== 'reserved' || !['dismissed', 'still-visible', 'skipped'].includes(message.status)) return { allowed: false };
         previous.status = message.status;
-        previous.observedAt = new Date().toISOString();
+        previous.observedAt = new Date(now).toISOString();
         await chrome.storage.local.set({ approvalAudit: audit.slice(-300) });
         schedule();
         return { allowed: true, reservationId: previous.reservationId };

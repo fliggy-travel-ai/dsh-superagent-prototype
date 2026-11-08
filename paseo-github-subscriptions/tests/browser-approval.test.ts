@@ -137,6 +137,10 @@ class DomNode {
     this.attrs[name] = String(value);
   }
 
+  removeAttribute(name: string) {
+    delete this.attrs[name];
+  }
+
   setText(value: string) {
     this.textParts = [value];
   }
@@ -194,7 +198,7 @@ class DomNode {
   }
 }
 
-test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once，无该项时按 Escape 关闭并记 skipped，永不点 Always allow', async () => {
+test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once，无该项时再次点击菜单按钮关闭并记 skipped，不发 Escape 且永不点 Always allow 或 Deny', async () => {
   const mcpCardFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
   const mcpMenuFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-menu.json', import.meta.url), 'utf8'));
 
@@ -214,13 +218,31 @@ test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once
     const alwaysAllowButton = allButtons.find(b => b.innerText.includes('Always allow'))!;
     const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
 
+    // 模拟页面监听 Escape 快捷键触发 Deny（Deny 按钮有 aria-keyshortcuts="Escape"）
+    const origBodyDispatch = body.dispatchEvent.bind(body);
+    body.dispatchEvent = (ev: any) => {
+      if (ev?.key === 'Escape') denyButton.click();
+      return origBodyDispatch(ev);
+    };
+    const origMoreDispatch = moreButton.dispatchEvent.bind(moreButton);
+    moreButton.dispatchEvent = (ev: any) => {
+      if (ev?.key === 'Escape') denyButton.click();
+      return origMoreDispatch(ev);
+    };
+
     // 页面上另有一个 aria-labelledby 指向无关按钮的菜单，其内也有 Allow once，必须被忽略
     const strayItem = new DomNode('div', { role: 'menuitem' }, ['Allow once']);
     const strayMenu = new DomNode('div', { role: 'menu', 'aria-labelledby': 'unrelated-button-id' }, [strayItem]);
     body.appendChild(strayMenu);
 
     const createdMenuItems: DomNode[] = [];
+    let activeMenu: DomNode | null = null;
     moreButton.onClick = () => {
+      if (activeMenu && activeMenu.parentElement) {
+        activeMenu.parentElement = null;
+        activeMenu = null;
+        return;
+      }
       const menu = new DomNode('div', {
         role: mcpMenuFixture.menu.role,
         ...mcpMenuFixture.menu.attrs,
@@ -237,6 +259,7 @@ test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once
         createdMenuItems.push(item);
         menu.appendChild(item);
       }
+      activeMenu = menu;
       body.appendChild(menu);
     };
 
@@ -299,19 +322,19 @@ test('MCP 权限卡片样本：打开 More allow options 菜单只点 Allow once
   assert.equal(okRun.strayItem.clicks, 0);
   assert.deepEqual(okRun.audit, [{ button: 'Allow once', status: 'dismissed' }]);
 
-  // 2. 菜单中只有 Always allow、没有 Allow once（即便页面其他菜单有 Allow once）：按 Escape 关闭菜单并记 skipped，永不点 Always allow 或其他菜单的 Allow once
+  // 2. 菜单中只有 Always allow、没有 Allow once（即便页面其他菜单有 Allow once）：再次点击 moreButton 关闭菜单并记 skipped，不派发 Escape，Deny 点击次数为 0
   const missingRun = await runMcpScenario([{ role: 'menuitem', text: 'Always allow' }], true);
   assert.equal(missingRun.alwaysAllowButton.clicks, 0);
   assert.equal(missingRun.denyButton.clicks, 0);
-  assert.equal(missingRun.moreButton.clicks, 1);
+  assert.equal(missingRun.moreButton.clicks, 2);
   assert.equal(missingRun.createdMenuItems[0]!.clicks, 0);
   assert.equal(missingRun.strayItem.clicks, 0);
   const escapeEvents = [...missingRun.moreButton.events, ...missingRun.body.events].filter(ev => ev?.key === 'Escape');
-  assert.ok(escapeEvents.length >= 1);
+  assert.equal(escapeEvents.length, 0);
   assert.deepEqual(missingRun.audit, [{ button: 'Allow once', status: 'skipped' }]);
 });
 
-test('新样式 MCP 权限卡片样本：可见按钮含 Allow once 与 More allow options 时直接只点 Allow once，指纹包含 [data-approval-card-root] 全文、aria-label 与 data-ddev-card-id', async () => {
+test('新样式 MCP 权限卡片样本：可见按钮含 Allow once 与 More allow options 时直接只点 Allow once，指纹包含 [data-approval-card-root] 全文、aria-label 与 data-ddev-card-id，关闭后清除 data-ddev-card-id', async () => {
   const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
   const cardTree = DomNode.fromTuple(directFixture.tree);
   const body = new DomNode('body', {}, []);
@@ -325,12 +348,16 @@ test('新样式 MCP 权限卡片样本：可见按钮含 Allow once 与 More all
   const allowOnceButton = allButtons.find(b => b.innerText.includes('Allow once'))!;
   const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
 
+  let cardIdAtClick: string | null = null;
+  let cardLabelAtClick: string | null = null;
   allowOnceButton.onClick = () => {
+    cardIdAtClick = cardRoot.getAttribute('data-ddev-card-id');
+    cardLabelAtClick = cardRoot.getAttribute('data-ddev-card-label');
     cardTree.parentElement = null;
   };
 
   const timers: (() => void)[] = [];
-  const reserves: Array<{ digest: string; cardId?: string; button: string }> = [];
+  const reserves: Array<{ digest: string; cardId?: string; labelDigest?: string; button: string }> = [];
   const results: Array<{ digest: string; status: string }> = [];
   let uuidCounter = 0;
 
@@ -351,7 +378,7 @@ test('新样式 MCP 权限卡片样本：可见按钮含 Allow once 与 More all
       runtime: {
         sendMessage: async (message: any) => {
           if (message.type === 'approval-reserve') {
-            reserves.push({ digest: message.digest, cardId: message.cardId, button: message.button });
+            reserves.push({ digest: message.digest, cardId: message.cardId, labelDigest: message.labelDigest, button: message.button });
             return { allowed: true, reservationId: 'res-direct-1' };
           }
           if (message.type === 'approval-result') {
@@ -383,14 +410,19 @@ test('新样式 MCP 权限卡片样本：可见按钮含 Allow once 与 More all
   assert.equal(allowOnceButton.clicks, 1);
   assert.equal(denyButton.clicks, 0);
   assert.equal(moreButton.clicks, 0);
-  assert.equal(cardRoot.getAttribute('data-ddev-card-id'), 'card-uuid-1');
+  assert.equal(cardIdAtClick, 'card-uuid-1');
+  assert.equal(cardLabelAtClick, 'Permission request: use list hosts (paseo)');
+  assert.equal(cardRoot.getAttribute('data-ddev-card-id'), null);
+  assert.equal(cardRoot.getAttribute('data-ddev-card-label'), null);
   assert.equal(reserves.length, 1);
   assert.equal(reserves[0]!.cardId, 'card-uuid-1');
   assert.equal(reserves[0]!.button, 'Allow once');
 
   const expectedRaw = `v2\n/code/session_direct123\ncard-uuid-1\nPermission request: use list hosts (paseo)\n${cardRoot.innerText}`;
   const expectedDigest = createHash('sha256').update(expectedRaw).digest('hex');
+  const expectedLabelDigest = createHash('sha256').update('v2-label\n/code/session_direct123\nPermission request: use list hosts (paseo)').digest('hex');
   assert.equal(reserves[0]!.digest, expectedDigest);
+  assert.equal(reserves[0]!.labelDigest, expectedLabelDigest);
   assert.deepEqual(results, [{ digest: expectedDigest, status: 'dismissed' }]);
 });
 
@@ -401,6 +433,17 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
   const sessionPath = '/code/session_01XKJ85kumsMsemTjaRUfwh7';
   const sessionUrl = `https://claude.ai${sessionPath}`;
   const legacyV1Digest = createHash('sha256').update(`${sessionPath}\nDeny Allow once ⌘ Command ⏎ Enter`).digest('hex');
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
 
   // 预置 01XKJ85kumsMsemTjaRUfwh7 在 07:44:05 UTC 的旧版 still-visible 记录（无 cardId）
   const storageState: Record<string, any> = {
@@ -465,7 +508,7 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
     Number,
     Array,
     URL,
-    Date,
+    Date: FakeDate,
     Promise,
     JSON,
     Set,
@@ -511,7 +554,7 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
     MutationObserver: class { observe() {} },
     setTimeout: (fn: () => void) => { timers.push(fn); },
     setInterval: (fn: () => void) => { scanTrigger = fn; },
-    Date,
+    Date: FakeDate,
     WeakMap,
   };
 
@@ -532,7 +575,8 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
   await flush();
   assert.equal(allow1.clicks, 1);
 
-  // 第 2 张内容完全相同的 list_hosts 卡片（紧接着出现，不到 1 秒）：由于是新 DOM 节点，分配新 data-ddev-card-id，仍被点击
+  // 第 2 张内容完全相同的 list_hosts 卡片（满足同 label 5 秒最小间隔后出现）：分配新 data-ddev-card-id，仍被点击
+  nowMs += 5000;
   const card2 = DomNode.fromTuple(directFixture.tree);
   body.appendChild(card2);
   const allow2 = card2.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
@@ -541,12 +585,10 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
   scanTrigger();
   await flush();
   assert.equal(allow2.clicks, 1);
-  assert.notEqual(
-    card1.querySelector('[data-approval-card-root]')!.getAttribute('data-ddev-card-id'),
-    card2.querySelector('[data-approval-card-root]')!.getAttribute('data-ddev-card-id'),
-  );
+  assert.notEqual(storageState.approvalAudit[1].cardId, storageState.approvalAudit[2].cardId);
 
-  // 第 3 张卡片（list_hosts）点击后未关闭（记为 still-visible），随后被替换为第 4 张卡片（list_providers）：第 4 张仍立即被点
+  // 第 3 张卡片（list_hosts）点击后未关闭（记为 still-visible），随后被替换为第 4 张卡片（list_providers）：因 labelDigest 不同，无需等待 5 秒即立即被点
+  nowMs += 5000;
   const card3 = DomNode.fromTuple(directFixture.tree);
   body.appendChild(card3);
   const allow3 = card3.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
@@ -965,5 +1007,791 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   assert.equal(allowOnceButton.clicks, 4);
   assert.equal(storageState.approvalAudit.length, 4);
 });
+
+test('同一节点先后显示两张卡片，两张都被点（覆盖关闭后复用同节点与 still-visible 时 aria-label 变更复用同节点）', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+
+  const sessionPath = '/code/session_reuse123';
+  const sessionUrl = `https://claude.ai${sessionPath}`;
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
+
+  const storageState: Record<string, any> = {
+    instanceId: 'inst-reuse',
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
+
+  let bgOnMessage: any = null;
+  let uuidCounter = 0;
+  const bgChrome = {
+    storage: {
+      local: {
+        get: async (keys: any) => {
+          if (typeof keys === 'string') return { [keys]: storageState[keys] };
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map(k => [k, storageState[k]]));
+          return { ...storageState };
+        },
+        set: async (vals: Record<string, any>) => { Object.assign(storageState, vals); },
+      },
+      onChanged: { addListener: () => {} },
+    },
+    tabs: {
+      query: async () => [],
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    tabGroups: {
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    runtime: {
+      onMessage: { addListener: (fn: any) => { bgOnMessage = fn; } },
+      onStartup: { addListener: () => {} },
+      onInstalled: { addListener: () => {} },
+    },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} },
+    },
+  };
+
+  runInNewContext(backgroundSource, {
+    chrome: bgChrome,
+    fetch: async () => ({ ok: false }),
+    crypto: { randomUUID: () => `bg-reuse-${++uuidCounter}` },
+    AbortSignal,
+    Map,
+    Object,
+    String,
+    Number,
+    Array,
+    URL,
+    Date: FakeDate,
+    Promise,
+    JSON,
+    Set,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  });
+
+  const cardTree = DomNode.fromTuple(directFixture.tree);
+  const body = new DomNode('body', {}, []);
+  body.appendChild(cardTree);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const cardRoot = html.querySelector('[data-approval-card-root]')!;
+  const allowOnceButton = cardRoot.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  const titleRegion = cardRoot.querySelector('[data-testid="approval-title-region"]')!;
+
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  let scanTrigger: () => void = () => {};
+
+  const pageContext = {
+    document: {
+      documentElement: html,
+      body,
+      activeElement: body,
+      querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+      querySelector: (sel: string) => html.querySelector(sel),
+    },
+    location: { origin: 'https://claude.ai', pathname: sessionPath },
+    chrome: {
+      storage: {
+        local: { get: async () => ({ approvalEnabled: true }) },
+        onChanged: { addListener: () => {} },
+      },
+      runtime: {
+        sendMessage: (message: any) =>
+          new Promise(resolve => {
+            bgOnMessage(message, { tab: { id: 1, url: sessionUrl } }, resolve);
+          }),
+      },
+    },
+    crypto: {
+      randomUUID: () => `dom-reuse-card-${++uuidCounter}`,
+      subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+    },
+    TextEncoder,
+    Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+    setInterval: (fn: () => void) => { scanTrigger = fn; },
+    Date: FakeDate,
+    WeakMap,
+  };
+
+  const runTimersUpTo = async (maxDelay: number) => {
+    for (let step = 0; step < 30; step++) {
+      await new Promise(resolve => setImmediate(resolve));
+      const idx = timers.findIndex(t => t.delay <= maxDelay);
+      if (idx !== -1) {
+        const [item] = timers.splice(idx, 1);
+        if (item!.delay >= 300) nowMs += item!.delay;
+        item!.fn();
+      }
+    }
+    timers.length = 0;
+  };
+
+  // 场景 A：第 1 张卡片点击后隐藏（记为 dismissed，触发删除 data-ddev-card-id），随后 React 在同一个 cardRoot 节点上展示第 2 张卡片
+  allowOnceButton.onClick = () => {
+    allowOnceButton.hidden = true;
+  };
+
+  runInNewContext(source, pageContext);
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 1);
+  assert.equal(storageState.approvalAudit.length, 1);
+  assert.equal(storageState.approvalAudit[0].status, 'dismissed');
+  assert.equal(cardRoot.getAttribute('data-ddev-card-id'), null);
+  const firstCardId = storageState.approvalAudit[0].cardId;
+
+  // 同一个 cardRoot 节点更新为新卡片（list_providers）并重新显示按钮：重新分配 cardId 并点击
+  allowOnceButton.hidden = false;
+  allowOnceButton.onClick = null; // 第 2 张卡片不关闭（记为 still-visible）
+  cardRoot.setAttribute('aria-label', 'Permission request: use list providers (paseo)');
+  titleRegion.setText('Allow Claude to use list providers (paseo)?');
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 2);
+  assert.equal(storageState.approvalAudit.length, 2);
+  assert.equal(storageState.approvalAudit[1].status, 'still-visible');
+  const secondCardId = storageState.approvalAudit[1].cardId;
+  assert.notEqual(secondCardId, firstCardId);
+  assert.equal(cardRoot.getAttribute('data-ddev-card-id'), secondCardId);
+
+  // 场景 B：第 2 张卡片处于 still-visible，React 直接复用同一个 cardRoot 节点把 aria-label 更新为第 3 张卡片（get status）：重新生成 cardId 并立即点击
+  allowOnceButton.onClick = () => {
+    allowOnceButton.hidden = true;
+  };
+  cardRoot.setAttribute('aria-label', 'Permission request: use get status (paseo)');
+  titleRegion.setText('Allow Claude to use get status (paseo)?');
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 3);
+  assert.equal(storageState.approvalAudit.length, 3);
+  assert.equal(storageState.approvalAudit[2].status, 'dismissed');
+  const thirdCardId = storageState.approvalAudit[2].cardId;
+  assert.notEqual(thirdCardId, secondCardId);
+  assert.equal(cardRoot.getAttribute('data-ddev-card-id'), null);
+});
+
+test('旧样式菜单卡片 skipped 计入单卡点击上限，且支持菜单稍后出现 Allow once 时重试成功', async () => {
+  const mcpCardFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
+  const mcpMenuFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-menu.json', import.meta.url), 'utf8'));
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+
+  const sessionPath = '/code/session_menuretry';
+  const sessionUrl = `https://claude.ai${sessionPath}`;
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
+
+  const approvalConfig = {
+    initialDelayMs: 300,
+    observeDelayMs: 1500,
+    retryIntervalMs: 5000,
+    maxRetryDurationMs: 180000,
+    maxClicksPerCard: 3,
+  };
+
+  const storageState: Record<string, any> = {
+    instanceId: 'inst-menu',
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
+
+  let bgOnMessage: any = null;
+  let uuidCounter = 0;
+  const bgChrome = {
+    storage: {
+      local: {
+        get: async (keys: any) => {
+          if (typeof keys === 'string') return { [keys]: storageState[keys] };
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map(k => [k, storageState[k]]));
+          return { ...storageState };
+        },
+        set: async (vals: Record<string, any>) => { Object.assign(storageState, vals); },
+      },
+      onChanged: { addListener: () => {} },
+    },
+    tabs: {
+      query: async () => [],
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    tabGroups: {
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    runtime: {
+      onMessage: { addListener: (fn: any) => { bgOnMessage = fn; } },
+      onStartup: { addListener: () => {} },
+      onInstalled: { addListener: () => {} },
+    },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} },
+    },
+  };
+
+  runInNewContext(backgroundSource, {
+    __paseoApprovalConfig: approvalConfig,
+    chrome: bgChrome,
+    fetch: async () => ({ ok: false }),
+    crypto: { randomUUID: () => `bg-menu-${++uuidCounter}` },
+    AbortSignal,
+    Map,
+    Object,
+    String,
+    Number,
+    Array,
+    URL,
+    Date: FakeDate,
+    Promise,
+    JSON,
+    Set,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  });
+
+  const cardTree = DomNode.fromTuple(mcpCardFixture.tree);
+  const body = new DomNode('body', {}, []);
+  body.appendChild(cardTree);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const allButtons = html.querySelectorAll('button');
+  const denyButton = allButtons.find(b => b.innerText.includes('Deny'))!;
+  const alwaysAllowButton = allButtons.find(b => b.innerText.includes('Always allow'))!;
+  const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
+
+  let includeAllowOnce = false;
+  let activeMenu: DomNode | null = null;
+  let allowOnceItemClicks = 0;
+
+  moreButton.onClick = () => {
+    if (activeMenu && activeMenu.parentElement) {
+      activeMenu.parentElement = null;
+      activeMenu = null;
+      return;
+    }
+    const menu = new DomNode('div', {
+      role: mcpMenuFixture.menu.role,
+      ...mcpMenuFixture.menu.attrs,
+      'aria-labelledby': moreButton.getAttribute('id') ?? '',
+    }, []);
+    const items = includeAllowOnce
+      ? mcpMenuFixture.menu.items
+      : [{ role: 'menuitem', text: 'Always allow' }];
+    for (const itemSpec of items) {
+      const item = new DomNode('div', { role: itemSpec.role }, [itemSpec.text]);
+      item.onClick = () => {
+        if (itemSpec.text.includes('Allow once')) {
+          allowOnceItemClicks++;
+        }
+      };
+      menu.appendChild(item);
+    }
+    activeMenu = menu;
+    body.appendChild(menu);
+  };
+
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  let scanTrigger: () => void = () => {};
+
+  const pageContext = {
+    __paseoApprovalConfig: approvalConfig,
+    document: {
+      documentElement: html,
+      body,
+      activeElement: moreButton,
+      querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+      querySelector: (sel: string) => html.querySelector(sel),
+    },
+    location: { origin: 'https://claude.ai', pathname: sessionPath },
+    chrome: {
+      storage: {
+        local: { get: async () => ({ approvalEnabled: true }) },
+        onChanged: { addListener: () => {} },
+      },
+      runtime: {
+        sendMessage: (message: any) =>
+          new Promise(resolve => {
+            bgOnMessage(message, { tab: { id: 1, url: sessionUrl } }, resolve);
+          }),
+      },
+    },
+    crypto: {
+      randomUUID: () => `dom-menu-${++uuidCounter}`,
+      subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+    },
+    TextEncoder,
+    Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+    setInterval: (fn: () => void) => { scanTrigger = fn; },
+    Date: FakeDate,
+    WeakMap,
+  };
+
+  const runTimersUpTo = async (maxDelay: number) => {
+    for (let step = 0; step < 30; step++) {
+      await new Promise(resolve => setImmediate(resolve));
+      const idx = timers.findIndex(t => t.delay <= maxDelay);
+      if (idx !== -1) {
+        const [item] = timers.splice(idx, 1);
+        if (item!.delay >= 300) nowMs += item!.delay;
+        item!.fn();
+      }
+    }
+    timers.length = 0;
+  };
+
+  // 第 1 次尝试：菜单中无 Allow once，点两次 moreButton（打开+关闭），记为 skipped
+  runInNewContext(source, pageContext);
+  await runTimersUpTo(1500);
+  assert.equal(moreButton.clicks, 2);
+  assert.equal(storageState.approvalAudit.length, 1);
+  assert.equal(storageState.approvalAudit[0].status, 'skipped');
+
+  // 第 2 次尝试（5 秒后）：菜单中出现了 Allow once，打开菜单并点击 Allow once（此处不关闭卡片以测试第 3 次及上限）
+  includeAllowOnce = true;
+  nowMs += 5000;
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceItemClicks, 1);
+  assert.equal(storageState.approvalAudit.length, 2);
+  assert.equal(storageState.approvalAudit[1].status, 'still-visible');
+
+  // 第 3 次尝试（再过 5 秒）：菜单再次缺少 Allow once，记为 skipped，此时总尝试次数达到 maxClicksPerCard = 3
+  includeAllowOnce = false;
+  nowMs += 5000;
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(storageState.approvalAudit.length, 3);
+  assert.equal(storageState.approvalAudit[2].status, 'skipped');
+
+  // 已达单卡上限 3 次（含 skipped），后续即使再过 10 秒也不会再打开菜单
+  const moreClicksAfterCap = moreButton.clicks;
+  includeAllowOnce = true;
+  nowMs += 10000;
+  scanTrigger();
+  await runTimersUpTo(5000);
+  assert.equal(moreButton.clicks, moreClicksAfterCap);
+  assert.equal(denyButton.clicks, 0);
+  assert.equal(alwaysAllowButton.clicks, 0);
+  assert.equal(storageState.approvalAudit.length, 3);
+});
+
+test('同时存在两张卡片时，第一张处于冷却期或达上限不阻塞第二张卡片立即被点', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+
+  const sessionPath = '/code/session_twocards';
+  const sessionUrl = `https://claude.ai${sessionPath}`;
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
+
+  const storageState: Record<string, any> = {
+    instanceId: 'inst-two',
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
+
+  let bgOnMessage: any = null;
+  let uuidCounter = 0;
+  const bgChrome = {
+    storage: {
+      local: {
+        get: async (keys: any) => {
+          if (typeof keys === 'string') return { [keys]: storageState[keys] };
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map(k => [k, storageState[k]]));
+          return { ...storageState };
+        },
+        set: async (vals: Record<string, any>) => { Object.assign(storageState, vals); },
+      },
+      onChanged: { addListener: () => {} },
+    },
+    tabs: {
+      query: async () => [],
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    tabGroups: {
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    runtime: {
+      onMessage: { addListener: (fn: any) => { bgOnMessage = fn; } },
+      onStartup: { addListener: () => {} },
+      onInstalled: { addListener: () => {} },
+    },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} },
+    },
+  };
+
+  runInNewContext(backgroundSource, {
+    chrome: bgChrome,
+    fetch: async () => ({ ok: false }),
+    crypto: { randomUUID: () => `bg-two-${++uuidCounter}` },
+    AbortSignal,
+    Map,
+    Object,
+    String,
+    Number,
+    Array,
+    URL,
+    Date: FakeDate,
+    Promise,
+    JSON,
+    Set,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  });
+
+  const card1 = DomNode.fromTuple(directFixture.tree);
+  const providersFixture = JSON.parse(
+    JSON.stringify(directFixture.tree).replaceAll('list hosts', 'list providers').replaceAll('list_hosts', 'list_providers'),
+  );
+  const card2 = DomNode.fromTuple(providersFixture);
+
+  const body = new DomNode('body', {}, []);
+  body.appendChild(card1);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const allow1 = card1.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  const allow2 = card2.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  allow2.onClick = () => { card2.parentElement = null; };
+
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  let scanTrigger: () => void = () => {};
+
+  const pageContext = {
+    document: {
+      documentElement: html,
+      body,
+      activeElement: body,
+      querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+      querySelector: (sel: string) => html.querySelector(sel),
+    },
+    location: { origin: 'https://claude.ai', pathname: sessionPath },
+    chrome: {
+      storage: {
+        local: { get: async () => ({ approvalEnabled: true }) },
+        onChanged: { addListener: () => {} },
+      },
+      runtime: {
+        sendMessage: (message: any) =>
+          new Promise(resolve => {
+            bgOnMessage(message, { tab: { id: 1, url: sessionUrl } }, resolve);
+          }),
+      },
+    },
+    crypto: {
+      randomUUID: () => `dom-two-${++uuidCounter}`,
+      subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+    },
+    TextEncoder,
+    Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+    setInterval: (fn: () => void) => { scanTrigger = fn; },
+    Date: FakeDate,
+    WeakMap,
+  };
+
+  const runTimersUpTo = async (maxDelay: number) => {
+    for (let step = 0; step < 30; step++) {
+      await new Promise(resolve => setImmediate(resolve));
+      const idx = timers.findIndex(t => t.delay <= maxDelay);
+      if (idx !== -1) {
+        const [item] = timers.splice(idx, 1);
+        if (item!.delay >= 300) nowMs += item!.delay;
+        item!.fn();
+      }
+    }
+    timers.length = 0;
+  };
+
+  // 第 1 张卡片首次点击后未消失（记为 still-visible，进入 5 秒冷却期）
+  runInNewContext(source, pageContext);
+  await runTimersUpTo(1500);
+  assert.equal(allow1.clicks, 1);
+  assert.equal(storageState.approvalAudit.length, 1);
+  assert.equal(storageState.approvalAudit[0].status, 'still-visible');
+
+  // 仅过 1 秒（第 1 张仍在冷却期且仍在 DOM 中），页面同时出现第 2 张卡片：scan 跳过第 1 张并立即点击第 2 张
+  nowMs += 1000;
+  body.appendChild(card2);
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(allow1.clicks, 1);
+  assert.equal(allow2.clicks, 1);
+  assert.equal(storageState.approvalAudit.length, 2);
+  assert.equal(storageState.approvalAudit[1].status, 'dismissed');
+});
+
+test('跨标签页同 label 去重、同会话每分钟总次数限制、reserved 30 秒超时转 still-visible、skipped 后保留 Allow once 与 3 分钟限制、非法配置忽略', async () => {
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+  const sessionPath = '/code/session_guards123';
+  const sessionUrl = `https://claude.ai${sessionPath}`;
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
+
+  const storageState: Record<string, any> = {
+    instanceId: 'inst-guards',
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
+
+  let bgOnMessage: any = null;
+  let uuidCounter = 0;
+  const bgChrome = {
+    storage: {
+      local: {
+        get: async (keys: any) => {
+          if (typeof keys === 'string') return { [keys]: storageState[keys] };
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map(k => [k, storageState[k]]));
+          return { ...storageState };
+        },
+        set: async (vals: Record<string, any>) => { Object.assign(storageState, vals); },
+      },
+      onChanged: { addListener: () => {} },
+    },
+    tabs: {
+      query: async () => [],
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    tabGroups: {
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    runtime: {
+      onMessage: { addListener: (fn: any) => { bgOnMessage = fn; } },
+      onStartup: { addListener: () => {} },
+      onInstalled: { addListener: () => {} },
+    },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} },
+    },
+  };
+
+  // 注入非数字/负数配置，验证 numCfg 忽略非法值并回退到默认常量
+  runInNewContext(backgroundSource, {
+    __paseoApprovalConfig: {
+      retryIntervalMs: 'not-a-number',
+      maxRetryDurationMs: -100,
+      maxClicksPerCard: NaN,
+      reservedTimeoutMs: null,
+    },
+    chrome: bgChrome,
+    fetch: async () => ({ ok: false }),
+    crypto: { randomUUID: () => `bg-guards-${++uuidCounter}` },
+    AbortSignal,
+    Map,
+    Object,
+    String,
+    Number,
+    Array,
+    URL,
+    Date: FakeDate,
+    Promise,
+    JSON,
+    Set,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  });
+
+  const sendBg = (message: any, tabId = 1) =>
+    new Promise<any>(resolve => {
+      bgOnMessage(message, { tab: { id: tabId, url: sessionUrl } }, resolve);
+    });
+
+  const makeDigest = (seed: string) => createHash('sha256').update(seed).digest('hex');
+  const labelDigestA = makeDigest('label-list-hosts');
+
+  // 1. 跨标签页去重（带各自不同 cardId，但相同 sessionId + labelDigest）：
+  //    Tab 1 预约成功后，Tab 2 立即用不同 cardId 预约同一 labelDigest 被拒绝；即使 Tab 1 报 dismissed，5 秒内新 cardId 仍被拒绝
+  const digestTab1 = makeDigest('tab1-card1');
+  const digestTab2 = makeDigest('tab2-card2');
+  const resTab1 = await sendBg({
+    type: 'approval-reserve',
+    digest: digestTab1,
+    cardId: 'tab1-card-id',
+    labelDigest: labelDigestA,
+    button: 'Allow once',
+  }, 1);
+  assert.equal(resTab1.allowed, true);
+
+  const resTab2WhileReserved = await sendBg({
+    type: 'approval-reserve',
+    digest: digestTab2,
+    cardId: 'tab2-card-id',
+    labelDigest: labelDigestA,
+    button: 'Allow once',
+  }, 2);
+  assert.equal(resTab2WhileReserved.allowed, false);
+
+  await sendBg({
+    type: 'approval-result',
+    digest: digestTab1,
+    reservationId: resTab1.reservationId,
+    status: 'dismissed',
+  }, 1);
+
+  nowMs += 2000; // 未满 5 秒 labelMinIntervalMs
+  const resTab2Within5s = await sendBg({
+    type: 'approval-reserve',
+    digest: digestTab2,
+    cardId: 'tab2-card-id',
+    labelDigest: labelDigestA,
+    button: 'Allow once',
+  }, 2);
+  assert.equal(resTab2Within5s.allowed, false);
+
+  // 2. reserved 30 秒超时：若内容脚本预约后未发 approval-result，30 秒内拒绝，超过 30 秒自动转为 still-visible 并允许重试
+  nowMs += 5000;
+  const labelDigestB = makeDigest('label-timeout-test');
+  const digestStuck = makeDigest('stuck-card-1');
+  const resStuck = await sendBg({
+    type: 'approval-reserve',
+    digest: digestStuck,
+    cardId: 'stuck-card',
+    labelDigest: labelDigestB,
+    button: 'Allow once',
+  }, 1);
+  assert.equal(resStuck.allowed, true);
+
+  nowMs += 10_000; // 10 秒时尚未超时，仍为 reserved
+  const resBeforeTimeout = await sendBg({
+    type: 'approval-reserve',
+    digest: digestStuck,
+    cardId: 'stuck-card',
+    labelDigest: labelDigestB,
+    button: 'Allow once',
+  }, 1);
+  assert.equal(resBeforeTimeout.allowed, false);
+
+  nowMs += 25_000; // 合计 35 秒（超过 30 秒超时 + 5 秒重试间隔），旧 reserved 自动转为 still-visible 并放行重试
+  const resAfterTimeout = await sendBg({
+    type: 'approval-reserve',
+    digest: digestStuck,
+    cardId: 'stuck-card',
+    labelDigest: labelDigestB,
+    button: 'Allow once',
+  }, 1);
+  assert.equal(resAfterTimeout.allowed, true);
+  assert.equal(storageState.approvalAudit.find((e: any) => e.reservationId === resStuck.reservationId).status, 'still-visible');
+
+  // 3. 当最近一条记录为 skipped 时，effectivePrevious 仍保留 Allow once 校验与 3 分钟最长重试时长限制
+  await sendBg({
+    type: 'approval-result',
+    digest: digestStuck,
+    reservationId: resAfterTimeout.reservationId,
+    status: 'skipped',
+  }, 1);
+
+  nowMs += 6000;
+  // 3a. 即使上一条是 skipped，重试时 button 若不是 Allow once（例如普通 Allow），仍被拒绝
+  const resNonAllowOnce = await sendBg({
+    type: 'approval-reserve',
+    digest: digestStuck,
+    cardId: 'stuck-card',
+    labelDigest: labelDigestB,
+    button: 'Allow',
+  }, 1);
+  assert.equal(resNonAllowOnce.allowed, false);
+
+  // 3b. 超过首次尝试 3 分钟（180 秒）后，即使上一条是 skipped，仍因超过 maxRetryDurationMs 被拒绝
+  nowMs += 200_000;
+  const resAfter3Min = await sendBg({
+    type: 'approval-reserve',
+    digest: digestStuck,
+    cardId: 'stuck-card',
+    labelDigest: labelDigestB,
+    button: 'Allow once',
+  }, 1);
+  assert.equal(resAfter3Min.allowed, false);
+
+  // 4. 单会话每分钟最多 12 次限制（APPROVAL_MAX_CLICKS_PER_SESSION_WINDOW = 12）
+  nowMs += 120_000; // 进入新的 1 分钟窗口
+  for (let i = 1; i <= 12; i++) {
+    nowMs += 1000;
+    const d = makeDigest(`burst-card-${i}`);
+    const ld = makeDigest(`burst-label-${i}`);
+    const r = await sendBg({
+      type: 'approval-reserve',
+      digest: d,
+      cardId: `burst-id-${i}`,
+      labelDigest: ld,
+      button: 'Allow once',
+    }, 1);
+    assert.equal(r.allowed, true, `attempt ${i} should be allowed`);
+    await sendBg({
+      type: 'approval-result',
+      digest: d,
+      reservationId: r.reservationId,
+      status: 'dismissed',
+    }, 1);
+  }
+  // 同一分钟窗口内的第 13 次请求被拒绝
+  nowMs += 1000;
+  const res13th = await sendBg({
+    type: 'approval-reserve',
+    digest: makeDigest('burst-card-13'),
+    cardId: 'burst-id-13',
+    labelDigest: makeDigest('burst-label-13'),
+    button: 'Allow once',
+  }, 1);
+  assert.equal(res13th.allowed, false);
+});
+
 
 

@@ -6,12 +6,17 @@
   const APPROVAL_RETRY_INTERVAL_MS = 5000;
   const APPROVAL_MAX_RETRY_DURATION_MS = 3 * 60 * 1000;
   const APPROVAL_MAX_CLICKS_PER_CARD = 36;
-  const cfg = () => globalThis.__paseoApprovalConfig || {};
-  const initialDelayMs = () => cfg().initialDelayMs ?? APPROVAL_INITIAL_DELAY_MS;
-  const observeDelayMs = () => cfg().observeDelayMs ?? APPROVAL_OBSERVE_DELAY_MS;
-  const retryIntervalMs = () => cfg().retryIntervalMs ?? APPROVAL_RETRY_INTERVAL_MS;
-  const maxRetryDurationMs = () => cfg().maxRetryDurationMs ?? APPROVAL_MAX_RETRY_DURATION_MS;
-  const maxClicksPerCard = () => cfg().maxClicksPerCard ?? APPROVAL_MAX_CLICKS_PER_CARD;
+  const APPROVAL_HISTORY_TTL_MS = 10 * 60 * 1000;
+  const APPROVAL_HISTORY_MAX_ENTRIES = 200;
+  const numCfg = (key, fallback, min = 0) => {
+    const raw = globalThis.__paseoApprovalConfig?.[key];
+    return typeof raw === 'number' && Number.isFinite(raw) && raw >= min ? raw : fallback;
+  };
+  const initialDelayMs = () => numCfg('initialDelayMs', APPROVAL_INITIAL_DELAY_MS, 0);
+  const observeDelayMs = () => numCfg('observeDelayMs', APPROVAL_OBSERVE_DELAY_MS, 1);
+  const retryIntervalMs = () => numCfg('retryIntervalMs', APPROVAL_RETRY_INTERVAL_MS, 1);
+  const maxRetryDurationMs = () => numCfg('maxRetryDurationMs', APPROVAL_MAX_RETRY_DURATION_MS, 1);
+  const maxClicksPerCard = () => numCfg('maxClicksPerCard', APPROVAL_MAX_CLICKS_PER_CARD, 1);
   const pageVisible = () => (document.visibilityState || 'visible') === 'visible';
 
   let enabled = false;
@@ -34,41 +39,78 @@
   function triggerApprovalClick(target) {
     target.click();
   }
+  function pruneCardHistory(now = Date.now()) {
+    const ttl = Math.max(APPROVAL_HISTORY_TTL_MS, maxRetryDurationMs() * 2);
+    for (const [key, state] of cardHistory) {
+      if (now - (state.lastObservedAt || state.firstAttemptAt || 0) > ttl) {
+        cardHistory.delete(key);
+      }
+    }
+    while (cardHistory.size > APPROVAL_HISTORY_MAX_ENTRIES) {
+      const oldestKey = cardHistory.keys().next().value;
+      if (oldestKey === undefined) break;
+      cardHistory.delete(oldestKey);
+    }
+  }
   function getCardRoot(scope) {
     return scope?.closest?.('[data-approval-card-root]') || scope;
-  }
-  function ensureCardId(scope) {
-    const root = getCardRoot(scope);
-    if (typeof root?.getAttribute !== 'function' || typeof root?.setAttribute !== 'function') return '';
-    let id = (root.getAttribute('data-ddev-card-id') || '').trim();
-    if (!id) {
-      id = typeof crypto?.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      root.setAttribute('data-ddev-card-id', id);
-    }
-    return id;
   }
   function getCardAriaLabel(scope) {
     const root = getCardRoot(scope);
     return (root?.getAttribute?.('aria-label') || scope?.getAttribute?.('aria-label') || '').replace(/\s+/g, ' ').trim();
   }
+  function clearCardId(scope) {
+    const root = getCardRoot(scope);
+    if (!root || typeof root !== 'object') return;
+    initializedCards.delete(root);
+    if (typeof root.removeAttribute === 'function') {
+      root.removeAttribute('data-ddev-card-id');
+      root.removeAttribute('data-ddev-card-label');
+    } else if (typeof root.setAttribute === 'function') {
+      root.setAttribute('data-ddev-card-id', '');
+      root.setAttribute('data-ddev-card-label', '');
+    }
+  }
+  function ensureCardId(scope) {
+    const root = getCardRoot(scope);
+    if (typeof root?.getAttribute !== 'function' || typeof root?.setAttribute !== 'function') return '';
+    const currentLabel = getCardAriaLabel(scope);
+    let id = (root.getAttribute('data-ddev-card-id') || '').trim();
+    const savedLabel = (root.getAttribute('data-ddev-card-label') || '').trim();
+    const labelChanged = Boolean(currentLabel && savedLabel && currentLabel !== savedLabel);
+    const prevDismissed = Boolean(id && cardHistory.get(id)?.status === 'dismissed');
+    if (!id || labelChanged || prevDismissed) {
+      id = typeof crypto?.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      root.setAttribute('data-ddev-card-id', id);
+      if (currentLabel) root.setAttribute('data-ddev-card-label', currentLabel);
+      initializedCards.delete(root);
+    } else if (currentLabel && !savedLabel) {
+      root.setAttribute('data-ddev-card-label', currentLabel);
+    }
+    return id;
+  }
+  async function sha256Hex(input) {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+    return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+  }
   async function buildCardFingerprint(currentPath, scope, text) {
     const cardId = ensureCardId(scope);
     const ariaLabel = getCardAriaLabel(scope);
-    const raw = `v2\n${currentPath}\n${cardId}\n${ariaLabel}\n${text}`;
-    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
-    const digest = [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
-    return { digest, cardId, ariaLabel };
+    const digest = await sha256Hex(`v2\n${currentPath}\n${cardId}\n${ariaLabel}\n${text}`);
+    const labelSource = ariaLabel || text.replace(/\s+/g, ' ').trim().slice(0, 200);
+    const labelDigest = labelSource ? await sha256Hex(`v2-label\n${currentPath}\n${labelSource}`) : '';
+    return { digest, cardId, ariaLabel, labelDigest };
   }
   function canAttemptCard(cardId, buttonLabel) {
     if (!pageVisible()) return false;
     if (!cardId) return true;
     const state = cardHistory.get(cardId);
     if (!state) return true;
-    if (state.status === 'dismissed') return false;
+    if (state.status === 'dismissed' || state.status === 'reserved') return false;
     if (state.clicks >= maxClicksPerCard()) return false;
-    if (state.status === 'still-visible') {
+    if (state.status === 'still-visible' || state.status === 'skipped') {
       if (!once.test(buttonLabel)) return false;
       const now = Date.now();
       if (now - state.lastObservedAt < retryIntervalMs()) return false;
@@ -76,9 +118,10 @@
     }
     return true;
   }
-  function recordCardClick(cardId) {
+  function recordCardAttempt(cardId) {
     if (!cardId) return;
     const now = Date.now();
+    pruneCardHistory(now);
     const prev = cardHistory.get(cardId);
     cardHistory.set(cardId, {
       clicks: (prev?.clicks || 0) + 1,
@@ -109,12 +152,16 @@
     const heading = scope.querySelector?.('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
     return once.test(label(button)) || (allow.test(label(button)) && permission.test(heading) && !permanent.test(text));
   }
-  function closeMenu(target) {
-    const event = typeof KeyboardEvent === 'function'
-      ? new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true })
-      : { type: 'keydown', key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true };
-    for (const node of [document.activeElement, target, document.body, document]) {
-      try { node?.dispatchEvent?.(event); } catch {}
+  function hasVisibleMenu(moreButton) {
+    const buttonId = (moreButton?.getAttribute?.('id') || '').trim();
+    if (!buttonId) return false;
+    return [...(document.querySelectorAll?.('[role="menu"]') || [])].some(
+      menu => (menu.getAttribute?.('aria-labelledby') || '').trim() === buttonId && visible(menu),
+    );
+  }
+  function closeMenu(moreButton) {
+    if (moreButton?.isConnected && visible(moreButton) && hasVisibleMenu(moreButton)) {
+      triggerApprovalClick(moreButton);
     }
   }
   function findAllowOnceMenuItem(moreButton) {
@@ -145,26 +192,30 @@
         if (!eligible(button, scope, text)) return;
       }
       if (!canAttemptCard(cardId, buttonLabel)) return;
-      const { digest } = await buildCardFingerprint(currentPath, scope, text);
+      const { digest, labelDigest } = await buildCardFingerprint(currentPath, scope, text);
       const resetRetryWindow = Boolean(cardId && cardHistory.get(cardId)?.pendingVisibilityReset);
       const reservation = await chrome.runtime.sendMessage({
         type: 'approval-reserve',
         digest,
         ...(cardId ? { cardId } : {}),
+        ...(labelDigest ? { labelDigest } : {}),
         ...(resetRetryWindow ? { resetRetryWindow: true } : {}),
         button: buttonLabel,
       });
       if (!reservation?.allowed) return;
       const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
       if (!enabled || !pageVisible() || currentPath !== location.pathname || !button.isConnected || (scope.innerText || scope.textContent || '') !== text || !eligible(button, scope, text)) {
+        recordCardAttempt(cardId);
+        recordCardResult(cardId, 'skipped');
         await report('skipped');
         return;
       }
-      recordCardClick(cardId);
+      recordCardAttempt(cardId);
       triggerApprovalClick(button);
       await new Promise(resolve => setTimeout(resolve, observeDelayMs()));
       const status = scope.isConnected === false || !button.isConnected || !visible(button) ? 'dismissed' : 'still-visible';
       recordCardResult(cardId, status);
+      if (status === 'dismissed') clearCardId(scope);
       await report(status);
       if (status === 'still-visible' && pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) {
         setTimeout(schedule, retryIntervalMs());
@@ -186,18 +237,21 @@
         if (!cardSafe(card, text)) return;
       }
       if (!canAttemptCard(cardId, 'Allow once')) return;
-      const { digest } = await buildCardFingerprint(currentPath, card, text);
+      const { digest, labelDigest } = await buildCardFingerprint(currentPath, card, text);
       const resetRetryWindow = Boolean(cardId && cardHistory.get(cardId)?.pendingVisibilityReset);
       const reservation = await chrome.runtime.sendMessage({
         type: 'approval-reserve',
         digest,
         ...(cardId ? { cardId } : {}),
+        ...(labelDigest ? { labelDigest } : {}),
         ...(resetRetryWindow ? { resetRetryWindow: true } : {}),
         button: 'Allow once',
       });
       if (!reservation?.allowed) return;
       const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
       if (!enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected || !moreButton.isConnected || moreButton.disabled || moreButton.getAttribute?.('aria-disabled') === 'true' || !visible(moreButton) || (card.innerText || card.textContent || '') !== text || !cardSafe(card, text)) {
+        recordCardAttempt(cardId);
+        recordCardResult(cardId, 'skipped');
         await report('skipped');
         return;
       }
@@ -209,14 +263,20 @@
       }
       if (!item || !enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected) {
         closeMenu(moreButton);
+        recordCardAttempt(cardId);
+        recordCardResult(cardId, 'skipped');
         await report('skipped');
+        if (pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) {
+          setTimeout(schedule, retryIntervalMs());
+        }
         return;
       }
-      recordCardClick(cardId);
+      recordCardAttempt(cardId);
       triggerApprovalClick(item);
       await new Promise(resolve => setTimeout(resolve, observeDelayMs()));
       const status = !card.isConnected || !visible(card) || !moreButton.isConnected || !visible(moreButton) ? 'dismissed' : 'still-visible';
       recordCardResult(cardId, status);
+      if (status === 'dismissed') clearCardId(card);
       await report(status);
       if (status === 'still-visible' && pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) {
         setTimeout(schedule, retryIntervalMs());
@@ -226,6 +286,9 @@
   function scan() {
     queued = false;
     if (busy || !enabled || !pageVisible() || location.origin !== 'https://claude.ai' || !/^\/code\/session_[A-Za-z0-9_-]+\/?$/.test(location.pathname)) return;
+    for (const tagged of document.querySelectorAll?.('[data-ddev-card-id]') || []) {
+      if (tagged?.getAttribute?.('data-ddev-card-id') && !visible(tagged)) clearCardId(tagged);
+    }
     const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
     const candidates = buttons.filter(button => once.test(label(button)) || allow.test(label(button))).sort((left, right) => Number(once.test(label(right))) - Number(once.test(label(left))));
     for (const button of candidates) {
@@ -240,6 +303,8 @@
         const peers = [...scope.querySelectorAll('button,[role="button"]')].filter(visible);
         if (!peers.some(peer => deny.test(label(peer)))) { if (dialog) break; continue; }
         if (!eligible(button, scope, text)) break;
+        const cardId = ensureCardId(scope);
+        if (!canAttemptCard(cardId, label(button))) break;
         void clickOnce(button, scope, text);
         return;
       }
@@ -254,6 +319,8 @@
       if (peers.some(peer => once.test(label(peer))) || !peers.some(peer => deny.test(label(peer)))) continue;
       const moreButton = peers.find(peer => (peer.getAttribute?.('aria-label') || '').trim() === 'More allow options' && !peer.disabled && peer.getAttribute?.('aria-disabled') !== 'true');
       if (!moreButton) continue;
+      const cardId = ensureCardId(card);
+      if (!canAttemptCard(cardId, 'Allow once')) continue;
       void clickMenuOnce(moreButton, card, text);
       return;
     }
@@ -271,7 +338,7 @@
     if (!pageVisible()) return;
     const now = Date.now();
     for (const state of cardHistory.values()) {
-      if (state.status === 'still-visible') {
+      if (state.status === 'still-visible' || state.status === 'skipped') {
         state.firstAttemptAt = now;
         state.lastObservedAt = 0;
         state.pendingVisibilityReset = true;
