@@ -19,15 +19,21 @@ const handlers = new Map();
 const hooks = new Map();
 let provider;
 const server = {
-  registerProvider(value) { if (mode === 'cloud-fails') throw new Error('cloud registration failed'); provider = value; },
+  registerProvider(value) { if (mode === 'cloud-fails') throw new Error('cloud registration failed Bearer pretend-secret https://example.invalid/?credential=pretend-query'); provider = value; },
   handle(contract, handler) { handlers.set(contract.name, handler); },
   addHook(name, handler) { hooks.set(name, handler); return () => hooks.delete(name); },
 };
 const previousError = console.error;
-console.error = () => {};
+const logs = [];
+console.error = (...args) => logs.push(args.join(' '));
 const cleanup = contribute(server);
 try {
   if (mode === 'cloud-fails') {
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /cloud registration failed/);
+    assert.ok(!logs[0].includes('pretend-secret'));
+    assert.ok(!logs[0].includes('pretend-query'));
+    assert.ok(!logs[0].includes('example.invalid'));
     assert.deepEqual(await handlers.get('subscriptions.snapshot')({}, {}), { marker: 'github snapshot' });
     const hook = hooks.get('agent.open.before');
     const request = await hook({ request: { purpose: 'conversation', tools: [] } });

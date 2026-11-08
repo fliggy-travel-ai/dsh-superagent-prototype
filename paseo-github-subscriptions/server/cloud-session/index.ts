@@ -15,22 +15,43 @@ type Daemon = { list(id: string): Promise<{ id: string } | null>; import(id: str
 const caps = ['prompt.message', 'prompt.steer', 'session.persistence'] as const;
 
 function endpointSecrets(endpoint: Endpoint): string[] {
+  const authorization = Object.entries(endpoint.headers).filter(([name]) => name.toLowerCase() === 'authorization').map(([, value]) => value);
+  return [endpoint.url, ...authorization.flatMap(value => [value, value.replace(/^Bearer\s+/i, '')])].filter(Boolean).sort((a, b) => b.length - a.length);
+}
+
+function endpointErrorSecrets(endpoint: Endpoint): string[] {
   const url = new URL(endpoint.url);
   const queryValues = [...url.searchParams.values()];
   const encodedValues = url.search.slice(1).split('&').map(part => part.includes('=') ? part.slice(part.indexOf('=') + 1) : '');
-  const values = [endpoint.url, ...queryValues, ...encodedValues,
-    ...Object.values(endpoint.headers).flatMap(value => [value, value.replace(/^Bearer\s+/i, '')])];
-  return values.filter(Boolean).sort((a, b) => b.length - a.length);
+  return [...endpointSecrets(endpoint), ...queryValues, ...encodedValues].filter(Boolean).sort((a, b) => b.length - a.length);
 }
 
 function redact(text: string, secrets: string[]): string {
   return secrets.reduce((value, secret) => value.split(secret).join('[redacted]'), text);
 }
 
-function redactError(text: string, secrets: string[]): string {
-  return redact(text, secrets)
+export function redactError(error: unknown, secrets: string[] = []): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return redact(message, secrets)
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[redacted URL]')
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
-    .replace(/([?&][^=\s&#]+)=([^&#\s]+)/g, '$1=[redacted]');
+    .replace(/([?&][^=\s&#]+)=([^&#\s]+)/g, '$1=[redacted]')
+    .replace(/((?:token|authorization|password)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
+}
+
+export const LOCAL_CONNECT_TIMEOUT_MS = 5000;
+export async function connectWithTimeout(client: { connect(): Promise<unknown>; close(): Promise<unknown> }, timeoutMs = LOCAL_CONNECT_TIMEOUT_MS): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  try {
+    await Promise.race([client.connect(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { timedOut = true; reject(new Error('连接本机 daemon 超时')); }, timeoutMs);
+    })]);
+  } catch {
+    // Do not allow a failed close to mask the connection error or retain the ensure lock.
+    void client.close().catch(() => {});
+    throw new Error(timedOut ? '连接本机 daemon 超时' : '本机 daemon 连接失败');
+  } finally { clearTimeout(timer); }
 }
 
 export function importRequest(id: string, cwd: string) {
@@ -40,8 +61,8 @@ export function importRequest(id: string, cwd: string) {
 async function connectLocal(): Promise<Daemon> {
   const home = process.env.PASEO_HOME ?? join(homedir(), '.paseo');
   const lock = JSON.parse(await readFile(join(home, 'paseo.pid'), 'utf8')) as { listen: string };
-  const client = createHostClient(lock.listen, { clientId: `cloud-session-${randomUUID()}`, clientType: 'cli', localCredential: async () => (await readFile(join(home, 'local-credential'), 'utf8')).trim() || undefined, reconnect: { enabled: true } });
-  try { await client.connect(); } catch { await client.close(); throw new Error('本机 daemon 连接失败'); }
+  const client = createHostClient(lock.listen, { clientId: `cloud-session-${randomUUID()}`, clientType: 'cli', localCredential: async () => (await readFile(join(home, 'local-credential'), 'utf8')).trim() || undefined, reconnect: { enabled: false } });
+  await connectWithTimeout(client);
   return {
     async list(id) {
       let cursor: string | undefined;
@@ -115,24 +136,24 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const ensure = async (input: { cloudSessionId: string; title: string; cwd: string }, paseo: import('@getpaseo/client').PaseoApi) => {
     const previous = locks.get(input.cloudSessionId) ?? Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
-      const knownSecrets = [...sessions.values()].flatMap(session => session.endpoint ? endpointSecrets(session.endpoint) : []);
+      const knownSecrets = [...sessions.values()].flatMap(session => session.endpoint ? endpointErrorSecrets(session.endpoint) : []);
       let daemon: Daemon | undefined;
       try {
         daemon = await connect();
         let agent = await daemon.list(input.cloudSessionId); const created = !agent;
         if (!agent) { sessions.delete(input.cloudSessionId); agent = await daemon.import(input.cloudSessionId, input.cwd); await daemon.title(agent.id, input.title); }
-        if (!sessions.get(input.cloudSessionId)?.endpoint) await paseo.agents.ref(agent.id).reload();
-        if (!sessions.get(input.cloudSessionId)?.endpoint) throw new Error('not_opened');
+        if (!sessions.has(input.cloudSessionId)) await paseo.agents.ref(agent.id).reload();
+        if (!sessions.has(input.cloudSessionId)) throw new Error('not_opened');
         return { agentId: agent.id, serverId: daemon.serverId(), epoch, created };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const secrets = [...knownSecrets, ...[...sessions.values()].flatMap(session => session.endpoint ? endpointSecrets(session.endpoint) : [])];
+        const secrets = [...knownSecrets, ...[...sessions.values()].flatMap(session => session.endpoint ? endpointErrorSecrets(session.endpoint) : [])];
         const safe = redactError(message, secrets);
         if (error instanceof Error && safe === message) throw error;
         throw new Error(safe);
       } finally {
         if (daemon) {
-          try { await daemon.close(); } catch { throw new Error('本机 daemon 连接关闭失败'); }
+          try { await daemon.close(); } catch { console.error('本机 daemon 连接关闭失败'); }
         }
       }
     });
@@ -173,7 +194,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
         return value;
       };
       return { status: response.status, messages: parts.map(part => clean(JSON.parse(part)) as Record<string, unknown>) };
-    } catch { throw new Error('Paseo MCP request failed'); } finally { clearTimeout(timer); }
+    } catch { throw new Error(controller.signal.aborted ? 'Paseo MCP request timed out' : 'Paseo MCP request failed'); } finally { clearTimeout(timer); }
   };
   return { provider, ensure, push, poll, ack, mcp, epoch, dispose() { sessions.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
 }
