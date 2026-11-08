@@ -14,8 +14,8 @@ const rows=(await readFile(new URL('../../fixtures/transcript-sample.jsonl',impo
 test('样例映射两轮、文本和工具结果',()=>{
  const map=mapper(), batches=rows.map(map).filter(Boolean), items=batches.flatMap(x=>x.items);
  for (const item of items) ProviderEventSchema.parse({type:'timeline.item',sessionId:'test',item});
- assert.equal(batches.filter(x=>x.startTurn).length,3); assert.equal(batches.filter(x=>x.endTurn==='completed').length,2); assert.equal(batches.filter(x=>x.endTurn==='canceled').length,1);
- assert.equal(items.filter(x=>x.type==='user_message').length,3); assert.ok(items.some(x=>x.type==='reasoning' && x.text));
+ assert.equal(batches.filter(x=>x.startTurn).length,4); assert.equal(batches.filter(x=>x.endTurn==='completed').length,2); assert.equal(batches.filter(x=>x.endTurn==='canceled').length,2);
+ assert.equal(items.filter(x=>x.type==='user_message').length,4); assert.ok(items.some(x=>x.type==='reasoning' && x.text));
  assert.ok(items.some(x=>x.type==='assistant_message')); const calls=items.filter(x=>x.type==='tool_call');
  assert.ok(calls.some(x=>x.name==='Read' && x.detail.type==='read' && x.status==='completed'));
  const failed=calls.find(x=>x.status==='failed'); assert.equal(failed.detail.type,'shell'); assert.ok(calls.some(x=>x.callId===failed.callId && x.status==='running'));
@@ -34,7 +34,7 @@ test('安装保留配置且重复运行不重复',async()=>{
 });
 test('断线失败后恢复，按顺序补推未成功条目',async()=>{
  let fail=true; const accepted=[]; const rpc=async(_contract,value)=>{if(fail){fail=false;throw Error('offline');} accepted.push(value); return {accepted:value.items.length};};
- const q=new ForwardQueue(rpc,env); for(const row of rows) q.add(row); const count=q.pending.length; await assert.rejects(q.flush()); assert.equal(q.pending.length,count); await q.flush(); assert.equal(accepted.length,3); assert.equal(q.pending.length,0); assert.equal(accepted.filter(x=>x.startTurn).length,3); assert.deepEqual(accepted.map(x=>x.endTurn),['completed','completed','canceled']);
+ const q=new ForwardQueue(rpc,env); for(const row of rows) q.add(row); const count=q.pending.length; await assert.rejects(q.flush()); assert.equal(q.pending.length,count); await q.flush(); assert.equal(accepted.length,4); assert.equal(q.pending.length,0); assert.equal(accepted.filter(x=>x.startTurn).length,4); assert.deepEqual(accepted.map(x=>x.endTurn),['completed','completed','canceled','canceled']);
 });
 test('wait 输出原文并确认、epoch 变化、不可达重试',async()=>{
  const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_waittest'+Date.now()}; const output=[]; let offline=true, ack=0, epoch='one'; let sleeps=0;
@@ -72,6 +72,7 @@ test('thinking 和 text 均带 end_turn 时直到 stop_hook_summary 才结束，
  assert.equal(results.find(x=>x.row.uuid?.endsWith('000000000020')).result.endTurn,'completed');
  assert.equal(results.find(x=>x.row.uuid?.endsWith('000000000021')).result.items[0].text,'请继续检查。');
  assert.equal(results.find(x=>x.row.uuid?.endsWith('000000000023')).result.endTurn,'canceled');
+ assert.equal(results.find(x=>x.row.uuid?.endsWith('000000000025')).result.endTurn,'canceled');
  assert.equal(map({type:'system',subtype:'stop_hook_summary'}),null);
 });
 
@@ -117,7 +118,7 @@ test('工具列表失败后恢复发送一次 list_changed',async()=>{
  const responses=outputText.trim().split('\n').map(JSON.parse); assert.equal(responses[0].result.capabilities.tools.listChanged,true); assert.ok(responses[1].error); assert.equal(responses.filter(x=>x.method==='notifications/tools/list_changed').length,1);
 });
 
-const waitFor=async fn=>{for(let i=0;i<80;i++){if(await fn()) return; await new Promise(r=>setTimeout(r,50));} throw Error('condition timed out');};
+const waitFor=async fn=>{for(let i=0;i<140;i++){if(await fn()) return; await new Promise(r=>setTimeout(r,50));} throw Error('condition timed out');};
 test('forward 第一条提示只改名一次，/clear 换文件时旧转发退出并由新转发接管',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'paseo-forward-test-')); const first=join(dir,'first'),second=join(dir,'second'); await writeFile(first,''); await writeFile(second,'');
  const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_fwd'+Date.now()}; const lock=join(tmpdir(),'paseo-cloud-session-'+createHash('sha256').update(e.CLAUDE_CODE_REMOTE_SESSION_ID).digest('hex'),'forward.pid');
@@ -132,8 +133,8 @@ test('forward 第一条提示只改名一次，/clear 换文件时旧转发退�
 });
 
 test('钩子输出保留可读错误并隐藏链接和令牌',async()=>{
- for(const [err,expected] of [['配对链接无效','配对链接无效'],['Plugin method missing: cloud-session.ensure','Plugin method missing'],['连接超时','连接超时'],['Paseo error token=FAKE-TOKEN Bearer FAKE-BEARER '+env.PASEO_MINI_HOST,'Paseo error']]) {
-  const out=await hook({transcript_path:'missing'},env,async()=>{throw Error(err)},false); assert.match(out,new RegExp(expected)); assert.ok(!out.includes('FAKE-TOKEN')); assert.ok(!out.includes('FAKE-BEARER')); assert.ok(!out.includes(env.PASEO_MINI_HOST)); assert.equal(out.trim().split('\n').length,1);
+ for(const [err,expected] of [['配对链接无效','配对链接无效'],['Plugin method missing: cloud-session.ensure','Plugin method missing'],['连接超时','连接超时'],['连接 wss://example.invalid/path?secret=FAKE-URL ws://example.invalid/socket 失败','连接'],['Paseo error token=FAKE-TOKEN Bearer FAKE-BEARER '+env.PASEO_MINI_HOST,'Paseo error']]) {
+  const out=await hook({transcript_path:'missing'},env,async()=>{throw Error(err)},false); assert.match(out,new RegExp(expected)); assert.ok(!out.includes('FAKE-TOKEN')); assert.ok(!out.includes('FAKE-BEARER')); assert.ok(!out.includes('example.invalid')); assert.ok(!out.includes('FAKE-URL')); assert.ok(!out.includes(env.PASEO_MINI_HOST)); assert.equal(out.trim().split('\n').length,1);
  }
 });
 
@@ -159,4 +160,33 @@ test('wait 在继承 PASEO_AGENT_ID 时仍取消息',async()=>{
  let ack=false; const e={...env,PASEO_AGENT_ID:'parent',CLAUDE_CODE_REMOTE_SESSION_ID:'cse_waitagent'+Date.now()};
  const rpc=async(c)=>{if(c.name.endsWith('ensure')) return {}; if(c.name.endsWith('poll')) return {epoch:'e',items:[{seq:1,delivery:'auto',text:'hello'}]}; ack=true; return {};};
  const lines=[]; await wait(e,rpc,{print:s=>lines.push(s)}); assert.equal(ack,true); assert.match(lines.join(''),/hello/);
+});
+
+test('标题失败最多三次、复用同一 MCP 初始化且接管后不覆盖名称',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'paseo-title-test-')); const first=join(dir,'first'),second=join(dir,'second'),third=join(dir,'third');
+ for(const path of [first,second,third]) await writeFile(path,'');
+ const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_title'+Date.now()}; const lock=join(tmpdir(),'paseo-cloud-session-'+createHash('sha256').update(e.CLAUDE_CODE_REMOTE_SESSION_ID).digest('hex'),'forward.pid');
+ const methods=[], times=[]; let pushed=0; const rpc=async(c,v)=>{
+  if(c.name.endsWith('ensure')) return {agentId:'agent',epoch:'e'};
+  if(c.name.endsWith('timeline.push')) {pushed++; return {accepted:v.items.length,epoch:'e'};}
+  methods.push(v.message.method);
+  if(v.message.method==='initialize') return {status:200,messages:[{id:'cloud-init',result:{}}]};
+  if(v.message.method==='notifications/initialized') return {status:202,messages:[]};
+  times.push(Date.now()); return {status:200,messages:[{id:'cloud-title',error:{message:'拒绝 wss://example.invalid/secret'}}]};
+ };
+ const firstTask=forward(first,e,rpc,0); let secondTask,thirdTask;
+ try {
+  await waitFor(async()=>{try{return JSON.parse(await readFile(lock,'utf8')).path===first;}catch{return false;}});
+  await writeFile(first,JSON.stringify({type:'user',uuid:'one',message:{content:'初始标题'}})+'\n');
+  await waitFor(async()=>{try{return !!JSON.parse(await readFile(lock,'utf8')).titleError;}catch{return false;}});
+  assert.equal(times.length,3); assert.ok(times[1]-times[0]>=900); assert.ok(times[2]-times[1]>=1900);
+  assert.equal(methods.filter(x=>x==='initialize').length,1); assert.equal(methods.filter(x=>x==='notifications/initialized').length,1);
+  const record=JSON.parse(await readFile(lock,'utf8')); assert.equal(record.titleHandled,true); assert.match(record.titleError,/拒绝/); assert.ok(!record.titleError.includes('example.invalid'));
+  await new Promise(r=>setTimeout(r,1200)); assert.equal(times.length,3);
+  secondTask=forward(second,e,rpc,0); await waitFor(async()=>{try{return JSON.parse(await readFile(lock,'utf8')).path===second;}catch{return false;}}); await firstTask;
+  await writeFile(second,JSON.stringify({type:'user',uuid:'two',message:{content:'会话已自行改名'}})+'\n'); await waitFor(()=>pushed>=2); assert.equal(times.length,3);
+  const stale=JSON.parse(await readFile(lock,'utf8')); stale.pid=0; await writeFile(lock,JSON.stringify(stale));
+  thirdTask=forward(third,e,rpc,0); await waitFor(async()=>{try{return JSON.parse(await readFile(lock,'utf8')).path===third;}catch{return false;}}); await secondTask;
+  await writeFile(third,JSON.stringify({type:'user',uuid:'three',message:{content:'重启后新消息'}})+'\n'); await waitFor(()=>pushed>=3); assert.equal(times.length,3);
+ } finally {try {await writeFile(lock,JSON.stringify({pid:process.pid,path:'finished',token:'finished'}));} catch {} if(thirdTask) await thirdTask; if(secondTask) await secondTask; await firstTask; await rm(dir,{recursive:true,force:true});}
 });
