@@ -6,8 +6,11 @@ import { EventTypeSchema } from './shared/model.ts';
 import * as rpc from './shared/contracts.ts';
 import { Runtime } from './server/runtime.ts';
 import { connectDaemon } from './server/daemon.ts';
+import { registerCloudSession } from './server/cloud-session/index.ts';
 
 export default function contribute(server: PluginServerContext) {
+  let disposeCloud: (() => void) | undefined;
+  try { disposeCloud = registerCloudSession(server); } catch { console.error('云端会话模块注册失败'); }
   let runtime: Runtime | null = null;
   let connection: Awaited<ReturnType<typeof connectDaemon>> | null = null;
   let stopped = false;
@@ -63,6 +66,7 @@ export default function contribute(server: PluginServerContext) {
   const removeArchive = server.addHook('agent.archive.after', async ({ agent }) => { await (await ready()).archive(agent.id); });
 
   return async () => {
+    disposeCloud?.();
     stopped = true;
     controller.abort();
     removeOpen();

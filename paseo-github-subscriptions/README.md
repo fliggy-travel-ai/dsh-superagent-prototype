@@ -75,3 +75,11 @@ npm run test:daemon
 `server/vendor/dsh-superagent` 由 `scripts/vendor-sync.ts` 生成三个纯逻辑副本，只调整导入并记录原文件 SHA-256。`shim.ts` 是本插件适配层。漂移检查会在原型变更时失败，更新时运行 `node --experimental-strip-types scripts/vendor-sync.ts` 后检查差异。
 
 事件格式、CI 摘要与 `readGithub` 复用原型纯函数；GitHub 请求通过本插件的 fetch 适配器执行。未复制原型的命令执行器、Web、Eval、Ticket 或 Executor。安装包只包含客户端、服务端、共享定义和用户说明，不包含夹具、截图及开发依赖目录。
+
+### 云端会话 Provider
+
+插件同时提供 `cloud-session` Provider：云端会话按稳定编号对应 Paseo agent，推送时间线，并接收面板消息和子会话通知。代理所有 Paseo MCP 工具；调用 `create_agent` 时调用方必须显式提供 `settings.modeId`。注册标题由云端提供，之后可由会话改名。不新增设置。
+
+代理只使用 daemon 在会话打开时提供的本机 Paseo MCP 地址及请求头；注册和恢复通过本机 Paseo daemon 客户端完成。地址和凭据只保存在内存，不由云端选择。云端会话模块与 GitHub 订阅的初始化独立。
+
+收件队列仅存于内存：插件或 daemon 重启后未确认消息丢失，不自动对账。云端离线时已开启的轮次保持运行中，直到云端推送结束。真机端到端验收需另行进行。
