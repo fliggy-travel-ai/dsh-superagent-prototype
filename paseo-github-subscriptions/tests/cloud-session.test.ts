@@ -9,7 +9,7 @@ import type { PaseoApi } from '@getpaseo/client';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { forwardMcp } from '../shared/cloud-session.ts';
 import { ProviderEventSchema, type ProviderEvent, type ProviderInput } from '@getpaseo/plugin/server/provider';
-import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS, redactError, type AnswerWebRequest } from '../server/cloud-session/index.ts';
+import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS, redactError, type AnswerWebRequest, type ResolveWebRequest } from '../server/cloud-session/index.ts';
 
 const cloudId = 'cse_abcdefgh1234';
 const token = 'fake-secret-token-1707';
@@ -20,7 +20,7 @@ test('error redaction removes websocket addresses', () => {
     assert.equal(result, 'connection failed: [redacted URL]');
   }
 });
-async function fixture(url?: string, answerWeb?: AnswerWebRequest) {
+async function fixture(url?: string, answerWeb?: AnswerWebRequest, resolveWeb?: ResolveWebRequest) {
   const agents: { id: string; cloud: string; archived: boolean; workspaceId: string; title?: string }[] = [];
   const importedCwds: string[] = [];
   const workspaces: { id: string; path: string; title: string; projectId?: string }[] = [];
@@ -40,7 +40,7 @@ async function fixture(url?: string, answerWeb?: AnswerWebRequest) {
     title: async (id: string, title: string) => { agents.find(a => a.id === id)!.title = title; }, serverId: () => 'server', close: async () => { if (closeFailure) throw new Error(`close failed Bearer ${token}`); },
   });
   const paseo = { agents: { ref: () => ({ reload: async () => { reloads++; await open(); } }) }, projects: { list: async () => ({ projects: [] }) }, workspaces: { list: async () => ({ entries: [] }) } } as unknown as PaseoApi;
-  const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon, answerWeb); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
+  const restart = async () => { cloud?.dispose(); cloud = createCloudSession(daemon, answerWeb, resolveWeb); connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => { assert.ok(ProviderEventSchema.safeParse(event).success); events.push(event); }); };
   await restart();
   return { get cloud() { return cloud; }, get connection() { return connection; }, events, agents, workspaces, pins, importedCwds, failPin(value: boolean) { failPin = value; }, get imports() { return imports; }, get reloads() { return reloads; }, failClose(value: boolean) { closeFailure = value; }, failNext(message = 'original import error') { failure = message; }, restart, open, paseo, current: () => `s${session}` };
 }
@@ -280,41 +280,66 @@ test('workspace pin failure is logged safely and does not block ensure', async (
 
 test('provider mirrors requests and forwards human answers once until cloud resolves them', async () => {
   const received: Parameters<AnswerWebRequest>[0][] = [];
-  let status: 'submitted' | 'page_not_open' | 'unknown' = 'submitted';
-  const f = await fixture(undefined, async value => { received.push(value); return status === 'unknown' ? { status, detail: 'uncertain' } : { status }; });
+  const resolved: Parameters<ResolveWebRequest>[0][] = [];
+  let result: Awaited<ReturnType<AnswerWebRequest>> = { status: 'submitted' };
+  const f = await fixture(undefined, async value => { received.push(value); return result; }, value => { resolved.push(value); });
   try {
     await f.cloud.ensure(ensureInput, f.paseo);
     const connection = f.connection;
     assert.ok(connection.capabilities.includes('permission'));
-    const question = { toolUseId: 'tool-question', toolName: 'AskUserQuestion', kind: 'question' as const, input: { questions: [{ question: 'Which?', options: [{ label: 'A' }] }] } };
+    const question = { toolUseId: 'tool-question', toolName: 'AskUserQuestion', kind: 'question' as const, input: { questions: [{ question: 'Which?', header: 'Choice', options: [{ label: 'A' }] }] } };
     assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request: question }), { shown: true });
     const event = f.events.at(-1); assert.equal(event?.type, 'session.permission');
-    if (event?.type === 'session.permission') { assert.equal(event.request.id, question.toolUseId); assert.equal(event.request.kind, 'question'); assert.deepEqual(event.request.input, question.input); }
-    if (event?.type === 'session.permission') assert.deepEqual(event.request.metadata, { cloudSessionManual: true, webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId });
+    if (event?.type === 'session.permission') {
+      assert.equal(event.request.id, question.toolUseId);
+      assert.equal(event.request.kind, 'question');
+      assert.deepEqual(event.request.input, { questions: [{ question: 'Which?', header: 'Choice', options: [{ label: 'A' }], allowOther: true }] });
+      assert.deepEqual(event.request.metadata, { cloudSessionManual: true, webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId });
+    }
     assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request: question }), { shown: false });
     assert.throws(() => f.cloud.notify({ cloudSessionId: cloudId, request: { ...question, input: { questions: [] } } }), /请求内容已变化/);
-    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } } } }));
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { Choice: '自定义答案' } } } }));
     await new Promise<void>(resolve => setImmediate(resolve));
-    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId, expected: { toolName: question.toolName, input: question.input }, kind: 'question', answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } });
-    assert.equal(f.events.at(-1)?.type, 'session.permission');
-    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } } } }));
-    await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1); assert.equal(f.events.at(-1)?.type, 'session.permission');
+    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId, expected: { toolName: question.toolName, input: question.input }, kind: 'question', answers: { 'Which?': [] }, otherAnswers: { 'Which?': '自定义答案' } });
+    const submitted = f.events.at(-1); assert.equal(submitted?.type, 'timeline.item');
+    if (submitted?.type === 'timeline.item' && submitted.item.type === 'assistant_message') assert.equal(submitted.item.text, '已在 claude.ai 页面提交，等待云端确认');
+    const beforeRepeat = f.events.length;
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { Choice: '自定义答案' } } } }));
+    await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1); assert.equal(f.events.length, beforeRepeat);
     await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': 'A' } } } }));
     await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1);
     const changed = f.events.at(-1); assert.equal(changed?.type, 'timeline.item');
-    if (changed?.type === 'timeline.item' && changed.item.type === 'assistant_message') assert.equal(changed.item.text, '结果不确定，请在 claude.ai 核对');
+    if (changed?.type === 'timeline.item' && changed.item.type === 'assistant_message') assert.equal(changed.item.text, '结果不确定（回答已变化），请在 claude.ai 核对');
     assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: question.toolUseId, outcome: 'answered' }), { closed: true });
     assert.equal(f.events.at(-1)?.type, 'session.permission_resolved');
+    assert.deepEqual(resolved, [{ webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId, outcome: 'answered' }]);
     assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: question.toolUseId, outcome: 'answered' }), { closed: false });
-    for (const next of ['page_not_open', 'unknown'] as const) {
-      status = next; const toolUseId = `tool-${next}`;
+    assert.equal(resolved.length, 1);
+
+    const dismissedQuestion = { ...question, toolUseId: 'question-dismissed' };
+    f.cloud.notify({ cloudSessionId: cloudId, request: dismissedQuestion });
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: dismissedQuestion.toolUseId, response: { behavior: 'deny' } }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(received.length, 1);
+    const dismissedItem = f.events.at(-1);
+    if (dismissedItem?.type === 'timeline.item' && dismissedItem.item.type === 'assistant_message') assert.equal(dismissedItem.item.text, '结果不确定（已在 Paseo 忽略），请在 claude.ai 核对');
+    f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: dismissedQuestion.toolUseId, outcome: 'canceled' });
+
+    const cases: Array<{ result: Awaited<ReturnType<AnswerWebRequest>>; expectedText: string }> = [
+      { result: { status: 'page_not_open' }, expectedText: 'claude.ai 页面没有打开，请在 claude.ai 作答' },
+      { result: { status: 'unknown', detail: 'tool_in_browser' }, expectedText: '权限请求由 claude.ai 页面处理，Paseo 里的回答没有提交，请在 claude.ai 核对' },
+      { result: { status: 'unknown', detail: 'multiple_instances' }, expectedText: '多个浏览器环境打开了此会话，没有提交，请在 claude.ai 作答' },
+      { result: { status: 'unknown', detail: 'bridge_not_connected' }, expectedText: '结果不确定（配对浏览器未连接），请在 claude.ai 核对' },
+    ];
+    for (const [index, example] of cases.entries()) {
+      result = example.result; const toolUseId = `tool-${index}`;
       f.cloud.notify({ cloudSessionId: cloudId, request: { toolUseId, toolName: 'Bash', kind: 'tool', input: { command: 'sample' } } });
       const permission = f.events.at(-1); assert.equal(permission?.type, 'session.permission');
       if (permission?.type === 'session.permission') assert.equal(permission.request.kind, 'tool');
       await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: toolUseId, response: { behavior: 'deny' } }));
       await new Promise<void>(resolve => setImmediate(resolve));
       const last = f.events.at(-1); assert.equal(last?.type, 'timeline.item');
-      if (last?.type === 'timeline.item' && last.item.type === 'assistant_message') assert.equal(last.item.text, next === 'page_not_open' ? '请在 claude.ai 作答' : '结果不确定，请在 claude.ai 核对');
+      if (last?.type === 'timeline.item' && last.item.type === 'assistant_message') assert.equal(last.item.text, example.expectedText);
       assert.equal(received.at(-1)?.kind, 'tool'); if (received.at(-1)?.kind === 'tool') assert.equal((received.at(-1) as Extract<(typeof received)[number], { kind: 'tool' }>).decision, 'deny');
       await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: toolUseId, response: { behavior: 'allow' } }));
       await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.filter(item => item.toolUseId === toolUseId).length, 1);

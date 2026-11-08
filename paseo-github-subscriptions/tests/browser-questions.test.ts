@@ -9,15 +9,30 @@ const backgroundSource = await readFile(new URL('../browser-extension/background
 
 class El {
   parentElement: El | null = null; children: El[] = []; hidden = false; disabled = false; checked = false; clicks = 0; onClick: (() => void) | null = null;
+  events: any[] = [];
   tagName: string; attrs: Record<string, string>; text: string;
-  constructor(tagName: string, attrs: Record<string, string> = {}, text = '', kids: El[] = []) { this.tagName = tagName.toUpperCase(); this.attrs = attrs; this.text = text; for (const kid of kids) this.add(kid); }
+  constructor(tagName: string, attrs: Record<string, any> = {}, text = '', kids: El[] = []) {
+    this.tagName = tagName.toUpperCase();
+    this.attrs = {};
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === '.disabled') { this.disabled = Boolean(v); continue; }
+      if (k === '.value') { this.attrs['.value'] = String(v); this.attrs.value = String(v); continue; }
+      this.attrs[k] = String(v);
+    }
+    if ('disabled' in this.attrs && attrs['.disabled'] !== false) this.disabled = true;
+    this.text = text;
+    for (const kid of kids) this.add(kid);
+  }
   add(kid: El) { kid.parentElement = this; this.children.push(kid); return this; }
   get id() { return this.attrs.id ?? ''; }
-  get value() { return this.attrs.value ?? ''; }
+  get value() { return this.attrs.value ?? this.attrs['.value'] ?? ''; }
+  set value(v: string) { this.attrs.value = String(v); this.attrs['.value'] = String(v); }
   get isConnected(): boolean { let node: El | null = this; while (node?.parentElement) node = node.parentElement; return node?.tagName === 'HTML'; }
   get innerText(): string { return [this.text, ...this.children.map(kid => kid.innerText)].filter(Boolean).join('\n'); }
   get textContent() { return this.innerText; }
-  getAttribute(name: string) { return this.attrs[name] ?? null; }
+  getAttribute(name: string) { return Object.hasOwn(this.attrs, name) ? this.attrs[name]! : null; }
+  setAttribute(name: string, val: string) { this.attrs[name] = String(val); }
+  removeAttribute(name: string) { delete this.attrs[name]; }
   getBoundingClientRect() { return this.hidden ? { width: 0, height: 0 } : { width: 100, height: 20 }; }
   matches(selector: string): boolean {
     return selector.split(',').some(part => {
@@ -30,8 +45,20 @@ class El {
   descendants(): El[] { return this.children.flatMap(kid => [kid, ...kid.descendants()]); }
   querySelectorAll(selector: string) { return this.descendants().filter(node => node.matches(selector)); }
   click() { this.clicks++; this.onClick?.(); }
+  dispatchEvent(ev: any) { this.events.push(ev); return true; }
 }
-const el = (tag: string, attrs: Record<string, string> = {}, text = '', kids: El[] = []) => new El(tag, attrs, text, kids);
+const el = (tag: string, attrs: Record<string, any> = {}, text = '', kids: El[] = []) => new El(tag, attrs, text, kids);
+
+function fromFixtureTree(tuple: any[]): El {
+  const [tag, attrs, ...children] = tuple;
+  const textParts: string[] = [];
+  const childEls: El[] = [];
+  for (const item of children) {
+    if (typeof item === 'string') textParts.push(item);
+    else if (Array.isArray(item)) childEls.push(fromFixtureTree(item));
+  }
+  return new El(tag, attrs || {}, textParts.join(' '), childEls);
+}
 
 function radioOption(name: string, label: string, description = '') {
   const input = el('input', { type: 'radio', name });
@@ -68,9 +95,9 @@ function install(content: El[], path = '/code/session_abc123') {
     chrome: { runtime: { id: 'ext', onMessage: { addListener: (fn: any) => listeners.push(fn), removeListener: (fn: any) => { listeners.splice(listeners.indexOf(fn), 1); } }, sendMessage: async (message: any) => { sent.push(message); } } },
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
     MutationObserver: class { entry: { disconnected: boolean; callback: () => void }; constructor(callback: () => void) { this.entry = { disconnected: false, callback }; observers.push(this.entry); } observe() {} disconnect() { this.entry.disconnected = true; } },
-    setTimeout: (callback: () => void, delay: number) => { if (delay === 150) { return setTimeout(callback, delay) as unknown as number; } timers.set(++timerId, callback); return timerId; }, clearTimeout: (id: number) => { timers.delete(id); },
+    setTimeout: (callback: () => void, delay: number) => { if (delay <= 150) { return setTimeout(callback, delay) as unknown as number; } timers.set(++timerId, callback); return timerId; }, clearTimeout: (id: number) => { timers.delete(id); },
     setInterval: () => { intervals.add(++timerId); return timerId; }, clearInterval: (id: number) => { intervals.delete(id); },
-    Date, Promise, Object, Array, Set, Map, JSON, Math, String,
+    Date, Promise, Object, Array, Set, Map, JSON, Math, String, Number,
   };
   context.globalThis = context;
   const run = () => runInNewContext(questionsSource, context);
@@ -268,4 +295,203 @@ test('同步失败时保留待回传结果，恢复后补发且已处理的决�
   assert.equal(fixture.bodies.at(-1).results.length, 1);
   await fixture.sync(); assert.deepEqual(fixture.bodies.at(-1).results, []);
   assert.equal(fixture.messages.filter(message => message.type === 'answer-question').length, 1);
+});
+
+const singleFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-single.json', import.meta.url), 'utf8'));
+const singleOtherFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-single-other.json', import.meta.url), 'utf8'));
+const multiFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-multi.json', import.meta.url), 'utf8'));
+const paged1Fixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-paged-1.json', import.meta.url), 'utf8'));
+const paged2Fixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-paged-2.json', import.meta.url), 'utf8'));
+const mcpPermFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
+
+function wireCardBehaviors(cardRoot: El, opts: { multiSelect?: boolean; failVerify?: boolean } = {}) {
+  const answerBtns = cardRoot.querySelectorAll('button[data-question-answer]');
+  const otherBtn = answerBtns.find(b => b.getAttribute('aria-label') === 'Other') ?? null;
+  const optionBtns = answerBtns.filter(b => b !== otherBtn);
+  const submitOrNext = cardRoot.querySelectorAll('button').find(b => !b.matches('button[data-question-answer]') && /^(?:Submit|Next)\b/.test(b.innerText.replace(/\s+/g, ' ').trim())) ?? null;
+
+  const updateSubmitDisabled = () => {
+    if (!submitOrNext || !opts.multiSelect) return;
+    const anyPressed = answerBtns.some(b => b.getAttribute('aria-pressed') === 'true');
+    submitOrNext.disabled = !anyPressed;
+    if (anyPressed) submitOrNext.removeAttribute('disabled');
+    else submitOrNext.setAttribute('disabled', '');
+  };
+
+  for (const btn of optionBtns) {
+    btn.onClick = () => {
+      if (opts.failVerify) return;
+      if (opts.multiSelect) {
+        const next = btn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true';
+        btn.setAttribute('aria-pressed', next);
+      } else {
+        for (const peer of answerBtns) peer.setAttribute('aria-pressed', peer === btn ? 'true' : 'false');
+      }
+      updateSubmitDisabled();
+    };
+  }
+  if (otherBtn) {
+    otherBtn.onClick = () => {
+      if (opts.failVerify) return;
+      if (opts.multiSelect) {
+        const next = otherBtn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true';
+        otherBtn.setAttribute('aria-pressed', next);
+      } else {
+        for (const peer of answerBtns) peer.setAttribute('aria-pressed', peer === otherBtn ? 'true' : 'false');
+      }
+      if (otherBtn.getAttribute('aria-pressed') === 'true' && !cardRoot.querySelectorAll('textarea[aria-label="Other option"]').length) {
+        const ta = el('textarea', { 'data-cds': 'TextArea', 'aria-label': 'Other option', '.value': '' });
+        otherBtn.parentElement?.add(ta);
+      }
+      updateSubmitDisabled();
+    };
+  }
+  return { optionBtns, otherBtn, submitOrNext };
+}
+
+test('claude.ai 真实单选样本：识别卡片与 allowOther，默认已选中第一项时仍点击目标，支持写入 Other 文本框，核对失败返回 unknown', async () => {
+  // 1. 单选默认已选中第一项 PASEO_A，目标选 PASEO_A 时仍点击 PASEO_A 按钮
+  const card1 = el('div', { 'data-tool-anchor': 'toolu_SINGLE_1' }, '', [fromFixtureTree(singleFixture.tree)]);
+  const controls1 = wireCardBehaviors(card1, { multiSelect: false });
+  const page1 = install([card1]);
+  const [q1] = await page1.read();
+  assert.equal(q1.toolUseId, 'toolu_SINGLE_1');
+  assert.equal(q1.prompts.length, 1);
+  assert.equal(q1.prompts[0].question, '测试单选：选哪个标记？');
+  assert.equal(q1.prompts[0].multiSelect, false);
+  assert.equal(q1.prompts[0].allowOther, true);
+  assert.deepEqual(q1.prompts[0].options, [
+    { label: 'PASEO_A', description: '第一个标记', recommended: false },
+    { label: 'PASEO_B', description: '第二个标记', recommended: false },
+  ]);
+
+  assert.equal(await page1.answer({
+    ...page1.decide(q1, { '测试单选：选哪个标记？': ['PASEO_A'] }),
+    source: 'manual',
+  }), 'submitted');
+  assert.equal(controls1.optionBtns[0]!.clicks, 1);
+  assert.equal(controls1.submitOrNext!.clicks, 1);
+
+  // 2. 单选填写“其他”文本：点击 Other 按钮并写入 textarea[aria-label="Other option"]
+  const card2 = fromFixtureTree(singleOtherFixture.tree);
+  wireCardBehaviors(card2, { multiSelect: false });
+  const page2 = install([card2]);
+  const [q2] = await page2.read();
+  assert.equal(await page2.answer({
+    ...page2.decide(q2, { '测试单选：选哪个标记？': [] }),
+    otherAnswers: { '测试单选：选哪个标记？': 'PASEO_OTHER_1704 单选' },
+    source: 'manual',
+  }), 'submitted');
+  const ta2 = card2.querySelectorAll('textarea[aria-label="Other option"]')[0]!;
+  assert.equal(ta2.value, 'PASEO_OTHER_1704 单选');
+  assert.ok(ta2.events.some(ev => ev?.type === 'input' && ev?.bubbles === true));
+
+  // 3. 写入后 150ms 核对失败返回 unknown 且不点 Submit
+  const card3 = fromFixtureTree(singleFixture.tree);
+  const controls3 = wireCardBehaviors(card3, { multiSelect: false, failVerify: true });
+  const page3 = install([card3]);
+  const [q3] = await page3.read();
+  assert.equal(await page3.answer({
+    ...page3.decide(q3, { '测试单选：选哪个标记？': ['PASEO_B'] }),
+    source: 'manual',
+  }), 'unknown');
+  assert.equal(controls3.submitOrNext!.clicks, 0);
+});
+
+test('claude.ai 真实多选与分页样本：含逗号标签、多选加 Other、两页逐页复核并从 Next 到 Submit', async () => {
+  // 1. 多选题：勾选含逗号标签 + Other 文本
+  const multiCard = fromFixtureTree(multiFixture.tree);
+  const multiControls = wireCardBehaviors(multiCard, { multiSelect: true });
+  const multiPage = install([multiCard]);
+  const [mq] = await multiPage.read();
+  assert.equal(mq.prompts[0].multiSelect, true);
+  assert.equal(mq.prompts[0].allowOther, true);
+  assert.deepEqual(mq.prompts[0].options.map((o: any) => o.label), ['PASEO_M1', 'PASEO_M2, 含逗号', 'PASEO_M3']);
+
+  assert.equal(await multiPage.answer({
+    ...multiPage.decide(mq, { '测试多选：选哪些标记？': ['PASEO_M1', 'PASEO_M2, 含逗号'] }),
+    otherAnswers: { '测试多选：选哪些标记？': 'PASEO_OTHER_1704 多选' },
+    source: 'manual',
+  }), 'submitted');
+  assert.equal(multiControls.optionBtns[0]!.getAttribute('aria-pressed'), 'true');
+  assert.equal(multiControls.optionBtns[1]!.getAttribute('aria-pressed'), 'true');
+  assert.equal(multiControls.optionBtns[2]!.getAttribute('aria-pressed'), 'false');
+  assert.equal(multiControls.otherBtn!.getAttribute('aria-pressed'), 'true');
+  const multiTa = multiCard.querySelectorAll('textarea[aria-label="Other option"]')[0]!;
+  assert.equal(multiTa.value, 'PASEO_OTHER_1704 多选');
+  assert.equal(multiControls.submitOrNext!.clicks, 1);
+
+  // 2. 两题分页（question-paged-1.json -> 点击 Next 切换到 question-paged-2.json -> 点击 Submit）
+  const page1Tree = fromFixtureTree(paged1Fixture.tree);
+  const page2Tree = fromFixtureTree(paged2Fixture.tree);
+  const p1Controls = wireCardBehaviors(page1Tree, { multiSelect: false });
+  const p2Controls = wireCardBehaviors(page2Tree, { multiSelect: true });
+
+  const pagedPage = install([page1Tree]);
+  p1Controls.submitOrNext!.onClick = () => {
+    pagedPage.body.children = [page2Tree];
+    page2Tree.parentElement = pagedPage.body;
+  };
+
+  const [pq] = await pagedPage.read();
+  assert.equal(pq.toolUseId, 'toolu_TEST1');
+  assert.equal(pq.pages, 2);
+  assert.equal(pq.prompts.length, 1);
+  assert.equal(pq.prompts[0].question, '测试多题一：选颜色？');
+
+  assert.equal(await pagedPage.answer({
+    ...pagedPage.decide(pq, {
+      '测试多题一：选颜色？': ['PASEO_BLUE'],
+      '测试多题二：选形状？': ['PASEO_CIRCLE', 'PASEO_TRI'],
+    }),
+    otherAnswers: {
+      '测试多题二：选形状？': 'PASEO_OTHER_1704 多题',
+    },
+    source: 'manual',
+  }), 'submitted');
+  assert.equal(p1Controls.optionBtns[1]!.getAttribute('aria-pressed'), 'true');
+  assert.equal(p1Controls.submitOrNext!.clicks, 1);
+  assert.equal(p2Controls.optionBtns[0]!.getAttribute('aria-pressed'), 'true');
+  assert.equal(p2Controls.optionBtns[1]!.getAttribute('aria-pressed'), 'false');
+  assert.equal(p2Controls.optionBtns[2]!.getAttribute('aria-pressed'), 'true');
+  assert.equal(p2Controls.otherBtn!.getAttribute('aria-pressed'), 'true');
+  const p2Ta = page2Tree.querySelectorAll('textarea[aria-label="Other option"]')[0]!;
+  assert.equal(p2Ta.value, 'PASEO_OTHER_1704 多题');
+  assert.equal(p2Controls.submitOrNext!.clicks, 1);
+});
+
+test('模式切换 SegmentedControl 与权限卡片不算提问；敏感词提问在 manual 时执行、automatic 时拒绝', async () => {
+  // 1. 顶部模式切换 SegmentedControl 和 MCP 权限卡片不被识别为提问
+  const segmented = el('div', { role: 'radiogroup', 'data-cds': 'SegmentedControl', 'aria-label': 'Mode' }, '', [
+    el('span', { role: 'radio', 'aria-checked': 'true' }, 'Claude'),
+    el('span', { role: 'radio', 'aria-checked': 'false' }, 'Code'),
+  ]);
+  const mcpPerm = fromFixtureTree(mcpPermFixture.tree);
+  const page = install([segmented, mcpPerm]);
+  assert.deepEqual(await page.read(), []);
+
+  // 2. 含“权限”敏感词的提问卡片：读取时不标推荐；automatic 时拒绝；manual 时照常点击提交
+  const sensitiveCard = fromFixtureTree(singleFixture.tree);
+  const groupNode = sensitiveCard.matches('[data-approval-card-root]') ? sensitiveCard : sensitiveCard.querySelectorAll('[data-approval-card-root]')[0]!;
+  groupNode.setAttribute('aria-label', '测试权限问题：请选择标记？');
+  const optADiv = groupNode.querySelectorAll('button[data-question-answer]')[0]!.children[1]!.children[0]!;
+  optADiv.text = 'PASEO_A (Recommended)';
+  const controls = wireCardBehaviors(sensitiveCard, { multiSelect: false });
+  const sPage = install([sensitiveCard]);
+
+  const [sq] = await sPage.read();
+  assert.equal(sq.prompts[0].options[0].recommended, false);
+
+  assert.equal(await sPage.answer({
+    ...sPage.decide(sq, { '测试权限问题：请选择标记？': ['PASEO_B'] }),
+    source: 'automatic',
+  }), 'unknown');
+  assert.equal(controls.submitOrNext!.clicks, 0);
+
+  assert.equal(await sPage.answer({
+    ...sPage.decide(sq, { '测试权限问题：请选择标记？': ['PASEO_B'] }),
+    source: 'manual',
+  }), 'submitted');
+  assert.equal(controls.optionBtns[1]!.getAttribute('aria-pressed'), 'true');
+  assert.equal(controls.submitOrNext!.clicks, 1);
 });

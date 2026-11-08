@@ -1,0 +1,284 @@
+{
+ "source": "claude.ai 测试会话，2026-11-08，SunBrowser 29 号环境，界面语言 en-US",
+ "note": "多选题初始状态。[role=status] 显示“0 selected”；未选择时 Submit 为 disabled，并有原因文字。标签含逗号。",
+ "format": "[标签, 属性, ...子节点]；子节点为字符串时是文本；属性名以“.”开头的是元素运行时属性（checked、value、disabled）",
+ "tree": [
+  "div",
+  {
+   "tabindex": "-1",
+   "role": "group",
+   "aria-label": "测试多选：选哪些标记？",
+   "data-approval-card-root": "",
+   "data-skip-approval-enter": "",
+   "data-approval-presentation": "card",
+   "data-fixed-code-size": ""
+  },
+  [
+   "div",
+   {},
+   [
+    "div",
+    {},
+    "测试多选：选哪些标记？"
+   ]
+  ],
+  [
+   "span",
+   {
+    "data-approval-allow": ""
+   },
+   [
+    "div",
+    {},
+    [
+     "button",
+     {
+      "type": "button",
+      "aria-pressed": "false",
+      "data-question-answer": ""
+     },
+     [
+      "span",
+      {
+       "data-unchecked": ""
+      }
+     ],
+     [
+      "div",
+      {
+       "id": "_r_o1_"
+      },
+      [
+       "div",
+       {},
+       "PASEO_M1"
+      ],
+      [
+       "div",
+       {},
+       "标记一"
+      ]
+     ]
+    ],
+    [
+     "button",
+     {
+      "type": "button",
+      "aria-pressed": "false",
+      "data-question-answer": ""
+     },
+     [
+      "span",
+      {
+       "data-unchecked": ""
+      }
+     ],
+     [
+      "div",
+      {
+       "id": "_r_o2_"
+      },
+      [
+       "div",
+       {},
+       "PASEO_M2, 含逗号"
+      ],
+      [
+       "div",
+       {},
+       "标签带逗号"
+      ]
+     ]
+    ],
+    [
+     "button",
+     {
+      "type": "button",
+      "aria-pressed": "false",
+      "data-question-answer": ""
+     },
+     [
+      "span",
+      {
+       "data-unchecked": ""
+      }
+     ],
+     [
+      "div",
+      {
+       "id": "_r_o3_"
+      },
+      [
+       "div",
+       {},
+       "PASEO_M3"
+      ],
+      [
+       "div",
+       {},
+       "标记三"
+      ]
+     ]
+    ],
+    [
+     "div",
+     {},
+     [
+      "button",
+      {
+       "type": "button",
+       "aria-pressed": "false",
+       "aria-label": "Other",
+       "data-question-answer": ""
+      }
+     ],
+     [
+      "div",
+      {
+       "aria-hidden": "true"
+      },
+      [
+       "span",
+       {
+        "data-unchecked": ""
+       }
+      ],
+      [
+       "span",
+       {
+        "aria-hidden": "true"
+       },
+       "Other"
+      ]
+     ]
+    ]
+   ]
+  ],
+  [
+   "span",
+   {
+    "role": "status",
+    "data-find-omitted": ""
+   },
+   "0 selected"
+  ],
+  [
+   "div",
+   {},
+   [
+    "span",
+    {
+     "data-approval-allow": ""
+    },
+    [
+     "button",
+     {
+      "type": "button",
+      "data-cds": "Button"
+     },
+     [
+      "span",
+      {
+       "aria-hidden": "true"
+      },
+      [
+       "span",
+       {
+        "data-cds-part": "paint"
+       }
+      ]
+     ],
+     [
+      "span",
+      {},
+      "Skip"
+     ]
+    ],
+    [
+     "span",
+     {
+      "tabindex": "0",
+      "aria-describedby": "_r_o5_",
+      "data-cds-disabled-reason-wrapper": "",
+      "id": "_r_o6_",
+      "data-base-ui-tooltip-trigger": ""
+     },
+     [
+      "button",
+      {
+       "type": "button",
+       "disabled": "",
+       "data-cds": "Button",
+       "aria-keyshortcuts": "Meta+Enter"
+      },
+      [
+       "span",
+       {
+        "aria-hidden": "true"
+       },
+       [
+        "span",
+        {
+         "data-cds-part": "paint"
+        }
+       ]
+      ],
+      [
+       "span",
+       {},
+       "Submit",
+       [
+        "span",
+        {
+         "aria-hidden": "true",
+         "data-cds": "Shortcut",
+         "data-variant": "keycap"
+        },
+        [
+         "kbd",
+         {},
+         [
+          "span",
+          {
+           "aria-hidden": "true"
+          },
+          "⌘"
+         ],
+         [
+          "span",
+          {},
+          "Command"
+         ]
+        ],
+        [
+         "kbd",
+         {},
+         [
+          "span",
+          {
+           "aria-hidden": "true"
+          },
+          "⏎"
+         ],
+         [
+          "span",
+          {},
+          "Enter"
+         ]
+        ]
+       ]
+      ]
+     ],
+     [
+      "span",
+      {
+       "id": "_r_o5_",
+       "data-cds-disabled-reason": ""
+      },
+      "Choose an option or skip this question"
+     ]
+    ]
+   ]
+  ]
+ ]
+}

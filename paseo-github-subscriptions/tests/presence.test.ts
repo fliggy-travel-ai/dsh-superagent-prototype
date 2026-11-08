@@ -4,8 +4,11 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentPermissionRequest } from '@getpaseo/protocol/agent-types';
+import { AgentPermissionResponseSchema } from '@getpaseo/protocol/messages';
+import { ProviderInputSchema } from '@getpaseo/plugin/server/provider';
 import { PresenceRuntime, type PresencePort, type QuestionAgent } from '../server/presence.ts';
-import { nativePrompts, nativeResponse, recommendedAnswers } from '../server/questions.ts';
+import { nativePrompts, nativeResponse, recommendedAnswers, validateAnswers } from '../server/questions.ts';
+import { summarizeWebAnswer, WebRequestLedger } from '../server/web-request/ledger.ts';
 import { isQuestionTodo, isUnreadAutomaticAnswer, QuestionSchema, type BrowserQuestion } from '../shared/presence.ts';
 import type { SpeechResult } from '../shared/speech.ts';
 
@@ -139,21 +142,49 @@ async function fixture(overrides: Partial<PresencePort> = {}, clock = Date.now) 
   const responses: unknown[] = [];
   const speech: string[] = [];
   const cancels: Array<[string | null, string]> = [];
+  const ledger = new WebRequestLedger(clock);
   const port: PresencePort = {
     list: async () => structuredClone(agents), refresh: async id => structuredClone(agents.find(item => item.id === id) ?? null),
     respond: async (...args) => { responses.push(args); }, observe: async () => ({ mode: 'unknown', observedAt: null, reason: '未发现手机', source: 'unavailable' }),
     speak: async (_host, id) => { speech.push(id); return { played: true, engine: 'neural' }; }, cancelSpeech: async (host, id) => { cancels.push([host, id]); }, hosts: async () => [], ...overrides,
   };
-  const runtime = new PresenceRuntime(directory, port, clock);
+  const runtime = new PresenceRuntime(directory, port, clock, ledger);
   await runtime.start();
-  return { runtime, directory, agents, responses, speech, cancels, port, close: async () => { await runtime.stop(); await rm(directory, { recursive: true, force: true }); } };
+  return { runtime, directory, agents, responses, speech, cancels, port, ledger, close: async () => { await runtime.stop(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-test('原生问答只接受合法问题，保留提供方的答案映射', () => {
-  assert.deepEqual(nativePrompts(request()), [prompt]);
+test('原生问答只接受合法问题，保留提供方的答案映射并支持自由文本与结构化格式', () => {
+  assert.deepEqual(nativePrompts(request()), [{ ...prompt, allowOther: true }]);
+  assert.deepEqual(nativePrompts({ ...request(), name: 'request_user_input', provider: 'codex' }), [prompt]);
   for (const questions of [[null], [{ ...prompt, options: [null] }], [], [prompt, prompt]]) assert.equal(nativePrompts({ ...request(), input: { questions } }), null);
   assert.equal(nativePrompts({ ...request(), kind: 'tool' }), null);
   assert.deepEqual(nativeResponse(request(), answer), { behavior: 'allow', updatedInput: { answers: { [prompt.question]: prompt.options[0].label } } });
+  assert.deepEqual(
+    nativeResponse(request(), { [prompt.question]: [] }, { [prompt.question]: '  自定义说明  ' }),
+    { behavior: 'allow', updatedInput: { answers: { [prompt.question]: '自定义说明' } } },
+  );
+  const multiRequest: AgentPermissionRequest = { ...request(), input: { questions: [{ ...prompt, multiSelect: true }] } };
+  assert.deepEqual(
+    nativeResponse(multiRequest, { [prompt.question]: [prompt.options[0].label, prompt.options[1].label] }, { [prompt.question]: '补充其他' }),
+    { behavior: 'allow', updatedInput: { answers: { [prompt.question]: `${prompt.options[0].label}, ${prompt.options[1].label}, 补充其他` } } },
+  );
+  const cloudMulti: AgentPermissionRequest = { ...multiRequest, provider: 'cloud-session' };
+  const cloudResponse = nativeResponse(cloudMulti, { [prompt.question]: [prompt.options[0].label] }, { [prompt.question]: '  云端其他  ' });
+  assert.deepEqual(cloudResponse, {
+    behavior: 'allow',
+    updatedInput: {
+      answers: { [prompt.question]: [prompt.options[0].label] },
+      otherAnswers: { [prompt.question]: '云端其他' },
+    },
+  });
+  // Verify Paseo protocol and provider schemas preserve extra fields in updatedInput intact
+  assert.deepEqual(AgentPermissionResponseSchema.parse(cloudResponse), cloudResponse);
+  assert.deepEqual(
+    ProviderInputSchema.parse({ type: 'session.permission', sessionId: 's1', permissionId: 'p1', response: cloudResponse }),
+    { type: 'session.permission', sessionId: 's1', permissionId: 'p1', response: cloudResponse },
+  );
+  assert.throws(() => validateAnswers([prompt], { [prompt.question]: [] }, { [prompt.question]: '不支持其他' }), /选项已变化/);
+  assert.throws(() => validateAnswers([{ ...prompt, allowOther: true }], { [prompt.question]: [prompt.options[0].label] }, { [prompt.question]: '单选互斥' }), /选项已变化/);
   assert.deepEqual(nativeResponse({ ...request(), name: 'request_user_input', provider: 'codex' }, answer), { behavior: 'allow', updatedInput: { answers: { [prompt.header]: prompt.options[0].label } } });
   assert.equal(recommendedAnswers([{ ...prompt, options: prompt.options.map(option => ({ ...option, recommended: false })) }]), null);
   assert.equal(recommendedAnswers([{ ...prompt, question: '请关闭安全验证' }]), null);
@@ -439,31 +470,143 @@ test('并发网页同步只下发一次答案，停止后不再同步', async ()
   } finally { await setup.close(); }
 });
 
-test('云端会话的原生提问在离线模式仍由用户作答', async () => {
+test('云端提问离线时自动选明确推荐项、在线时只提醒、拦截词仍生效，答复后保持已提交并在云端关闭后结束，且登记答案来源', async () => {
   const setup = await fixture();
   try {
-    const cloudRequest = { ...request(), provider: 'cloud-session' };
-    setup.agents.push({ ...agent(), pendingPermissions: [cloudRequest] });
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
-    const question = setup.runtime.snapshot().questions[0];
-    assert.equal(question.state, 'pending'); assert.equal(question.reason, '云端会话等待用户回答');
+    const cloudRequest: AgentPermissionRequest = {
+      ...request(),
+      id: 'toolu_cloud_1',
+      provider: 'cloud-session',
+      metadata: { cloudSessionManual: true, webSessionId: 'session_one', toolUseId: 'toolu_cloud_1' },
+    };
+    setup.agents.push({ ...agent(), provider: 'cloud-session', labels: { 'cloud-session.id': 'cse_one' }, pendingPermissions: [cloudRequest] });
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online' });
+    let question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'pending');
+    assert.equal(question.reason, '在线：等待用户回答');
+    assert.equal(setup.speech.length, 1);
     assert.equal(setup.responses.length, 0);
-    await setup.runtime.answer({ id: question.id, answers: answer });
+
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'submitted');
+    assert.equal(question.reason, '已交给浏览器执行，等待云端确认');
+    assert.equal(question.answer?.source, 'automatic');
+    assert.deepEqual(setup.responses, [[
+      'agent-one',
+      'toolu_cloud_1',
+      { behavior: 'allow', updatedInput: { answers: answer } },
+    ]]);
+    const autoSummary = summarizeWebAnswer({ kind: 'question', answers: answer });
+    assert.equal(setup.ledger.lookup({ webSessionId: 'session_one', toolUseId: 'toolu_cloud_1', digest: autoSummary.digest }), 'automatic');
+
+    setup.agents[0].pendingPermissions = [];
+    await setup.runtime.refresh();
+    question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'resolved');
+    assert.equal(question.reason, '云端已记录结果');
+    assert.equal(isUnreadAutomaticAnswer(question), true);
+
+    // Blocked keywords still prevent automatic answer on cloud requests, while manual answer with "other" text succeeds and records source=user
+    const sensitivePrompt = { ...prompt, question: '是否合并 PR #1704？' };
+    const sensitiveRequest: AgentPermissionRequest = {
+      ...cloudRequest,
+      id: 'toolu_cloud_2',
+      input: { questions: [sensitivePrompt] },
+      metadata: { cloudSessionManual: true, webSessionId: 'session_one', toolUseId: 'toolu_cloud_2' },
+    };
+    setup.agents[0].pendingPermissions = [sensitiveRequest];
+    await setup.runtime.refresh();
+    const pendingSensitive = setup.runtime.snapshot().questions.find(item => item.state === 'pending')!;
+    assert.ok(pendingSensitive);
+    assert.match(pendingSensitive.reason, /验收或合并授权/);
     assert.equal(setup.responses.length, 1);
+
+    await setup.runtime.answer({
+      id: pendingSensitive.id,
+      answers: { [sensitivePrompt.question]: [] },
+      otherAnswers: { [sensitivePrompt.question]: '先人工复核后再合并' },
+    });
+    const manualSubmitted = setup.runtime.snapshot().questions.find(item => item.id === pendingSensitive.id)!;
+    assert.equal(manualSubmitted.state, 'submitted');
+    assert.equal(manualSubmitted.reason, '已交给浏览器执行，等待云端确认');
+    assert.equal(manualSubmitted.answer?.source, 'user');
+    assert.deepEqual(manualSubmitted.answer?.otherAnswers, { [sensitivePrompt.question]: '先人工复核后再合并' });
+    const manualSummary = summarizeWebAnswer({
+      kind: 'question',
+      answers: { [sensitivePrompt.question]: [] },
+      otherAnswers: { [sensitivePrompt.question]: '先人工复核后再合并' },
+    });
+    assert.equal(setup.ledger.lookup({ webSessionId: 'session_one', toolUseId: 'toolu_cloud_2', digest: manualSummary.digest }), 'user');
   } finally { await setup.close(); }
 });
 
-test('云端人工请求标记在在线和离线模式都不会自动作答', async () => {
-  for (const mode of ['online', 'offline'] as const) {
-    const setup = await fixture();
-    try {
-      const marked = { ...request(), metadata: { cloudSessionManual: true } };
-      setup.agents.push({ ...agent(), pendingPermissions: [marked] });
-      await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode, speechEnabled: false });
-      const question = setup.runtime.snapshot().questions[0];
-      assert.equal(question.state, 'pending'); assert.equal(setup.responses.length, 0);
-      await setup.runtime.answer({ id: question.id, answers: answer });
-      assert.equal(setup.responses.length, 1);
-    } finally { await setup.close(); }
-  }
+test('云端会话网页提问在同步前不自动作答，有对应云端提问时设 delegatedTo 并隐藏，delegateBrowserAnswer 受暂停、模式切换和停止约束', async () => {
+  const setup = await fixture();
+  try {
+    setup.agents.push({ id: 'cloud-agent', title: '云端会话', provider: 'cloud-session', labels: { 'cloud-session.id': 'cse_one' }, pendingPermissions: [] });
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+
+    // Before cloud hook notifies Paseo: browser question belongs to cloud session -> never auto-answered in offline mode
+    const beforeHookDecisions = await setup.runtime.browserSync('browser-one', [webpage('one')], [], [{ sessionId: 'one', title: '网页开发', url: 'https://claude.ai/code/session_one' }], ['one']);
+    assert.deepEqual(beforeHookDecisions, []);
+    let browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
+    assert.equal(browserQ.state, 'pending');
+    assert.equal(browserQ.reason, '云端会话提问，等待同步到 Paseo；只接受人工回答');
+    assert.equal(browserQ.delegatedTo, undefined);
+    assert.equal(isQuestionTodo(browserQ), true);
+
+    // Cloud hook notifies Paseo with matching question -> browser question gets delegatedTo and is hidden from todo list
+    const cloudRequest: AgentPermissionRequest = {
+      ...request(),
+      id: 'toolu_1',
+      provider: 'cloud-session',
+      metadata: { cloudSessionManual: true, webSessionId: 'session_one', toolUseId: 'toolu_1' },
+    };
+    setup.agents[0].pendingPermissions = [cloudRequest];
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+    browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
+    const nativeQ = setup.runtime.snapshot().questions.find(item => item.source === 'native')!;
+    assert.equal(browserQ.delegatedTo, nativeQ.id);
+    assert.equal(isQuestionTodo(browserQ), false);
+    assert.equal(isQuestionTodo(nativeQ), true);
+
+    // Check browserCandidates, delegateBrowserAnswer, and browserState constraints
+    const candidates = setup.runtime.browserCandidates('browser-one', 'one');
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0]!.id, browserQ.id);
+    assert.equal(candidates[0]!.observed, true);
+
+    // Paused -> delegateBrowserAnswer returns false
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, paused: true });
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), false);
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, paused: false });
+
+    // Mode change after delegation cancels queued decision
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    assert.equal(setup.runtime.browserState(browserQ.id)?.queued, true);
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    assert.equal(setup.runtime.browserState(browserQ.id)?.queued, false);
+
+    // Normal delegation dispatches decision with source and otherAnswers even in online mode
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+    assert.equal(
+      setup.runtime.delegateBrowserAnswer(browserQ.id, { [prompt.question]: [] }, { [prompt.question]: '转交其他' }, 'manual'),
+      true,
+    );
+    const dispatched = await setup.runtime.browserSync('browser-one', [webpage('one')], [], [{ sessionId: 'one', title: '网页开发', url: 'https://claude.ai/code/session_one' }], ['one']);
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0]!.source, 'manual');
+    assert.deepEqual(dispatched[0]!.answers, { [prompt.question]: [] });
+    assert.deepEqual(dispatched[0]!.otherAnswers, { [prompt.question]: '转交其他' });
+    assert.equal(setup.runtime.browserState(browserQ.id)?.state, 'submitted');
+
+    // Receipt updates browserSubmittedAt
+    await setup.runtime.browserSync('browser-one', [], [{ ...webpage('one'), status: 'submitted' }], [{ sessionId: 'one', title: '网页开发', url: 'https://claude.ai/code/session_one' }], ['one']);
+    assert.ok(setup.runtime.browserState(browserQ.id)?.browserSubmittedAt);
+
+    // Stop prevents delegation
+    await setup.runtime.stop();
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), false);
+  } finally { await setup.close(); }
 });

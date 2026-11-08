@@ -1,8 +1,35 @@
 import { createHash } from 'node:crypto';
 import type { AgentPermissionRequest, AgentPermissionResponse } from '@getpaseo/protocol/agent-types';
-import { QuestionPromptSchema, type QuestionPrompt, type QuestionAnswer } from '../shared/presence.ts';
+import { CLOUD_SESSION_PROVIDER_ID } from '../shared/cloud-session.ts';
+import { QuestionPromptSchema, type BrowserQuestion, type QuestionPrompt, type QuestionAnswer } from '../shared/presence.ts';
 
 export const questionFingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+const cleanText = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+function singlePromptMatches(expected: QuestionPrompt, actual: QuestionPrompt): boolean {
+  if (cleanText(expected.question) !== cleanText(actual.question)) return false;
+  if (Boolean(expected.multiSelect) !== Boolean(actual.multiSelect)) return false;
+  const expectedLabels = expected.options.map(option => cleanText(option.label));
+  const actualLabels = actual.options.map(option => cleanText(option.label));
+  if (expectedLabels.length !== actualLabels.length) return false;
+  const actualSet = new Set(actualLabels);
+  return actualSet.size === expectedLabels.length && expectedLabels.every(label => actualSet.has(label));
+}
+
+export function browserQuestionMatchesPrompts(
+  expectedPrompts: QuestionPrompt[],
+  browser: Pick<BrowserQuestion, 'prompts' | 'pages' | 'toolUseId'>,
+  expectedToolUseId?: string,
+): boolean {
+  if (browser.toolUseId && expectedToolUseId && browser.toolUseId !== expectedToolUseId) return false;
+  if (browser.pages && browser.pages > 1) {
+    if (expectedPrompts.length !== browser.pages || !browser.prompts.length) return false;
+    return singlePromptMatches(expectedPrompts[0]!, browser.prompts[0]!);
+  }
+  if (expectedPrompts.length !== browser.prompts.length) return false;
+  return expectedPrompts.every((prompt, index) => singlePromptMatches(prompt, browser.prompts[index]!));
+}
 
 export function nativePrompts(request: AgentPermissionRequest): QuestionPrompt[] | null {
   if (request.kind !== 'question' || !['AskUserQuestion', 'request_user_input', 'request_user_input_async'].includes(request.name)) return null;
@@ -13,6 +40,7 @@ export function nativePrompts(request: AgentPermissionRequest): QuestionPrompt[]
   const parsed = QuestionPromptSchema.array().safeParse(input.questions.map(prompt => ({
     question: prompt.question, ...(typeof prompt.header === 'string' ? { header: prompt.header } : {}),
     multiSelect: prompt.multiSelect === true,
+    ...(request.name === 'AskUserQuestion' ? { allowOther: true } : {}),
     options: Array.isArray(prompt.options) ? prompt.options.map((option: Record<string, unknown>) => ({
       label: option.label, description: option.description ?? '',
       recommended: option.recommended === true || typeof option.label === 'string' && /(?:\(recommended\)|（推荐）|\(推荐\)|\[recommended\])\s*$/i.test(option.label),
@@ -21,11 +49,16 @@ export function nativePrompts(request: AgentPermissionRequest): QuestionPrompt[]
   return parsed.success && new Set(parsed.data.map(prompt => prompt.question)).size === parsed.data.length ? parsed.data : null;
 }
 
-export function validateAnswers(prompts: QuestionPrompt[], answers: QuestionAnswer['answers']) {
+export function validateAnswers(prompts: QuestionPrompt[], answers: Record<string, string[]>, otherAnswers?: Record<string, string>) {
   if (Object.keys(answers).length !== prompts.length) throw new Error('请回答每一个问题');
+  if (otherAnswers && Object.keys(otherAnswers).some(key => !prompts.some(prompt => prompt.question === key))) throw new Error('选项已变化，请重新读取问题');
   for (const prompt of prompts) {
     const selected = answers[prompt.question];
-    if (!selected?.length || !prompt.multiSelect && selected.length !== 1 || new Set(selected).size !== selected.length ||
+    const hasOtherKey = Boolean(otherAnswers && Object.hasOwn(otherAnswers, prompt.question) && otherAnswers[prompt.question] !== undefined);
+    const other = hasOtherKey ? otherAnswers![prompt.question]!.trim() : '';
+    if (hasOtherKey && (!prompt.allowOther || !other || other.length > 2000)) throw new Error('选项已变化，请重新读取问题');
+    const count = (selected?.length ?? 0) + (hasOtherKey ? 1 : 0);
+    if (!Array.isArray(selected) || (!prompt.multiSelect ? count !== 1 : count < 1) || new Set(selected).size !== selected.length ||
       selected.some(label => prompt.options.filter(option => option.label === label).length !== 1)) throw new Error('选项已变化，请重新读取问题');
   }
 }
@@ -54,16 +87,39 @@ export function recommendedAnswers(prompts: QuestionPrompt[]): QuestionAnswer['a
   try { validateAnswers(prompts, answers); return answers; } catch { return null; }
 }
 
-export function nativeResponse(request: AgentPermissionRequest, answers: QuestionAnswer['answers']): AgentPermissionResponse {
+export function nativeResponse(
+  request: AgentPermissionRequest,
+  answers: QuestionAnswer['answers'],
+  otherAnswers?: QuestionAnswer['otherAnswers'],
+): AgentPermissionResponse {
   const prompts = nativePrompts(request);
   if (!prompts) throw new Error('此请求不是受支持的问答');
-  validateAnswers(prompts, answers);
+  validateAnswers(prompts, answers, otherAnswers);
+  if (request.provider === CLOUD_SESSION_PROVIDER_ID) {
+    const mappedAnswers: Record<string, string[]> = {};
+    const mappedOther: Record<string, string> = {};
+    for (const prompt of prompts) {
+      mappedAnswers[prompt.question] = [...(answers[prompt.question] ?? [])];
+      const other = otherAnswers?.[prompt.question]?.trim();
+      if (other) mappedOther[prompt.question] = other;
+    }
+    return {
+      behavior: 'allow',
+      updatedInput: {
+        answers: mappedAnswers,
+        ...(Object.keys(mappedOther).length ? { otherAnswers: mappedOther } : {}),
+      },
+    };
+  }
   const mapped: Record<string, string> = {};
   for (const prompt of prompts) {
     const key = request.name === 'AskUserQuestion' ? prompt.question : prompt.header;
     if (!key || Object.hasOwn(mapped, key)) throw new Error('无法唯一对应原生问题');
-    if (prompt.multiSelect && answers[prompt.question].some(label => /[,，]/.test(label))) throw new Error('多选标签包含分隔符，请在原会话回答');
-    mapped[key] = answers[prompt.question].join(', ');
+    const selected = answers[prompt.question] ?? [];
+    const other = otherAnswers?.[prompt.question]?.trim();
+    if (prompt.multiSelect && selected.some(label => /[,，]/.test(label))) throw new Error('多选标签包含分隔符，请在原会话回答');
+    const parts = [...selected, ...(other ? [other] : [])];
+    mapped[key] = parts.join(', ');
   }
   return { behavior: 'allow', updatedInput: { answers: mapped } };
 }

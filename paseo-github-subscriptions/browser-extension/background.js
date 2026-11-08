@@ -39,27 +39,63 @@ const MAX_HANDLED = 500;
 const str = (value, max, min = 0) => typeof value === 'string' && value.length >= min && value.length <= max;
 function cleanQuestion(raw, expectedSession) {
   if (!raw || raw.sessionId !== expectedSession || !str(raw.id, 200, 1) || !str(raw.fingerprint, 128, 1) || !Array.isArray(raw.prompts) || raw.prompts.length < 1 || raw.prompts.length > 10) return null;
+  if (raw.toolUseId !== undefined && !str(raw.toolUseId, 200, 1)) return null;
+  if (raw.pages !== undefined && (!Number.isInteger(raw.pages) || raw.pages < 1 || raw.pages > 10)) return null;
   const prompts = [];
   for (const prompt of raw.prompts) {
     if (!prompt || !str(prompt.question, 4000, 1) || typeof prompt.multiSelect !== 'boolean' || !Array.isArray(prompt.options) || prompt.options.length > 30) return null;
     if (prompt.header !== undefined && !str(prompt.header, 200)) return null;
+    if (prompt.allowOther !== undefined && typeof prompt.allowOther !== 'boolean') return null;
     const options = [];
     for (const option of prompt.options) {
       if (!option || !str(option.label, 1000, 1) || !str(option.description ?? '', 4000) || typeof option.recommended !== 'boolean') return null;
       options.push({ label: option.label, description: option.description ?? '', recommended: option.recommended });
     }
-    prompts.push(prompt.header === undefined ? { question: prompt.question, multiSelect: prompt.multiSelect, options } : { question: prompt.question, header: prompt.header, multiSelect: prompt.multiSelect, options });
+    prompts.push({
+      question: prompt.question,
+      ...(prompt.header !== undefined ? { header: prompt.header } : {}),
+      multiSelect: prompt.multiSelect,
+      ...(prompt.allowOther !== undefined ? { allowOther: prompt.allowOther } : {}),
+      options,
+    });
   }
-  return { id: raw.id, sessionId: raw.sessionId, fingerprint: raw.fingerprint, prompts };
+  return {
+    id: raw.id,
+    sessionId: raw.sessionId,
+    fingerprint: raw.fingerprint,
+    ...(raw.toolUseId !== undefined ? { toolUseId: raw.toolUseId } : {}),
+    ...(raw.pages !== undefined ? { pages: raw.pages } : {}),
+    prompts,
+  };
 }
 function cleanDecision(raw) {
   if (!raw || !str(raw.id, 200, 1) || !str(raw.sessionId, 200, 1) || !str(raw.fingerprint, 128, 1) || typeof raw.expiresAt !== 'number' || !raw.answers || typeof raw.answers !== 'object' || Array.isArray(raw.answers)) return null;
+  if (raw.source !== undefined && raw.source !== 'automatic' && raw.source !== 'manual') return null;
+  let otherAnswers;
+  if (raw.otherAnswers !== undefined) {
+    if (!raw.otherAnswers || typeof raw.otherAnswers !== 'object' || Array.isArray(raw.otherAnswers)) return null;
+    otherAnswers = {};
+    for (const [question, text] of Object.entries(raw.otherAnswers)) {
+      if (!str(question, 4000, 1) || typeof text !== 'string' || !str(text.trim(), 2000, 1) || text.length > 2000) return null;
+      otherAnswers[question] = text.trim();
+    }
+  }
   const answers = {};
   for (const [question, labels] of Object.entries(raw.answers)) {
-    if (!Array.isArray(labels) || !labels.length || labels.length > 30 || !labels.every(label => str(label, 1000, 1))) return null;
+    if (!str(question, 4000, 1) || !Array.isArray(labels) || labels.length > 30 || !labels.every(label => str(label, 1000, 1))) return null;
+    if (!labels.length && !otherAnswers?.[question]) return null;
     answers[question] = [...labels];
   }
-  return { id: raw.id, sessionId: raw.sessionId, fingerprint: raw.fingerprint, answers, expiresAt: raw.expiresAt };
+  if (!Object.keys(answers).length && (!otherAnswers || !Object.keys(otherAnswers).length)) return null;
+  return {
+    id: raw.id,
+    sessionId: raw.sessionId,
+    fingerprint: raw.fingerprint,
+    answers,
+    ...(otherAnswers && Object.keys(otherAnswers).length ? { otherAnswers } : {}),
+    ...(raw.source !== undefined ? { source: raw.source } : {}),
+    expiresAt: raw.expiresAt,
+  };
 }
 async function readQuestions(tabId, expectedSession) {
   try {

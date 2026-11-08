@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Pressable, Switch, Text, View } from 'react-native';
-import { isQuestionTodo, isUnreadAutomaticAnswer, type PresenceSettings, type PresenceSnapshot, type Question, type QuestionPrompt } from '../shared/presence.ts';
+import { Pressable, Switch, Text, TextInput, View } from 'react-native';
+import { isQuestionTodo, isUnreadAutomaticAnswer, type PresenceSettings, type PresenceSnapshot, type Question, type QuestionAnswer, type QuestionPrompt } from '../shared/presence.ts';
 import { Btn, Card, Chip, Notice, useUi, type Tone } from './ui.tsx';
 import { BluetoothPanel } from './bluetooth-panel.tsx';
 
@@ -85,26 +85,82 @@ function Option({ label, detail, recommended, selected, multi, disabled, onPress
   </Pressable>;
 }
 
-function PromptBlock({ prompt, picked, disabled, pick }: { prompt: QuestionPrompt; picked: string[]; disabled: boolean; pick(next: string[]): void }) {
-  const { s } = useUi();
+export interface QuestionDraftState {
+  answers: Record<string, string[]>;
+  otherAnswers: Record<string, string>;
+}
+
+export function pickPromptOption(prompt: QuestionPrompt, current: QuestionDraftState, nextPicked: string[]): QuestionDraftState {
+  const answers = { ...current.answers, [prompt.question]: nextPicked };
+  const otherAnswers = { ...current.otherAnswers };
+  if (!prompt.multiSelect && nextPicked.length > 0) {
+    otherAnswers[prompt.question] = '';
+  }
+  return { answers, otherAnswers };
+}
+
+export function changePromptOther(prompt: QuestionPrompt, current: QuestionDraftState, value: string): QuestionDraftState {
+  const otherAnswers = { ...current.otherAnswers, [prompt.question]: value };
+  const answers = { ...current.answers };
+  if (!prompt.multiSelect && value.length > 0) {
+    answers[prompt.question] = [];
+  }
+  return { answers, otherAnswers };
+}
+
+export function isPromptComplete(prompt: QuestionPrompt, picked: string[], otherText?: string): boolean {
+  const other = (otherText ?? '').trim();
+  if (other.length > 0 && (!prompt.allowOther || other.length > 2000)) return false;
+  const count = picked.length + (other.length > 0 ? 1 : 0);
+  return prompt.multiSelect ? count >= 1 : count === 1;
+}
+
+export function isQuestionAnswerable(question: Question): boolean {
+  return (question.pages ?? 1) <= 1 && question.prompts.length > 0 && question.prompts.every(prompt => prompt.options.length > 0 || Boolean(prompt.allowOther));
+}
+
+export function isQuestionComplete(question: Question, answers: Record<string, string[]>, otherAnswers: Record<string, string>): boolean {
+  return isQuestionAnswerable(question) && question.prompts.every(prompt => isPromptComplete(prompt, answers[prompt.question] ?? [], otherAnswers[prompt.question]));
+}
+
+export function buildQuestionSubmission(question: Question, answers: Record<string, string[]>, otherAnswers: Record<string, string>): QuestionAnswer {
+  const submittedAnswers: Record<string, string[]> = {};
+  const submittedOther: Record<string, string> = {};
+  for (const prompt of question.prompts) {
+    submittedAnswers[prompt.question] = answers[prompt.question] ?? [];
+    const trimmed = (otherAnswers[prompt.question] ?? '').trim();
+    if (trimmed) submittedOther[prompt.question] = trimmed;
+  }
+  return {
+    id: question.id,
+    answers: submittedAnswers,
+    ...(Object.keys(submittedOther).length ? { otherAnswers: submittedOther } : {}),
+  };
+}
+
+function PromptBlock({ prompt, picked, other, open, disabled, pick, changeOther }: { prompt: QuestionPrompt; picked: string[]; other: string; open: boolean; disabled: boolean; pick(next: string[]): void; changeOther(value: string): void }) {
+  const { s, theme } = useUi();
   return <View style={{ gap: 6 }}>
     {prompt.header ? <Text style={s.small}>{prompt.header}{prompt.multiSelect ? ' · 可多选' : ''}</Text> : prompt.multiSelect ? <Text style={s.small}>可多选</Text> : null}
     <Text style={s.text}>{prompt.question}</Text>
-    {!prompt.options.length ? <Text style={s.muted}>这个问题没有选项，请到原会话回答。</Text> : null}
+    {!prompt.options.length && !prompt.allowOther ? <Text style={s.muted}>这个问题没有选项，请到原会话回答。</Text> : null}
     {prompt.options.map(option => {
       const selected = picked.includes(option.label);
       return <Option key={option.label} label={option.label} detail={option.description} recommended={option.recommended} selected={selected} multi={prompt.multiSelect} disabled={disabled}
         onPress={() => pick(prompt.multiSelect ? selected ? picked.filter(item => item !== option.label) : [...picked, option.label] : [option.label])} />;
     })}
+    {prompt.allowOther && open ? <TextInput accessibilityLabel={`${prompt.question} 其他`} placeholder="其他（自由输入）" placeholderTextColor={theme.colors.foregroundMuted}
+      value={other} editable={!disabled} maxLength={2000} onChangeText={changeOther} style={s.input} /> : null}
+    {!open && other ? <Text style={s.text}>其他：{other}</Text> : null}
   </View>;
 }
 
 export function QuestionCard({ question, busy, run }: { question: Question; busy: boolean; run: Run }) {
   const { s, control, navigation } = useUi();
-  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [draft, setDraft] = useState<QuestionDraftState>({ answers: {}, otherAnswers: {} });
   const open = question.state === 'pending';
-  const answerable = question.prompts.every(prompt => prompt.options.length > 0);
-  const complete = answerable && question.prompts.every(prompt => (answers[prompt.question]?.length ?? 0) > 0);
+  const answerable = isQuestionAnswerable(question);
+  const complete = isQuestionComplete(question, draft.answers, draft.otherAnswers);
   const lacksRecommendation = question.prompts.some(prompt => !prompt.options.some(option => option.recommended));
   const unread = isUnreadAutomaticAnswer(question);
   const state = unread ? { label: '已代答 · 未读', tone: 'accent' as const } : states[question.state];
@@ -114,12 +170,16 @@ export function QuestionCard({ question, busy, run }: { question: Question; busy
     <Text style={s.muted}>{new Date(question.at).toLocaleString()}{question.source === 'browser' && question.url ? ` · ${question.url}` : ''}</Text>
     {question.reason ? <Text style={s.muted}>{question.reason}</Text> : null}
     {question.answer ? <Text style={s.strong}>{question.answer.source === 'automatic' ? '自动代答选择' : '你提交的回答'}</Text> : null}
-    {question.prompts.map(prompt => <PromptBlock key={prompt.question} prompt={prompt} picked={(open ? answers : question.answer?.answers)?.[prompt.question] ?? []} disabled={!open || busy}
-      pick={next => setAnswers(current => ({ ...current, [prompt.question]: next }))} />)}
+    {question.prompts.map(prompt => <PromptBlock key={prompt.question} prompt={prompt}
+      picked={(open ? draft.answers : question.answer?.answers)?.[prompt.question] ?? []}
+      other={(open ? draft.otherAnswers : question.answer?.otherAnswers)?.[prompt.question] ?? ''}
+      open={open} disabled={!open || busy}
+      pick={next => setDraft(current => pickPromptOption(prompt, current, next))}
+      changeOther={value => setDraft(current => changePromptOther(prompt, current, value))} />)}
     {open ? <Text style={s.small}>{lacksRecommendation ? '有问题没有推荐项，离线模式也等待你回答。' : '离线模式会选择标为推荐的选项。'}</Text> : null}
     <View style={s.wrap}>
       {unread ? <Btn label="已读" primary disabled={busy} onPress={() => void run(() => control.markQuestionRead({ id: question.id, fingerprint: question.fingerprint }))} /> : null}
-      {open && answerable ? <Btn label="提交回答" primary disabled={!complete || busy} onPress={() => void run(() => control.answerQuestion({ id: question.id, answers }))} /> : null}
+      {open && answerable ? <Btn label="提交回答" primary disabled={!complete || busy} onPress={() => void run(() => control.answerQuestion(buildQuestionSubmission(question, draft.answers, draft.otherAnswers)))} /> : null}
       {question.source === 'native' && navigation ? <Btn label="打开 Paseo 会话" onPress={() => navigation.openAgent({ agentId: question.sessionId })} /> : null}
     </View>
     {unread ? <Text style={s.small}>点击“已读”表示你已知悉代答结果，此问题将移出人工待办。</Text> : null}

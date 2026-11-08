@@ -22,3 +22,4 @@ export type BrowserSnapshot = z.infer<typeof BrowserSnapshotSchema>;
 export const BrowserSyncSchema = z.strictObject({ instanceId: id, instanceName: z.string().trim().min(1).max(120).default('未命名浏览器环境'), sessions: z.array(z.strictObject({
   sessionId: id, title: z.string().max(120), url: z.string().max(512), tabCount: z.number().int().min(1).max(10000), activity: BrowserActivitySchema.optional(),
 })).max(500), approvals: z.array(BrowserApprovalSchema).max(30).default([]), observedSessionIds: z.array(id).max(500).default([]), questions: z.array(BrowserQuestionSchema).max(50).default([]), results: z.array(z.strictObject({ id: z.string().max(200), sessionId: id, fingerprint: z.string().max(128), status: z.enum(['submitted', 'unknown']) })).max(50).default([]) });
+export * from './web-request.ts';

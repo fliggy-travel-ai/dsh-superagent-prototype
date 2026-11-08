@@ -1,0 +1,18 @@
+{
+ "source": "同上",
+ "note": "在页面上作答后，云端 Claude 收到的回答原文（AskUserQuestion 工具结果）",
+ "observed": [
+  {
+   "case": "单选只填其他",
+   "answer": "\"测试单选：选哪个标记？\"=\"PASEO_OTHER_1704 单选\""
+  },
+  {
+   "case": "多选两项加其他",
+   "answer": "\"测试多选：选哪些标记？\"=\"PASEO_OTHER_1704 多选,PASEO_M1,PASEO_M2, 含逗号\""
+  },
+  {
+   "case": "两题分页",
+   "answer": "\"测试多题一：选颜色？\"=\"PASEO_BLUE\", \"测试多题二：选形状？\"=\"PASEO_OTHER_1704 多题,PASEO_CIRCLE,PASEO_TRI\""
+  }
+ ]
+}
