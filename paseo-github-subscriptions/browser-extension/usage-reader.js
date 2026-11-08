@@ -2,15 +2,89 @@
   const PAIR_RE = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/sync$/;
   const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-  function readDialog() {
-    const root = document.querySelector('[data-testid="usage-page-pace"]');
-    const rows = [...(root?.querySelectorAll('[role="meter"]') ?? [])].map(meter => {
+  async function readDialog() {
+    let meters = [];
+    for (let i = 0; i < 30; i++) {
+      if (location.pathname.startsWith('/login') || document.title.includes('Just a moment')) break;
+      const root = document.querySelector('[data-testid="usage-page-pace"]');
+      meters = [...(root?.querySelectorAll('[role="meter"]') ?? [])];
+      if (meters.length > 0) break;
+      if (i + 1 < 30 && typeof setTimeout === 'function') {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    const rows = meters.map(meter => {
       const labelEl = document.getElementById(meter.getAttribute('aria-labelledby'));
       let row = meter;
       for (let i = 0; i < 6 && labelEl && row.parentElement && !row.contains(labelEl); i++) row = row.parentElement;
       return { label: labelEl?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
     });
-    return { path: location.pathname, title: document.title, rows, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
+    let account = null;
+    try {
+      if (typeof indexedDB !== 'undefined' && typeof indexedDB?.open === 'function') {
+        const raw = await new Promise(resolve => {
+          let settled = false;
+          const finish = value => { if (!settled) { settled = true; resolve(value); } };
+          let openReq;
+          try {
+            openReq = indexedDB.open('keyval-store');
+          } catch {
+            finish(null);
+            return;
+          }
+          openReq.onupgradeneeded = () => {
+            try { openReq.transaction?.abort(); } catch {}
+            finish(null);
+          };
+          openReq.onerror = () => finish(null);
+          openReq.onblocked = () => finish(null);
+          openReq.onsuccess = () => {
+            const db = openReq.result;
+            try {
+              const names = db?.objectStoreNames;
+              const storeName = names?.contains?.('keyval') ? 'keyval' : names?.[0];
+              if (!storeName) {
+                try { db?.close?.(); } catch {}
+                finish(null);
+                return;
+              }
+              const tx = db.transaction(storeName, 'readonly');
+              const getReq = tx.objectStore(storeName).get('react-query-cache');
+              getReq.onsuccess = () => {
+                const value = getReq.result;
+                try { db?.close?.(); } catch {}
+                finish(value ?? null);
+              };
+              getReq.onerror = () => {
+                try { db?.close?.(); } catch {}
+                finish(null);
+              };
+            } catch {
+              try { db?.close?.(); } catch {}
+              finish(null);
+            }
+          };
+        });
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const clientState = typeof parsed?.clientState === 'string' ? JSON.parse(parsed.clientState) : (parsed?.clientState ?? parsed);
+        const queries = Array.isArray(clientState?.queries) ? clientState.queries : Array.isArray(parsed) ? parsed : [];
+        for (const query of queries) {
+          const key = query?.queryKey ?? query?.queryHash;
+          const hasCurrentAccount = typeof key === 'string'
+            ? key.includes('current_account')
+            : Array.isArray(key) && key.some(item => (typeof item === 'string' ? item : JSON.stringify(item ?? '')).includes('current_account'));
+          if (!hasCurrentAccount) continue;
+          const rawData = query?.state?.data ?? query?.data;
+          const data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+          const email = data?.email_address ?? data?.account?.email_address;
+          if (typeof email === 'string' && email.trim()) {
+            account = email.trim();
+            break;
+          }
+        }
+      }
+    } catch {}
+    return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
   }
 
   function isUsageUrl(value) {
@@ -82,17 +156,20 @@
     const fiveHour = parseWindowRow(sessionRow, nowMs, tzOffset, observedAt);
     const weekly = parseWindowRow(weekRow, nowMs, tzOffset, observedAt);
     if (!fiveHour || !weekly) return null;
-    return { observedAt, fiveHour, weekly };
+    const account = typeof data.account === 'string' && data.account.trim() ? data.account.trim().slice(0, 320) : null;
+    return { observedAt, account, fiveHour, weekly };
   }
 
   async function readUsagePage(state) {
     let tabId = null;
+    let reloaded = false;
     if (typeof state.tab?.id === 'number') {
       try {
         const existing = await chrome.tabs.get(state.tab.id);
         if (existing && typeof existing.id === 'number' && isUsageUrl(existing.url)) {
           await chrome.tabs.reload(existing.id);
           tabId = existing.id;
+          reloaded = true;
         }
       } catch {}
       if (tabId === null) {
@@ -124,9 +201,11 @@
       await chrome.storage.local.set({ usageState: state });
     }
 
-    let sawRows = false;
-    for (let attempt = 0; attempt < 45; attempt++) {
-      if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 1000));
+    let tabReady = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if (attempt > 0 || reloaded) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
       let currentTab;
       try {
         currentTab = await chrome.tabs.get(tabId);
@@ -137,31 +216,49 @@
         delete state.tab;
         return { status: 'failed', reason: 'tab_closed', observedAt: new Date(Date.now()).toISOString() };
       }
-      let results;
-      try {
-        results = await chrome.scripting.executeScript({ target: { tabId }, func: readDialog });
-      } catch {
-        delete state.tab;
-        return { status: 'failed', reason: 'tab_closed', observedAt: new Date(Date.now()).toISOString() };
-      }
-      const pageData = Array.isArray(results) ? results[0]?.result : undefined;
-      if (!pageData || typeof pageData !== 'object') continue;
-      const observedAt = Number.isFinite(pageData.now) ? new Date(pageData.now).toISOString() : new Date(Date.now()).toISOString();
-      if (typeof pageData.path === 'string' && pageData.path.startsWith('/login')) {
-        return { status: 'signed_out', observedAt };
-      }
-      if (typeof pageData.title === 'string' && pageData.title.includes('Just a moment')) {
-        return { status: 'failed', reason: 'challenge', observedAt };
-      }
-      const parsed = parseDialog(pageData);
-      if (parsed) {
-        return { status: 'ok', ...parsed };
-      }
-      if (Array.isArray(pageData.rows) && pageData.rows.length > 0) {
-        sawRows = true;
+      if (currentTab.status === undefined || currentTab.status === 'complete') {
+        tabReady = true;
+        break;
       }
     }
-    return { status: 'failed', reason: sawRows ? 'parse' : 'timeout', observedAt: new Date(Date.now()).toISOString() };
+    if (!tabReady) {
+      return { status: 'failed', reason: 'timeout', observedAt: new Date(Date.now()).toISOString() };
+    }
+
+    let results;
+    try {
+      results = await chrome.scripting.executeScript({ target: { tabId }, func: readDialog });
+    } catch {
+      delete state.tab;
+      return { status: 'failed', reason: 'tab_closed', observedAt: new Date(Date.now()).toISOString() };
+    }
+    const pageData = Array.isArray(results) ? results[0]?.result : undefined;
+    if (!pageData || typeof pageData !== 'object') {
+      return { status: 'failed', reason: 'timeout', observedAt: new Date(Date.now()).toISOString() };
+    }
+    const observedAt = Number.isFinite(pageData.now) ? new Date(pageData.now).toISOString() : new Date(Date.now()).toISOString();
+    if (typeof pageData.path === 'string' && pageData.path.startsWith('/login')) {
+      return { status: 'signed_out', observedAt };
+    }
+    if (typeof pageData.title === 'string' && pageData.title.includes('Just a moment')) {
+      return { status: 'failed', reason: 'challenge', observedAt };
+    }
+    const parsed = parseDialog(pageData);
+    if (parsed) {
+      return { status: 'ok', ...parsed };
+    }
+    let afterTab;
+    try {
+      afterTab = await chrome.tabs.get(tabId);
+    } catch {
+      afterTab = null;
+    }
+    if (!afterTab || (afterTab.url && !isUsageUrl(afterTab.url) && !isLoginUrl(afterTab.url))) {
+      delete state.tab;
+      return { status: 'failed', reason: 'tab_closed', observedAt };
+    }
+    const sawRows = Array.isArray(pageData.rows) && pageData.rows.length > 0;
+    return { status: 'failed', reason: sawRows ? 'parse' : 'timeout', observedAt };
   }
 
   let running = null;
@@ -181,6 +278,7 @@
     const state = {
       nextReadAt: typeof rawState.nextReadAt === 'number' ? rawState.nextReadAt : 0,
       failures: typeof rawState.failures === 'number' ? rawState.failures : 0,
+      account: typeof rawState.account === 'string' && rawState.account.trim() ? rawState.account.trim().slice(0, 320) : null,
       fiveHour: rawState.fiveHour ?? null,
       weekly: rawState.weekly ?? null,
       status: ['pending', 'ok', 'signed_out', 'failed'].includes(rawState.status) ? rawState.status : 'pending',
@@ -198,6 +296,7 @@
         state.status = 'ok';
         delete state.reason;
         state.failures = 0;
+        if (outcome.account) state.account = outcome.account;
         state.fiveHour = outcome.fiveHour;
         state.weekly = outcome.weekly;
         state.nextReadAt = readNow + 10 * 60_000;
@@ -218,6 +317,7 @@
     const body = {
       instanceId,
       instanceName,
+      account: state.account ?? null,
       status: state.status,
       ...(state.status === 'failed' && state.reason ? { reason: state.reason } : {}),
       observedAt: state.observedAt,

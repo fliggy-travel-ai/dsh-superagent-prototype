@@ -48,7 +48,7 @@ function assertNoAbsoluteTime(report: UsageReport) {
   }
 }
 
-test('多环境 discover：key 用 hashAccountKey(instanceId)，同名环境加 key 前 4 位后缀，session scope 返回空数组', async () => {
+test('多环境 discover 与账号邮箱显示：有邮箱显示“环境名称 · 邮箱”，无邮箱显示环境名称，持久化重载及离线仍保留上次邮箱', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'browser-usage-discover-'));
   let now = Date.parse('2026-11-08T12:00:00.000Z');
   let registered: UsageSourceRegistration | null = null;
@@ -65,10 +65,20 @@ test('多环境 discover：key 用 hashAccountKey(instanceId)，同名环境加 
     await store.record({
       instanceId: 'env-alpha',
       instanceName: '独立环境',
+      account: 'alice@example.com',
       status: 'ok',
       observedAt: '2026-11-08T11:59:00.000Z',
       fiveHour: { usedPct: 25, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
       weekly: { usedPct: 40, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
+    }, now);
+    await store.record({
+      instanceId: 'env-no-email',
+      instanceName: '无邮箱环境',
+      account: null,
+      status: 'ok',
+      observedAt: '2026-11-08T11:59:00.000Z',
+      fiveHour: { usedPct: 10, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
+      weekly: { usedPct: 20, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
     }, now);
     await store.record({
       instanceId: 'env-dup-1',
@@ -91,13 +101,40 @@ test('多环境 discover：key 用 hashAccountKey(instanceId)，同名环境加 
 
     const accounts = await source.discover({ kind: 'global' });
     const keyAlpha = hashAccountKey('env-alpha');
+    const keyNoEmail = hashAccountKey('env-no-email');
     const keyDup1 = hashAccountKey('env-dup-1');
     const keyDup2 = hashAccountKey('env-dup-2');
     assert.deepEqual(accounts, [
-      { key: keyAlpha, label: '独立环境', input: { instanceId: 'env-alpha' } },
+      { key: keyAlpha, label: '独立环境 · alice@example.com', input: { instanceId: 'env-alpha' } },
+      { key: keyNoEmail, label: '无邮箱环境', input: { instanceId: 'env-no-email' } },
       { key: keyDup1, label: `同名环境 · ${keyDup1.slice(0, 4)}`, input: { instanceId: 'env-dup-1' } },
       { key: keyDup2, label: `同名环境 · ${keyDup2.slice(0, 4)}`, input: { instanceId: 'env-dup-2' } },
     ]);
+
+    // 后续上报 account 为 null（例如读取失败）时，保留上次持久化的邮箱
+    now += 60_000;
+    await store.record({
+      instanceId: 'env-alpha',
+      instanceName: '独立环境',
+      account: null,
+      status: 'failed',
+      reason: 'timeout',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: null,
+      weekly: null,
+    }, now);
+    assert.equal((await source.discover({ kind: 'global' }))[0].label, '独立环境 · alice@example.com');
+
+    // 未打开浏览器（离线）且重建存储重载后，仍然显示上一次持久化的邮箱
+    now += 10 * 60_000;
+    const reloadedStore = new BrowserUsageStore(dir, () => now);
+    await reloadedStore.load(now);
+    const reloadedAccounts = await reloadedStore.discover(now);
+    assert.equal(reloadedAccounts[0].key, keyAlpha);
+    assert.equal(reloadedAccounts[0].label, '独立环境 · alice@example.com');
+    const offlineReport = toUsageReport(await reloadedStore.get('env-alpha', now), now, true);
+    assert.equal(offlineReport.status, 'available');
+    assert.equal(offlineReport.details?.[0].value, '未打开浏览器，无法检测剩余额度，只展示上一次同步的额度');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -5,6 +5,7 @@ export const BrowserUsageWindowSchema = z.strictObject({ usedPct: z.number().min
 export const BrowserUsagePostSchema = z.strictObject({
   instanceId: id,
   instanceName: z.string().trim().min(1).max(120).default('未命名浏览器环境'),
+  account: z.string().trim().min(1).max(320).nullable().optional().default(null),
   status: z.enum(['pending', 'ok', 'signed_out', 'failed']),
   reason: z.enum(['no_window', 'parse', 'timeout', 'challenge', 'tab_closed']).optional(),
   observedAt: z.string().datetime(),

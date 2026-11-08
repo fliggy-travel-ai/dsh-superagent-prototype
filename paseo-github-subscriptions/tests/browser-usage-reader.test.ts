@@ -153,7 +153,7 @@ test('parseReset 支持当天、跨天、跨周和不同时区偏移，未知格
   assert.equal(parseReset('', now, 300), null);
 });
 
-test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个窗口，忽略产品分类行与会话圆环样本', () => {
+test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个窗口，忽略产品分类行与会话圆环样本', async () => {
   const { readDialog, parseDialog, isUsageUrl } = loadHelpers();
   const sampleNow = Date.parse('2026-11-08T11:07:20.885Z');
   const dom = parseHtmlDocument(dialogFixtureHtml, '/new', 'New session - Claude');
@@ -161,7 +161,7 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
     function () { return { getTimezoneOffset: () => 300 }; },
     { now: () => sampleNow },
   );
-  const extracted = runInNewContext(`(${readDialog.toString()})()`, {
+  const extracted = await runInNewContext(`(${readDialog.toString()})()`, {
     document: dom.document,
     location: dom.location,
     Date: FakeDate,
@@ -172,6 +172,7 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   const parsed = structuredClone(parseDialog(extracted));
   assert.deepEqual(parsed, {
     observedAt: '2026-11-08T11:07:20.885Z',
+    account: null,
     fiveHour: {
       usedPct: 59,
       resetsAt: '2026-11-08T11:50:00.000Z',
@@ -187,7 +188,7 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   // 会话圆环样本 session-usage-ring.html 不含用量页弹窗结构，不会被读取
   const ringDom = parseHtmlDocument(ringFixtureHtml, '/code/session_abc', 'Session - Claude');
   assert.ok(ringDom.document.querySelector('button[aria-label^="Usage:"]'));
-  const fromRing = runInNewContext(`(${readDialog.toString()})()`, {
+  const fromRing = await runInNewContext(`(${readDialog.toString()})()`, {
     document: ringDom.document,
     location: ringDom.location,
     Date: FakeDate,
@@ -241,7 +242,7 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
     .replace('aria-valuenow="59" aria-valuetext="59% used" aria-labelledby="_r_55_"', 'aria-valuenow="0" aria-valuetext="0% used" aria-labelledby="_r_55_"')
     .replace('<span>59% used</span>', '<span>0% used</span>');
   const notStartedDom = parseHtmlDocument(notStartedHtml, '/new', 'New session - Claude');
-  const notStartedExtracted = runInNewContext(`(${readDialog.toString()})()`, {
+  const notStartedExtracted = await runInNewContext(`(${readDialog.toString()})()`, {
     document: notStartedDom.document,
     location: notStartedDom.location,
     Date: FakeDate,
@@ -249,6 +250,7 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   const notStartedParsed = structuredClone(parseDialog(notStartedExtracted));
   assert.deepEqual(notStartedParsed, {
     observedAt: '2026-11-08T11:07:20.885Z',
+    account: null,
     fiveHour: {
       usedPct: 0,
       resetsAt: null,
@@ -262,11 +264,136 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   });
 });
 
+test('readDialog 从 IndexedDB keyval-store 只读提取 current_account 邮箱：支持对象值、JSON 字符串、缺少 current_account 与打开失败', async () => {
+  const { readDialog, parseDialog } = loadHelpers();
+  const sampleNow = Date.parse('2026-11-08T11:07:20.885Z');
+  const dom = parseHtmlDocument(dialogFixtureHtml, '/new', 'New session - Claude');
+  const FakeDate = Object.assign(
+    function () { return { getTimezoneOffset: () => 300 }; },
+    { now: () => sampleNow },
+  );
+
+  const txModes: string[] = [];
+  function makeFakeIndexedDB(behavior: { value?: any; failOpen?: boolean; failGet?: boolean }) {
+    return {
+      open(dbName: string) {
+        assert.equal(dbName, 'keyval-store');
+        const req: Record<string, any> = { result: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
+        Promise.resolve().then(() => {
+          if (behavior.failOpen) {
+            req.onerror?.();
+            return;
+          }
+          req.result = {
+            objectStoreNames: { contains: (name: string) => name === 'keyval', 0: 'keyval' },
+            transaction(storeName: string, mode: string) {
+              assert.equal(storeName, 'keyval');
+              txModes.push(mode);
+              return {
+                objectStore() {
+                  return {
+                    get(key: string) {
+                      assert.equal(key, 'react-query-cache');
+                      const getReq: Record<string, any> = { result: undefined, onsuccess: null, onerror: null };
+                      Promise.resolve().then(() => {
+                        if (behavior.failGet) {
+                          getReq.onerror?.();
+                        } else {
+                          getReq.result = behavior.value;
+                          getReq.onsuccess?.();
+                        }
+                      });
+                      return getReq;
+                    },
+                  };
+                },
+              };
+            },
+            close() {},
+          };
+          req.onsuccess?.();
+        });
+        return req;
+      },
+    };
+  }
+
+  // 1. 值为对象且含 current_account 查询结果
+  const withObject = await runInNewContext(`(${readDialog.toString()})()`, {
+    document: dom.document,
+    location: dom.location,
+    Date: FakeDate,
+    indexedDB: makeFakeIndexedDB({
+      value: {
+        clientState: {
+          queries: [
+            { queryKey: ['other_query'], state: { data: { name: 'noop' } } },
+            { queryKey: ['current_account'], state: { data: { email_address: 'alice@example.com' } } },
+          ],
+        },
+      },
+    }),
+  });
+  assert.equal(withObject.account, 'alice@example.com');
+  assert.equal(parseDialog(withObject).account, 'alice@example.com');
+  assert.deepEqual(txModes, ['readonly']);
+
+  // 2. 值为 JSON 字符串
+  const withJsonString = await runInNewContext(`(${readDialog.toString()})()`, {
+    document: dom.document,
+    location: dom.location,
+    Date: FakeDate,
+    indexedDB: makeFakeIndexedDB({
+      value: JSON.stringify({
+        clientState: {
+          queries: [
+            { queryKey: ['account', 'current_account'], state: { data: { email_address: 'bob@example.com' } } },
+          ],
+        },
+      }),
+    }),
+  });
+  assert.equal(withJsonString.account, 'bob@example.com');
+  assert.equal(parseDialog(withJsonString).account, 'bob@example.com');
+
+  // 3. 没有 current_account 查询：返回 null，不影响额度读取
+  const withoutCurrentAccount = await runInNewContext(`(${readDialog.toString()})()`, {
+    document: dom.document,
+    location: dom.location,
+    Date: FakeDate,
+    indexedDB: makeFakeIndexedDB({
+      value: {
+        clientState: {
+          queries: [{ queryKey: ['organizations'], state: { data: { id: 'org_1' } } }],
+        },
+      },
+    }),
+  });
+  assert.equal(withoutCurrentAccount.account, null);
+  const parsedNoAccount = parseDialog(withoutCurrentAccount);
+  assert.equal(parsedNoAccount.account, null);
+  assert.equal(parsedNoAccount.fiveHour.usedPct, 59);
+  assert.equal(parsedNoAccount.weekly.usedPct, 46);
+
+  // 4. IndexedDB 打开失败：返回 null，不影响额度读取
+  const openFailed = await runInNewContext(`(${readDialog.toString()})()`, {
+    document: dom.document,
+    location: dom.location,
+    Date: FakeDate,
+    indexedDB: makeFakeIndexedDB({ failOpen: true }),
+  });
+  assert.equal(openFailed.account, null);
+  const parsedOpenFailed = parseDialog(openFailed);
+  assert.equal(parsedOpenFailed.account, null);
+  assert.equal(parsedOpenFailed.fiveHour.usedPct, 59);
+  assert.equal(parsedOpenFailed.weekly.usedPct, 46);
+});
+
 function createHarness(initialState: Record<string, any> = {}) {
   let now = Date.parse('2026-11-08T11:07:20.885Z');
   const state: Record<string, any> = structuredClone(initialState);
   let normalWindows: any[] = [{ id: 1 }];
-  const tabs = new Map<number, { id: number; url: string; active: boolean }>();
+  const tabs = new Map<number, { id: number; url: string; active: boolean; status?: string }>();
   let nextTabId = 10;
   const createdTabs: Array<{ id: number; url: string; active: boolean }> = [];
   const reloadedTabs: number[] = [];
@@ -275,10 +402,12 @@ function createHarness(initialState: Record<string, any> = {}) {
   const posts: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
   let tabIdSavedBeforeInject = false;
   let alarmListener: ((alarm: { name: string }) => void) | null = null;
-  let scriptResponder: (tabId: number, func: () => any) => any = (_tabId, func) => {
+  let onReload: ((id: number) => void) | null = null;
+  let onGetTab: ((id: number, tab: { id: number; url: string; active: boolean; status?: string }) => { id: number; url: string; active: boolean; status?: string }) | null = null;
+  let scriptResponder: (tabId: number, func: () => any) => any = async (_tabId, func) => {
     const dom = parseHtmlDocument(dialogFixtureHtml, '/new', 'New session - Claude');
     const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => now });
-    return [{ result: runInNewContext(`(${func.toString()})()`, { document: dom.document, location: dom.location, Date: FakeDate }) }];
+    return [{ result: await runInNewContext(`(${func.toString()})()`, { document: dom.document, location: dom.location, Date: FakeDate, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
   };
 
   const FakeDate: any = function (...args: any[]) {
@@ -310,7 +439,7 @@ function createHarness(initialState: Record<string, any> = {}) {
     tabs: {
       async create(opts: { url: string; active: boolean }) {
         const id = nextTabId++;
-        const tab = { id, url: 'https://claude.ai/new#settings/usage', active: opts.active };
+        const tab = { id, url: 'https://claude.ai/new#settings/usage', active: opts.active, status: 'complete' };
         tabs.set(id, tab);
         createdTabs.push({ id, url: opts.url, active: opts.active });
         return { ...tab };
@@ -318,11 +447,12 @@ function createHarness(initialState: Record<string, any> = {}) {
       async get(id: number) {
         const tab = tabs.get(id);
         if (!tab) throw new Error('No tab');
-        return { ...tab };
+        return onGetTab ? onGetTab(id, { ...tab }) : { ...tab };
       },
       async reload(id: number) {
         if (!tabs.has(id)) throw new Error('No tab');
         reloadedTabs.push(id);
+        onReload?.(id);
       },
       async remove(id: number) {
         removedTabs.push(id);
@@ -381,6 +511,8 @@ function createHarness(initialState: Record<string, any> = {}) {
     setNow: (value: number) => { now = value; },
     advanceMs: (delta: number) => { now += delta; },
     setWindows: (list: any[]) => { normalWindows = list; },
+    setOnReload: (fn: ((id: number) => void) | null) => { onReload = fn; },
+    setOnGetTab: (fn: ((id: number, tab: { id: number; url: string; active: boolean; status?: string }) => { id: number; url: string; active: boolean; status?: string }) | null) => { onGetTab = fn; },
     setResponder: (fn: (tabId: number, func: () => any) => any) => { scriptResponder = fn; },
     tick: () => ctx.paseoUsage.tick() as Promise<void>,
     fireAlarm: () => alarmListener?.({ name: 'usage' }),
@@ -549,6 +681,141 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
   assert.equal(harness.state.usageState.reason, undefined);
   assert.equal(harness.state.usageState.fiveHour.usedPct, 59);
   assert.equal(harness.state.usageState.nextReadAt, signedOutAt + 30 * 60_000);
+});
+
+test('reload 后先返回 loading 再 complete、meter 延迟出现、超时三种情况', async () => {
+  const harness = createHarness({
+    instanceId: 'env-reload',
+    instanceName: 'SunBrowser Reload',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'c'.repeat(64) },
+  });
+
+  // 首次读取成功（59% / 46%）
+  await harness.tick();
+  assert.equal(harness.posts.at(-1)?.body.status, 'ok');
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 59);
+  assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 46);
+
+  // 情况 1：reload 后标签页先返回 2 次 status: 'loading'（期间若提前注入会读到刷新前的 59%/46% 旧 DOM），第 3 次变为 'complete'（新 DOM 为 74%/52%）
+  let getCallsAfterReload = 0;
+  let currentTabStatus: 'loading' | 'complete' = 'complete';
+  harness.setOnReload(() => {
+    getCallsAfterReload = 0;
+    currentTabStatus = 'loading';
+  });
+  harness.setOnGetTab((_id, tab) => {
+    if (currentTabStatus === 'loading') {
+      getCallsAfterReload += 1;
+      if (getCallsAfterReload >= 3) {
+        currentTabStatus = 'complete';
+      }
+    }
+    return { ...tab, status: currentTabStatus };
+  });
+  const injectedStatuses: string[] = [];
+  harness.setResponder(async (_tabId, func) => {
+    injectedStatuses.push(currentTabStatus);
+    const updatedHtml = currentTabStatus === 'complete'
+      ? dialogFixtureHtml
+          .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="74" aria-valuetext="74% used"')
+          .replace('aria-valuenow="46" aria-valuetext="46% used"', 'aria-valuenow="52" aria-valuetext="52% used"')
+      : dialogFixtureHtml;
+    const dom = parseHtmlDocument(updatedHtml, '/new', 'New session - Claude');
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => Date.parse('2026-11-08T11:17:20.885Z') });
+    return [{ result: await runInNewContext(`(${func.toString()})()`, { document: dom.document, location: dom.location, Date: FakeDate, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
+  });
+
+  harness.advanceMs(10 * 60_000);
+  await harness.tick();
+  assert.equal(getCallsAfterReload, 3);
+  assert.deepEqual(injectedStatuses, ['complete']);
+  assert.equal(harness.posts.at(-1)?.body.status, 'ok');
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 74);
+  assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 52);
+
+  // 情况 2：标签页 complete 后，弹窗里的 [role="meter"] 延迟出现（第 4 次短轮询才渲染出来，值为 81%/58%）
+  harness.setOnReload(null);
+  harness.setOnGetTab((_id, tab) => ({ ...tab, status: 'complete' }));
+  let meterPollDelays: number[] = [];
+  harness.setResponder(async (_tabId, func) => {
+    const emptyDom = parseHtmlDocument('<div data-testid="usage-page-pace"><div>Loading usage...</div></div>', '/new', 'New session - Claude');
+    const readyHtml = dialogFixtureHtml
+      .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="81" aria-valuetext="81% used"')
+      .replace('aria-valuenow="46" aria-valuetext="46% used"', 'aria-valuenow="58" aria-valuetext="58% used"');
+    const readyDom = parseHtmlDocument(readyHtml, '/new', 'New session - Claude');
+    let queryCount = 0;
+    const dynamicDocument = {
+      title: 'New session - Claude',
+      getElementById(id: string) {
+        return readyDom.document.getElementById(id);
+      },
+      querySelector(selector: string) {
+        queryCount += 1;
+        return queryCount <= 3 ? emptyDom.document.querySelector(selector) : readyDom.document.querySelector(selector);
+      },
+      querySelectorAll(selector: string) {
+        return queryCount <= 3 ? emptyDom.document.querySelectorAll(selector) : readyDom.document.querySelectorAll(selector);
+      },
+    };
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => Date.parse('2026-11-08T11:27:20.885Z') });
+    const result = await runInNewContext(`(${func.toString()})()`, {
+      document: dynamicDocument,
+      location: readyDom.location,
+      Date: FakeDate,
+      Promise,
+      setTimeout: (fn: () => void, ms: number) => {
+        meterPollDelays.push(ms);
+        fn();
+        return 1;
+      },
+    });
+    return [{ result }];
+  });
+
+  harness.advanceMs(10 * 60_000);
+  await harness.tick();
+  assert.deepEqual(meterPollDelays, [500, 500, 500]);
+  assert.equal(harness.posts.at(-1)?.body.status, 'ok');
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 81);
+  assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 58);
+
+  // 情况 3a：超时——reload 后标签页一直停留在 status: 'loading'，不执行 executeScript，记为 failed (timeout)，不上报刷新前旧 DOM 作为新 ok
+  const injectCountBeforeLoadingTimeout = harness.injectedTabs.length;
+  harness.setOnGetTab((_id, tab) => ({ ...tab, status: 'loading' }));
+  harness.advanceMs(10 * 60_000);
+  await harness.tick();
+  assert.equal(harness.injectedTabs.length, injectCountBeforeLoadingTimeout);
+  assert.equal(harness.state.usageState.status, 'failed');
+  assert.equal(harness.state.usageState.reason, 'timeout');
+  assert.equal(harness.posts.at(-1)?.body.status, 'failed');
+  assert.equal(harness.posts.at(-1)?.body.reason, 'timeout');
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 81);
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.observedAt, '2026-11-08T11:27:20.885Z');
+
+  // 情况 3b：超时——标签页已 complete，但 [role="meter"] 在 15 秒（30 次短轮询）内始终未出现，记为 failed (timeout)
+  harness.setOnGetTab((_id, tab) => ({ ...tab, status: 'complete' }));
+  let timeoutPollDelays: number[] = [];
+  harness.setResponder(async (_tabId, func) => {
+    const emptyDom = parseHtmlDocument('<div data-testid="usage-page-pace"><div>Still loading...</div></div>', '/new', 'New session - Claude');
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => Date.parse('2026-11-08T11:57:20.885Z') });
+    const result = await runInNewContext(`(${func.toString()})()`, {
+      document: emptyDom.document,
+      location: emptyDom.location,
+      Date: FakeDate,
+      Promise,
+      setTimeout: (fn: () => void, ms: number) => {
+        timeoutPollDelays.push(ms);
+        fn();
+        return 1;
+      },
+    });
+    return [{ result }];
+  });
+  harness.setNow(harness.state.usageState.nextReadAt);
+  await harness.tick();
+  assert.equal(timeoutPollDelays.length, 29);
+  assert.equal(harness.state.usageState.status, 'failed');
+  assert.equal(harness.state.usageState.reason, 'timeout');
 });
 
 test('全文检查：usage-reader.js 只向配对地址调用 fetch，不含点击、事件派发、location 赋值或关闭标签页', () => {

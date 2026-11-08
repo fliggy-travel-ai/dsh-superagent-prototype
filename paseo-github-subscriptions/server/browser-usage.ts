@@ -18,6 +18,7 @@ export const BrowserUsageInputSchema = z.strictObject({ instanceId: id });
 const StoredRecordSchema = z.strictObject({
   instanceId: id,
   instanceName: z.string().trim().min(1).max(120),
+  account: z.string().trim().min(1).max(320).nullable().optional(),
   lastPostAt: z.number().finite(),
   status: z.enum(['pending', 'ok', 'signed_out', 'failed']),
   reason: z.enum(['no_window', 'parse', 'timeout', 'challenge', 'tab_closed']).optional(),
@@ -117,12 +118,14 @@ export class BrowserUsageStore {
     return this.serial(async () => {
       this.prune(now);
       const previous = this.records.get(input.instanceId);
+      const account = input.account ?? previous?.account ?? null;
       const fiveHour = mergeWindow(previous?.fiveHour ?? null, input.fiveHour, now);
       const weekly = mergeWindow(previous?.weekly ?? null, input.weekly, now);
       const reason = input.status === 'failed' ? input.reason : undefined;
       const next: BrowserUsageRecord = {
         instanceId: input.instanceId,
         instanceName: input.instanceName,
+        account,
         lastPostAt: now,
         status: input.status,
         ...(reason ? { reason } : {}),
@@ -131,6 +134,7 @@ export class BrowserUsageStore {
       };
       const changed = !previous
         || previous.instanceName !== next.instanceName
+        || previous.account !== next.account
         || previous.status !== next.status
         || previous.reason !== next.reason
         || JSON.stringify(previous.fiveHour) !== JSON.stringify(next.fiveHour)
@@ -153,14 +157,19 @@ export class BrowserUsageStore {
     await this.tail;
     this.prune(now);
     const list = [...this.records.values()];
+    const baseLabel = (item: BrowserUsageRecord) => item.account ? `${item.instanceName} · ${item.account}` : item.instanceName;
     const counts = new Map<string, number>();
-    for (const item of list) counts.set(item.instanceName, (counts.get(item.instanceName) ?? 0) + 1);
+    for (const item of list) {
+      const label = baseLabel(item);
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
     return list.map(item => {
       const key = hashAccountKey(item.instanceId);
-      const duplicate = (counts.get(item.instanceName) ?? 0) > 1;
+      const label = baseLabel(item);
+      const duplicate = (counts.get(label) ?? 0) > 1;
       return {
         key,
-        label: duplicate ? `${item.instanceName} · ${key.slice(0, 4)}` : item.instanceName,
+        label: duplicate ? `${label} · ${key.slice(0, 4)}` : label,
         input: { instanceId: item.instanceId },
       };
     });
