@@ -4,7 +4,8 @@
   "modules": {
     "providers.defaults": true,
     "answer.quietChildren": true,
-    "answer.escalation": true
+    "answer.escalation": true,
+    "usage.claudeAccounts": true
   },
   "agentDefaults": [
     {
@@ -82,5 +83,12 @@
       "command": "/usr/bin/python3",
       "script": "/path/to/prefilter.py"
     }
+  },
+  "claudeAccounts": {
+    "sourceId": "claude-accounts",
+    "labelWithQuota": true,
+    "autoResumeDefault": false,
+    "renewal": true,
+    "loginWorkspaceName": "账号登录"
   }
 }

@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test": "node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run scan",
     "vendor:check": "node --experimental-strip-types scripts/vendor-sync.ts --check",
     "test:daemon": "node --experimental-strip-types tests/daemon-integration.ts",
