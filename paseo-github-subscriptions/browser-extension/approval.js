@@ -1,7 +1,7 @@
 (() => {
   if (globalThis.__paseoApprovalInstalled) return;
   globalThis.__paseoApprovalInstalled = true;
-  const APPROVAL_INITIAL_DELAY_MS = 300;
+  const APPROVAL_INITIAL_DELAY_MS = 800;
   const APPROVAL_OBSERVE_DELAY_MS = 1500;
   const APPROVAL_RETRY_INTERVAL_MS = 5000;
   const APPROVAL_MAX_RETRY_DURATION_MS = 3 * 60 * 1000;
@@ -140,7 +140,7 @@
     const prev = cardHistory.get(cardId);
     cardHistory.set(cardId, {
       clicks: (prev?.clicks || 0) + 1,
-      firstAttemptAt: prev?.firstAttemptAt ?? now,
+      firstAttemptAt: prev?.pendingVisibilityReset ? now : (prev?.firstAttemptAt ?? now),
       lastObservedAt: prev?.lastObservedAt ?? now,
       pendingVisibilityReset: false,
       status: 'reserved',
@@ -212,18 +212,18 @@
       const cardId = ensureCardId(scope);
       const buttonLabel = label(button);
       if (!canAttemptCard(cardId, buttonLabel)) return;
-      if (root && typeof root === 'object' && !initializedCards.has(root)) {
+      const resetRetryWindow = Boolean(cardId && cardHistory.get(cardId)?.pendingVisibilityReset);
+      if ((root && typeof root === 'object' && !initializedCards.has(root)) || resetRetryWindow) {
         const delay = initialDelayMs();
         if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
         if (!enabled || !pageVisible() || currentPath !== location.pathname || scope.isConnected === false || !button.isConnected || !visible(button)) return;
         if (ensureCardId(scope) !== cardId) return;
         text = scope.innerText || scope.textContent || '';
         if (label(button) !== buttonLabel || !eligible(button, scope, text)) return;
-        initializedCards.set(root, true);
+        if (root && typeof root === 'object') initializedCards.set(root, true);
       }
       if (!canAttemptCard(cardId, buttonLabel)) return;
       const { digest, labelDigest } = await buildCardFingerprint(currentPath, scope, text);
-      const resetRetryWindow = Boolean(cardId && cardHistory.get(cardId)?.pendingVisibilityReset);
       const reservation = await chrome.runtime.sendMessage({
         type: 'approval-reserve',
         digest,
@@ -264,18 +264,18 @@
       const currentPath = location.pathname;
       const cardId = ensureCardId(card);
       if (!canAttemptCard(cardId, 'Allow once')) return;
-      if (card && typeof card === 'object' && !initializedCards.has(card)) {
+      const resetRetryWindow = Boolean(cardId && cardHistory.get(cardId)?.pendingVisibilityReset);
+      if ((card && typeof card === 'object' && !initializedCards.has(card)) || resetRetryWindow) {
         const delay = initialDelayMs();
         if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
         if (!enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected || !moreButton.isConnected || !visible(moreButton)) return;
         if (ensureCardId(card) !== cardId) return;
         text = card.innerText || card.textContent || '';
         if (!menuCardEligible(moreButton, card, text)) return;
-        initializedCards.set(card, true);
+        if (card && typeof card === 'object') initializedCards.set(card, true);
       }
       if (!canAttemptCard(cardId, 'Allow once')) return;
       const { digest, labelDigest } = await buildCardFingerprint(currentPath, card, text);
-      const resetRetryWindow = Boolean(cardId && cardHistory.get(cardId)?.pendingVisibilityReset);
       const reservation = await chrome.runtime.sendMessage({
         type: 'approval-reserve',
         digest,
@@ -380,6 +380,9 @@
   document.addEventListener?.('visibilitychange', event => {
     if (!event?.isTrusted || !pageVisible()) return;
     const now = Date.now();
+    for (const tagged of document.querySelectorAll?.('[data-approval-card-root],[data-ddev-card-id]') || []) {
+      if (tagged && typeof tagged === 'object') initializedCards.delete(tagged);
+    }
     for (const state of cardHistory.values()) {
       if (state.status === 'still-visible' || state.status === 'skipped') {
         state.firstAttemptAt = now;
