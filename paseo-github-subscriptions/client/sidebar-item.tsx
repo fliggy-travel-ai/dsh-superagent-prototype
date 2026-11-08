@@ -18,7 +18,7 @@ export function SidebarItem({ currentScreen, openScreen }: PluginSidebarItemProp
   return (
     <SidebarRow
       icon={githubIcon}
-      label="GitHub 订阅"
+      label="开发自动化"
       active={active}
       onPress={() => openScreen({ screenId: 'main' })}
       trailing={text ? <Text style={{ color, fontSize: 12, paddingRight: 8 }}>{text}</Text> : undefined}

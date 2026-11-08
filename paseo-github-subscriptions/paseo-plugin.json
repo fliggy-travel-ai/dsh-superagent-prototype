@@ -1,6 +1,6 @@
 {
   "id": "github-subscriptions",
-  "name": "GitHub 订阅",
-  "description": "按仓库轮询 GitHub，将订阅事件发送给本机会话。",
+  "name": "开发自动化",
+  "description": "在线离线问答、Claude 浏览器分组和 GitHub 订阅。",
   "requirements": { "paseo": ">=0.15.0 <0.16.0" }
 }
