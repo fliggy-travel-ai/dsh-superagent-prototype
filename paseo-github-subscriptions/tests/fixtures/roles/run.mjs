@@ -33,7 +33,7 @@ try {
   const cloudRpc = 'cloud-session.inbox.poll';
   if (role === 'provider') {
     assert.deepEqual(status.instance, { role: 'provider', legacy: false });
-    assert.deepEqual(ids, ['providers.cloudSession']);
+    assert.deepEqual(ids, ['providers.cloudSession', 'providers.antigravity']);
     assert.deepEqual(providers, ['cloud-session']);
     assert.deepEqual(usage, []);
     assert.ok(handlers.has(cloudRpc));
@@ -43,10 +43,14 @@ try {
   } else if (role === 'main') {
     assert.deepEqual(status.instance, { role: 'main', legacy: false });
     assert.ok(!ids.includes('providers.cloudSession'));
+    assert.ok(!ids.includes('providers.antigravity'));
     assert.ok(ids.includes('providers.cloudGateway'));
+    assert.ok(ids.includes('usage.providerQuotas'));
     assert.deepEqual(providers, []);
     assert.deepEqual(usage, ['claude-browser']);
     assert.ok(handlers.has('cloud-bridge.answer-web-request'));
+    assert.ok(handlers.has('antigravity.snapshot'));
+    assert.ok(handlers.has('provider-quotas.snapshot'));
     const result = await handlers.get(cloudRpc)({ cloudSessionId: 'cse_abcdefgh1234', afterSeq: 0, waitMs: 0 }, {});
     assert.deepEqual(result, { forwarded: true });
     assert.deepEqual(invoked, [['dev-automation-providers', cloudRpc, { cloudSessionId: 'cse_abcdefgh1234', afterSeq: 0, waitMs: 0 }]]);
