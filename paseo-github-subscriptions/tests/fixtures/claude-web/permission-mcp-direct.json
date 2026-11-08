@@ -1,0 +1,244 @@
+{
+ "source": "claude.ai 测试会话，2026-11-08，SunBrowser 29 号环境，新样式 MCP 权限卡片样本",
+ "note": "新样式 MCP 工具权限卡片：可见按钮为 Deny、Allow once（带快捷键 ⌘ Command ⏎ Enter），另有下拉按钮“More allow options”（下拉菜单内为 Always allow）。",
+ "format": "[标签, 属性, ...子节点]；子节点为字符串时是文本；属性名以“.”开头的是元素运行时属性（checked、value、disabled）",
+ "tree": [
+  "div",
+  {
+   "data-testid": "transcript-trailing-slot",
+   "data-find-omitted": "",
+   "data-transcript-cards": "",
+   "data-transcript-continues-turn": "",
+   "role": "presentation"
+  },
+  [
+   "div",
+   {
+    "data-inline-approval-slot": ""
+   },
+   [
+    "div",
+    {
+     "data-approval-cluster-host": ""
+    },
+    [
+     "div",
+     {},
+     [
+      "span",
+      {
+       "role": "status"
+      },
+      "Permission requested: use list hosts (paseo)"
+     ],
+     [
+      "div",
+      {},
+      [
+       "div",
+       {
+        "tabindex": "0",
+        "role": "group",
+        "aria-label": "Permission request: use list hosts (paseo)",
+        "data-approval-card-root": "",
+        "data-approval-card-digits": "3",
+        "data-approval-presentation": "card",
+        "data-fixed-code-size": ""
+       },
+       [
+        "div",
+        {
+         "data-fixed-code-size": "",
+         "data-testid": "approval-title-region"
+        },
+        [
+         "div",
+         {},
+         [
+          "div",
+          {},
+          [
+           "span",
+           {},
+           [
+            "span",
+            {},
+            [
+             "span",
+             {},
+             [
+              "span",
+              {
+               "data-approval-value": ""
+              },
+              "Allow Claude to",
+              [
+               "span",
+               {},
+               "use list hosts (paseo)"
+              ],
+              "?"
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ],
+       [
+        "div",
+        {},
+        [
+         "span",
+         {},
+         [
+          "button",
+          {
+           "type": "button",
+           "data-cds": "Button",
+           "aria-keyshortcuts": "Escape",
+           "data-approval-variant": "secondary",
+           "data-keeps-width": "",
+           ".disabled": false
+          },
+          [
+           "span",
+           {},
+           [
+            "span",
+            {
+             "data-approval-digit": "1"
+            },
+            "Deny"
+           ]
+          ]
+         ]
+        ],
+        [
+         "div",
+         {
+          "data-approval-allow": ""
+         },
+         [
+          "span",
+          {},
+          [
+           "div",
+           {
+            "data-cds": "SplitDropdownButton",
+            "role": "group",
+            "aria-label": "More allow options"
+           },
+           [
+            "div",
+            {
+             "data-cds-segment": ""
+            },
+            [
+             "div",
+             {},
+             [
+              "button",
+              {
+               "type": "button",
+               "data-cds": "Button",
+               "aria-keyshortcuts": "Meta+Enter",
+               ".disabled": false
+              },
+              [
+               "span",
+               {},
+               [
+                "span",
+                {
+                 "data-approval-digit": "2"
+                },
+                "Allow once"
+               ],
+               [
+                "span",
+                {
+                 "aria-hidden": "true",
+                 "data-cds": "Shortcut",
+                 "data-variant": "keycap"
+                },
+                [
+                 "kbd",
+                 {},
+                 [
+                  "span",
+                  {
+                   "aria-hidden": "true"
+                  },
+                  "⌘"
+                 ],
+                 [
+                  "span",
+                  {},
+                  "Command"
+                 ]
+                ],
+                [
+                 "kbd",
+                 {},
+                 [
+                  "span",
+                  {
+                   "aria-hidden": "true"
+                  },
+                  "⏎"
+                 ],
+                 [
+                  "span",
+                  {},
+                  "Enter"
+                 ]
+                ]
+               ]
+              ]
+             ]
+            ]
+           ],
+           [
+            "div",
+            {
+             "data-cds-segment": ""
+            },
+            [
+             "button",
+             {
+              "type": "button",
+              "data-cds": "Button",
+              "data-cds-icon-only": "",
+              "aria-label": "More allow options",
+              "tabindex": "0",
+              "aria-haspopup": "menu",
+              "aria-expanded": "false",
+              "id": "base-ui-_r_direct_1_",
+              ".disabled": false
+             },
+             [
+              "span",
+              {},
+              [
+               "span",
+               {
+                "data-cds": "Icon",
+                "aria-hidden": "true"
+               },
+               ""
+              ]
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ]
+ ]
+}

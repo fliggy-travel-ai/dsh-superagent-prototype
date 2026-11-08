@@ -237,7 +237,14 @@ test('权限点击先持久化去重，同一会话跨标签只允许一次并�
   await fixture.send({ ...reservation, reservationId: results[0].reservationId, type: 'approval-result', status: 'dismissed' });
   assert.equal(fixture.state.approvalAudit[1].status, 'reserved');
   await fixture.send({ ...reservation, reservationId: next.reservationId, type: 'approval-result', status: 'still-visible' });
-  fixture.state.approvalAudit[1].observedAt = new Date(Date.now() - 11000).toISOString();
+  assert.equal((await fixture.send(reservation)).allowed, false);
+  fixture.state.approvalAudit[1].observedAt = new Date(Date.now() - 6000).toISOString();
+  assert.equal((await fixture.send({ ...reservation, button: 'Allow' })).allowed, false);
+  const retry = await fixture.send(reservation);
+  assert.equal(retry.allowed, true);
+  await fixture.send({ ...reservation, reservationId: retry.reservationId, type: 'approval-result', status: 'still-visible' });
+  fixture.state.approvalAudit[0].at = new Date(Date.now() - 181000).toISOString();
+  fixture.state.approvalAudit[2].observedAt = new Date(Date.now() - 6000).toISOString();
   assert.equal((await fixture.send(reservation)).allowed, false);
   assert.equal(await fixture.send(reservation, { ...otherTab, url: 'https://other.example' }), null);
   fixture.state.approvalEnabled = false;
