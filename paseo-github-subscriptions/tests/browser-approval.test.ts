@@ -755,3 +755,215 @@ test('同一张卡片 still-visible 按间隔重试，即使文字随流式输�
   assert.ok(storageState.approvalAudit.every((entry: any) => entry.button === 'Allow once' && entry.status === 'still-visible'));
 });
 
+test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visible）时不点击不计数，切回前台（visibilitychange）立即点击并重新计算重试时长', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+
+  const sessionPath = '/code/session_vis123';
+  const sessionUrl = `https://claude.ai${sessionPath}`;
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
+
+  const approvalConfig = {
+    initialDelayMs: 300,
+    observeDelayMs: 1500,
+    retryIntervalMs: 5000,
+    maxRetryDurationMs: 180000,
+    maxClicksPerCard: 4,
+  };
+
+  const storageState: Record<string, any> = {
+    instanceId: 'inst-vis',
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
+
+  let bgOnMessage: any = null;
+  let uuidCounter = 0;
+  const bgChrome = {
+    storage: {
+      local: {
+        get: async (keys: any) => {
+          if (typeof keys === 'string') return { [keys]: storageState[keys] };
+          if (Array.isArray(keys)) return Object.fromEntries(keys.map(k => [k, storageState[k]]));
+          return { ...storageState };
+        },
+        set: async (vals: Record<string, any>) => { Object.assign(storageState, vals); },
+      },
+      onChanged: { addListener: () => {} },
+    },
+    tabs: {
+      query: async () => [],
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    tabGroups: {
+      onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: () => {} },
+    },
+    runtime: {
+      onMessage: { addListener: (fn: any) => { bgOnMessage = fn; } },
+      onStartup: { addListener: () => {} },
+      onInstalled: { addListener: () => {} },
+    },
+    alarms: {
+      create: () => {},
+      onAlarm: { addListener: () => {} },
+    },
+  };
+
+  runInNewContext(backgroundSource, {
+    __paseoApprovalConfig: approvalConfig,
+    chrome: bgChrome,
+    fetch: async () => ({ ok: false }),
+    crypto: { randomUUID: () => `bg-vis-${++uuidCounter}` },
+    AbortSignal,
+    Map,
+    Object,
+    String,
+    Number,
+    Array,
+    URL,
+    Date: FakeDate,
+    Promise,
+    JSON,
+    Set,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  });
+
+  const card = DomNode.fromTuple(directFixture.tree);
+  const body = new DomNode('body', {}, []);
+  body.appendChild(card);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const allowOnceButton = card.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  const visibilityListeners: Array<() => void> = [];
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  let scanTrigger: () => void = () => {};
+
+  const docObj = {
+    visibilityState: 'hidden',
+    documentElement: html,
+    body,
+    activeElement: body,
+    querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+    querySelector: (sel: string) => html.querySelector(sel),
+    addEventListener: (event: string, listener: () => void) => {
+      if (event === 'visibilitychange') visibilityListeners.push(listener);
+    },
+  };
+
+  const pageContext = {
+    __paseoApprovalConfig: approvalConfig,
+    document: docObj,
+    location: { origin: 'https://claude.ai', pathname: sessionPath },
+    chrome: {
+      storage: {
+        local: { get: async () => ({ approvalEnabled: true }) },
+        onChanged: { addListener: () => {} },
+      },
+      runtime: {
+        sendMessage: (message: any) =>
+          new Promise(resolve => {
+            bgOnMessage(message, { tab: { id: 1, url: sessionUrl } }, resolve);
+          }),
+      },
+    },
+    crypto: {
+      randomUUID: () => `dom-vis-card-${++uuidCounter}`,
+      subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+    },
+    TextEncoder,
+    Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+    setInterval: (fn: () => void) => { scanTrigger = fn; },
+    Date: FakeDate,
+    WeakMap,
+  };
+
+  const runTimersUpTo = async (maxDelay: number, clearRemaining = true) => {
+    for (let step = 0; step < 30; step++) {
+      await new Promise(resolve => setImmediate(resolve));
+      const idx = timers.findIndex(t => t.delay <= maxDelay);
+      if (idx !== -1) {
+        const [item] = timers.splice(idx, 1);
+        if (item!.delay >= 300) nowMs += item!.delay;
+        item!.fn();
+      }
+    }
+    if (clearRemaining) timers.length = 0;
+  };
+
+  // 1. 页面初始处于后台（visibilityState === 'hidden'）：即使过去 10 分钟、反复触发扫描，也不点击、不产生任何预约记录
+  runInNewContext(source, pageContext);
+  await runTimersUpTo(5000);
+  nowMs += 600_000;
+  scanTrigger();
+  await runTimersUpTo(5000);
+  assert.equal(allowOnceButton.clicks, 0);
+  assert.equal(storageState.approvalAudit.length, 0);
+
+  // 2. 切回前台（visibilityState = 'visible' 并触发 visibilitychange）：
+  //    先验证 300ms 延迟——在 300ms 定时器触发前不会点击；触发 300ms 定时器后才执行第 1 次点击
+  docObj.visibilityState = 'visible';
+  for (const fn of visibilityListeners) fn();
+  await runTimersUpTo(200, false);
+  assert.equal(allowOnceButton.clicks, 0);
+  assert.equal(storageState.approvalAudit.length, 0);
+  assert.ok(timers.some(t => t.delay === 300));
+
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 1);
+  assert.equal(storageState.approvalAudit.length, 1);
+  assert.equal(storageState.approvalAudit[0].status, 'still-visible');
+
+  // 3. 切回后台 10 分钟（超过 3 分钟最长重试时长）：后台期间不点击、不计数
+  docObj.visibilityState = 'hidden';
+  for (const fn of visibilityListeners) fn();
+  nowMs += 600_000;
+  scanTrigger();
+  await runTimersUpTo(5000);
+  assert.equal(allowOnceButton.clicks, 1);
+  assert.equal(storageState.approvalAudit.length, 1);
+
+  // 4. 再次切回前台：立即扫描并点击（第 2 次点击），且重试时长从切回前台时刻重新计算，5 秒后第 3、4 次重试均可正常进行
+  docObj.visibilityState = 'visible';
+  for (const fn of visibilityListeners) fn();
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 2);
+
+  nowMs += 5000;
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 3);
+
+  nowMs += 5000;
+  scanTrigger();
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 4);
+
+  // 5. 达到单卡总点击上限（4 次）后，即使再次切后台再切回前台，也不会突破点击总次数上限
+  docObj.visibilityState = 'hidden';
+  for (const fn of visibilityListeners) fn();
+  nowMs += 60_000;
+  docObj.visibilityState = 'visible';
+  for (const fn of visibilityListeners) fn();
+  await runTimersUpTo(5000);
+  assert.equal(allowOnceButton.clicks, 4);
+  assert.equal(storageState.approvalAudit.length, 4);
+});
+
+

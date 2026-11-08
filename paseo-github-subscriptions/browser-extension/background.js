@@ -318,10 +318,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
             if (!Number.isFinite(observedMs) || now - observedMs < dismissedCooldownMs) return { allowed: false };
           } else if (previous.status === 'still-visible') {
             if (!ALLOW_ONCE_RE.test(message.button.trim())) return { allowed: false };
-            if (!Number.isFinite(observedMs) || now - observedMs < retryIntervalMs) return { allowed: false };
-            const firstAttempt = cardEntries.find(entry => entry.status !== 'skipped') || cardEntries[0];
-            const firstMs = Date.parse(firstAttempt.at || firstAttempt.observedAt);
-            if (!Number.isFinite(firstMs) || now - firstMs > maxRetryDurationMs) return { allowed: false };
+            if (!message.resetRetryWindow) {
+              if (!Number.isFinite(observedMs) || now - observedMs < retryIntervalMs) return { allowed: false };
+              const windowStartEntry = cardEntries.findLast(entry => entry.retryWindowStartAt) || cardEntries.find(entry => entry.status !== 'skipped') || cardEntries[0];
+              const firstMs = Date.parse(windowStartEntry.retryWindowStartAt || windowStartEntry.at || windowStartEntry.observedAt);
+              if (!Number.isFinite(firstMs) || now - firstMs > maxRetryDurationMs) return { allowed: false };
+            }
           } else {
             return { allowed: false };
           }
@@ -332,6 +334,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           tabId: sender.tab.id,
           digest: message.digest,
           ...(cardId ? { cardId } : {}),
+          ...(message.resetRetryWindow ? { retryWindowStartAt: new Date(now).toISOString() } : {}),
           reservationId,
           button: message.button,
           at: new Date(now).toISOString(),
