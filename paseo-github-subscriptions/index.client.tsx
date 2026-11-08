@@ -1,7 +1,7 @@
 import type { PluginClientContext } from '@getpaseo/plugin/client';
 import { createPills } from './client/pills.ts';
 import { PillPopover } from './client/pill-popover.tsx';
-import { MainScreen } from './client/dashboard.tsx';
+import { MainScreen, UsageSettingsScreen } from './client/dashboard.tsx';
 import { SettingsScreen } from './client/settings/index.tsx';
 import { SidebarItem } from './client/sidebar-item.tsx';
 import { createSnapshotStore } from './client/store.ts';
@@ -17,7 +17,8 @@ export default function contribute(client: PluginClientContext) {
     client.addScreen({ id: 'main', title: '开发自动化', Component: bind(env, MainScreen) }),
     client.addScreen({ id: 'settings', title: 'GitHub 订阅设置', Component: bind(env, SettingsScreen) }),
     client.addSidebarHeaderItem({ id: 'main', title: '开发自动化', Component: bind(env, SidebarItem) }),
-  ];
+    client.addSettingsScreen?.({ id: 'usage', title: '额度设置', icon: 'gauge', Component: bind(env, UsageSettingsScreen) }),
+  ].filter((remove): remove is NonNullable<typeof remove> => typeof remove === 'function');
   const pills = createPills(client, store, bind(env, PillPopover));
   store.start();
   control.start();

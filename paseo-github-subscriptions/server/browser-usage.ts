@@ -4,7 +4,14 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { hashAccountKey, toneFromUsedPct, unavailable, windowFromUsedPct, type UsageAccount, type UsageDetail, type UsageReport } from '@getpaseo/plugin/server/usage';
-import { BrowserUsagePostSchema, BrowserUsageWindowSchema, type BrowserUsagePost, type BrowserUsageWindow } from '../shared/browser-usage.ts';
+import {
+  BrowserUsageApiKeyInputSchema,
+  BrowserUsagePostSchema,
+  BrowserUsageWindowSchema,
+  type BrowserUsagePost,
+  type BrowserUsageSettings,
+  type BrowserUsageWindow,
+} from '../shared/browser-usage.ts';
 import type { BrowserBridge } from './browser-bridge.ts';
 
 const MAX_AGE = 150_000;
@@ -12,14 +19,24 @@ const RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const SAVE_INTERVAL_MS = 60 * 60 * 1000;
 const WEEKLY_SYNC_DIFF_MS = 10 * 60 * 1000;
 const ADSPOWER_QUERY_INTERVAL_MS = 10 * 60 * 1000;
-const DEFAULT_ADSPOWER_URL = 'http://local.adspower.net:50325';
+const DEFAULT_ADSPOWER_URL = 'http://127.0.0.1:50325';
 const DEFAULT_ADSPOWER_TIMEOUT_MS = 3000;
+const DEFAULT_ADSPOWER_MIN_INTERVAL_MS = 1100;
 
 const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 export const BrowserUsageInputSchema = z.strictObject({ instanceId: id });
 
 export const BrowserUsageLabelSourceSchema = z.enum(['adspower_name', 'serial_number', 'user_id', 'instance_name']);
 export type BrowserUsageLabelSource = z.infer<typeof BrowserUsageLabelSourceSchema>;
+
+export const BrowserUsageAdsPowerErrorSchema = z.enum([
+  '连接失败',
+  '需要在额度设置填写 AdsPower API key',
+  '需要 api key',
+  '被限流',
+  '未找到环境',
+]);
+export type BrowserUsageAdsPowerError = z.infer<typeof BrowserUsageAdsPowerErrorSchema>;
 
 export const LABEL_SOURCE_TEXT: Record<BrowserUsageLabelSource, string> = {
   adspower_name: 'AdsPower 名称',
@@ -31,11 +48,13 @@ export const LABEL_SOURCE_TEXT: Record<BrowserUsageLabelSource, string> = {
 const StoredRecordSchema = z.strictObject({
   instanceId: id,
   instanceName: z.string().trim().min(1).max(120),
+  account: z.string().max(320).nullable().optional(),
   adspowerProfile: z.string().trim().min(1).max(120).optional(),
   adspowerUserId: z.string().trim().min(1).max(120).optional(),
   adspowerSerialNumber: z.string().trim().min(1).max(120).optional(),
   adspowerName: z.string().trim().min(1).max(120).optional(),
   adspowerQueriedAt: z.number().finite().optional(),
+  adspowerError: BrowserUsageAdsPowerErrorSchema.optional(),
   displayName: z.string().trim().min(1).max(120).optional(),
   labelSource: BrowserUsageLabelSourceSchema.optional(),
   labelSourceText: z.string().trim().min(1).max(120).optional(),
@@ -44,14 +63,16 @@ const StoredRecordSchema = z.strictObject({
   reason: z.enum(['no_window', 'parse', 'timeout', 'challenge', 'tab_closed']).optional(),
   fiveHour: BrowserUsageWindowSchema.nullable(),
   weekly: BrowserUsageWindowSchema.nullable(),
-});
+}).transform(({ account: _account, ...rest }) => rest);
 export type BrowserUsageRecord = z.infer<typeof StoredRecordSchema>;
 
 export interface BrowserUsageStoreOptions {
   adspowerApiUrl?: string;
   adspowerApiKey?: string;
   adspowerTimeoutMs?: number;
+  adspowerMinIntervalMs?: number;
   fetchFn?: typeof fetch;
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 interface AdsPowerUserEntry {
@@ -60,6 +81,14 @@ interface AdsPowerUserEntry {
   name?: string;
   fetchedAt: number;
 }
+
+type AdsPowerResponse =
+  | { ok: true; data: any }
+  | { ok: false; error: BrowserUsageAdsPowerError };
+
+type AsyncQueryResult =
+  | { ok: true; clearAutoDetect?: boolean; userId?: string; serialNumber?: string; name?: string }
+  | { ok: false; error: BrowserUsageAdsPowerError; fallbackUserId?: string; fallbackSerial?: string };
 
 function computeDisplay(input: {
   instanceName: string;
@@ -118,6 +147,19 @@ function mergeWindow(previous: BrowserUsageWindow | null, incoming: BrowserUsage
   return Date.parse(clamped.observedAt) >= Date.parse(previous.observedAt) ? clamped : previous;
 }
 
+function classifyAdsPowerFailure(status: number, msg: string, hasApiKey: boolean): BrowserUsageAdsPowerError {
+  if (status === 401 || status === 403 || /api[_\s-]*key|unauthorized|auth|token|permission|forbidden|密钥|鉴权|认证/i.test(msg)) {
+    return hasApiKey ? '需要 api key' : '需要在额度设置填写 AdsPower API key';
+  }
+  if (status === 429 || /too many request|rate\s*limit|频繁|限流|qps/i.test(msg)) {
+    return '被限流';
+  }
+  if (/not\s*found|not\s*exist|不存在|未找到/i.test(msg)) {
+    return '未找到环境';
+  }
+  return '连接失败';
+}
+
 export class BrowserUsageStore {
   private directory: string;
   private nowFn: () => number;
@@ -127,6 +169,9 @@ export class BrowserUsageStore {
   private records = new Map<string, BrowserUsageRecord>();
   private userCache = new Map<string, AdsPowerUserEntry>();
   private serialToUserId = new Map<string, string>();
+  private inflightQueries = new Map<string, Promise<void>>();
+  private requestQueue: Promise<unknown> = Promise.resolve();
+  private lastRequestAt = 0;
   private lastSavedAt = 0;
   private loaded = false;
   private tail: Promise<unknown> = Promise.resolve();
@@ -140,6 +185,28 @@ export class BrowserUsageStore {
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.tail.then(fn);
     this.tail = next.catch(() => {});
+    return next;
+  }
+
+  private enqueueAdsPowerRequest<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.requestQueue.then(async () => {
+      const minIntervalMs = this.options.adspowerMinIntervalMs ?? DEFAULT_ADSPOWER_MIN_INTERVAL_MS;
+      if (this.lastRequestAt > 0 && minIntervalMs > 0) {
+        const elapsed = Date.now() - this.lastRequestAt;
+        const waitMs = minIntervalMs - elapsed;
+        if (waitMs > 0) {
+          const sleep = this.options.sleepFn ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+          await sleep(waitMs);
+        }
+      }
+      this.lastRequestAt = Date.now();
+      try {
+        return await fn();
+      } finally {
+        this.lastRequestAt = Date.now();
+      }
+    });
+    this.requestQueue = next.catch(() => {});
     return next;
   }
 
@@ -166,30 +233,44 @@ export class BrowserUsageStore {
       || '';
   }
 
-  private async requestAdsPower(pathAndQuery: string): Promise<any | null> {
-    const fetchImpl = this.options.fetchFn ?? globalThis.fetch;
-    if (typeof fetchImpl !== 'function') return null;
-    const timeoutMs = this.options.adspowerTimeoutMs ?? DEFAULT_ADSPOWER_TIMEOUT_MS;
-    const apiKey = this.getApiKey();
-    const headers: Record<string, string> = {};
-    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetchImpl(`${this.getApiBaseUrl()}${pathAndQuery}`, {
-        method: 'GET',
-        ...(Object.keys(headers).length ? { headers } : {}),
-        signal: controller.signal,
-      });
-      if (!response?.ok) return null;
-      const body = await response.json();
-      if (!body || typeof body !== 'object' || body.code !== 0) return null;
-      return body.data ?? null;
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timer);
-    }
+  private requestAdsPower(pathAndQuery: string): Promise<AdsPowerResponse> {
+    return this.enqueueAdsPowerRequest(async () => {
+      const fetchImpl = this.options.fetchFn ?? globalThis.fetch;
+      if (typeof fetchImpl !== 'function') return { ok: false, error: '连接失败' };
+      const timeoutMs = this.options.adspowerTimeoutMs ?? DEFAULT_ADSPOWER_TIMEOUT_MS;
+      const apiKey = this.getApiKey();
+      const hasApiKey = Boolean(apiKey);
+      const headers: Record<string, string> = {};
+      if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetchImpl(`${this.getApiBaseUrl()}${pathAndQuery}`, {
+          method: 'GET',
+          ...(Object.keys(headers).length ? { headers } : {}),
+          signal: controller.signal,
+        });
+        if (!response) return { ok: false, error: '连接失败' };
+        let body: any = null;
+        try {
+          body = await response.json();
+        } catch {
+          body = null;
+        }
+        if (body && typeof body === 'object') {
+          if (response.ok && body.code === 0) {
+            return { ok: true, data: body.data ?? null };
+          }
+          const msg = String(body.msg ?? body.message ?? '').trim();
+          return { ok: false, error: classifyAdsPowerFailure(response.status ?? 0, msg, hasApiKey) };
+        }
+        return { ok: false, error: classifyAdsPowerFailure(response.status ?? 0, '', hasApiKey) };
+      } catch {
+        return { ok: false, error: '连接失败' };
+      } finally {
+        clearTimeout(timer);
+      }
+    });
   }
 
   private getCachedUser(lookup: { userId?: string; serialNumber?: string }, now: number): AdsPowerUserEntry | null {
@@ -218,28 +299,42 @@ export class BrowserUsageStore {
     }
   }
 
-  private async fetchUserByHint(hint: string, now: number): Promise<{ ok: boolean; entry?: AdsPowerUserEntry }> {
+  private async fetchUserByHint(
+    hint: string,
+    now: number,
+  ): Promise<{ ok: true; entry: AdsPowerUserEntry } | { ok: false; error: BrowserUsageAdsPowerError }> {
     const isSerial = /^\d+$/.test(hint);
     const cached = this.getCachedUser(isSerial ? { serialNumber: hint } : { userId: hint }, now);
     if (cached) return { ok: true, entry: cached };
 
-    const query = isSerial
-      ? `/api/v1/user/list?serial_number=${encodeURIComponent(hint)}`
-      : `/api/v1/user/list?user_id=${encodeURIComponent(hint)}`;
-    const data = await this.requestAdsPower(query);
-    if (!data || !Array.isArray(data.list)) return { ok: false };
+    const res = await this.requestAdsPower('/api/v1/user/list?page_size=100');
+    if (!res.ok) return res;
+    const data = res.data;
+    if (!data || !Array.isArray(data.list)) return { ok: false, error: '连接失败' };
+
+    for (const row of data.list) {
+      if (!row || typeof row !== 'object') continue;
+      const rowUserId = typeof row.user_id === 'string' && row.user_id.trim() ? row.user_id.trim().slice(0, 120) : undefined;
+      const rawSerial = row.serial_number !== undefined && row.serial_number !== null ? String(row.serial_number).trim() : '';
+      const rowSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
+      const rowName = typeof row.name === 'string' && row.name.trim() ? row.name.trim().slice(0, 120) : undefined;
+      if (rowUserId || rowSerial) {
+        this.storeCachedUser({
+          ...(rowUserId ? { userId: rowUserId } : {}),
+          ...(rowSerial ? { serialNumber: rowSerial } : {}),
+          ...(rowName ? { name: rowName } : {}),
+          fetchedAt: now,
+        });
+      }
+    }
+
     const item = data.list.find((row: any) =>
       isSerial
         ? String(row?.serial_number ?? '').trim() === hint
         : String(row?.user_id ?? '').trim() === hint,
-    ) ?? data.list[0];
+    );
     if (!item || typeof item !== 'object') {
-      const fallbackEntry: AdsPowerUserEntry = {
-        ...(isSerial ? { serialNumber: hint } : { userId: hint }),
-        fetchedAt: now,
-      };
-      this.storeCachedUser(fallbackEntry);
-      return { ok: true, entry: fallbackEntry };
+      return { ok: false, error: '未找到环境' };
     }
     const userId = typeof item.user_id === 'string' && item.user_id.trim() ? item.user_id.trim().slice(0, 120) : (!isSerial ? hint : undefined);
     const rawSerial = item.serial_number !== undefined && item.serial_number !== null ? String(item.serial_number).trim() : '';
@@ -255,10 +350,11 @@ export class BrowserUsageStore {
     return { ok: true, entry };
   }
 
-  private clearAutoDetectedOnMultiInstance(): void {
-    if (this.records.size <= 1) return;
+  private clearAutoDetectedOnMultiInstance(): boolean {
+    if (this.records.size <= 1) return false;
+    let cleared = false;
     for (const [key, item] of this.records) {
-      if (!item.adspowerProfile && (item.adspowerUserId || item.adspowerSerialNumber || item.adspowerName)) {
+      if (!item.adspowerProfile && (item.adspowerUserId || item.adspowerSerialNumber || item.adspowerName || item.adspowerError)) {
         const display = computeDisplay({ instanceName: item.instanceName });
         this.records.set(key, {
           instanceId: item.instanceId,
@@ -272,8 +368,139 @@ export class BrowserUsageStore {
           fiveHour: item.fiveHour,
           weekly: item.weekly,
         });
+        cleared = true;
       }
     }
+    return cleared;
+  }
+
+  private triggerAsyncNameQuery(instanceId: string, profileHint: string | undefined, queryNow: number): void {
+    if (this.inflightQueries.has(instanceId)) return;
+    const task = this.runAsyncNameQuery(instanceId, profileHint, queryNow)
+      .catch(() => {})
+      .finally(() => {
+        this.inflightQueries.delete(instanceId);
+      });
+    this.inflightQueries.set(instanceId, task);
+  }
+
+  private async runAsyncNameQuery(instanceId: string, profileHint: string | undefined, queryNow: number): Promise<void> {
+    let result: AsyncQueryResult;
+    if (profileHint) {
+      const resolved = await this.fetchUserByHint(profileHint, queryNow);
+      if (resolved.ok) {
+        result = {
+          ok: true,
+          userId: resolved.entry.userId,
+          serialNumber: resolved.entry.serialNumber,
+          name: resolved.entry.name,
+        };
+      } else {
+        result = { ok: false, error: resolved.error };
+      }
+    } else {
+      const activeRes = await this.requestAdsPower('/api/v1/browser/local-active');
+      if (!activeRes.ok) {
+        result = { ok: false, error: activeRes.error };
+      } else if (!activeRes.data || !Array.isArray(activeRes.data.list)) {
+        result = { ok: false, error: '连接失败' };
+      } else if (activeRes.data.list.length === 0) {
+        result = { ok: false, error: '未找到环境' };
+      } else if (activeRes.data.list.length > 1) {
+        result = { ok: true, clearAutoDetect: true };
+      } else {
+        const active = activeRes.data.list[0];
+        const activeUserId = typeof active?.user_id === 'string' && active.user_id.trim() ? active.user_id.trim().slice(0, 120) : undefined;
+        const rawSerial = active?.serial_number !== undefined && active?.serial_number !== null ? String(active.serial_number).trim() : '';
+        const activeSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
+        const activeName = typeof active?.name === 'string' && active.name.trim() ? active.name.trim().slice(0, 120) : undefined;
+        if (activeName) {
+          this.storeCachedUser({ userId: activeUserId, serialNumber: activeSerial, name: activeName, fetchedAt: queryNow });
+          result = { ok: true, userId: activeUserId, serialNumber: activeSerial, name: activeName };
+        } else if (activeUserId || activeSerial) {
+          const resolved = await this.fetchUserByHint(activeUserId ?? activeSerial!, queryNow);
+          if (resolved.ok) {
+            result = {
+              ok: true,
+              userId: resolved.entry.userId ?? activeUserId,
+              serialNumber: resolved.entry.serialNumber ?? activeSerial,
+              name: resolved.entry.name,
+            };
+          } else {
+            result = {
+              ok: false,
+              error: resolved.error,
+              fallbackUserId: activeUserId,
+              fallbackSerial: activeSerial,
+            };
+          }
+        } else {
+          result = { ok: false, error: '未找到环境' };
+        }
+      }
+    }
+
+    await this.serial(async () => {
+      const current = this.records.get(instanceId);
+      if (!current) return;
+      if ((current.adspowerProfile ?? undefined) !== profileHint) return;
+      if (!profileHint && (this.records.size > 1 || current.instanceName.trim() !== '未命名浏览器环境')) {
+        return;
+      }
+
+      let adspowerUserId = current.adspowerUserId;
+      let adspowerSerialNumber = current.adspowerSerialNumber;
+      let adspowerName = current.adspowerName;
+      let adspowerError: BrowserUsageAdsPowerError | undefined;
+
+      if (result.ok) {
+        if (result.clearAutoDetect) {
+          adspowerUserId = undefined;
+          adspowerSerialNumber = undefined;
+          adspowerName = undefined;
+        } else {
+          adspowerUserId = result.userId;
+          adspowerSerialNumber = result.serialNumber;
+          adspowerName = result.name;
+        }
+        adspowerError = undefined;
+      } else {
+        if (!adspowerUserId && result.fallbackUserId) adspowerUserId = result.fallbackUserId;
+        if (!adspowerSerialNumber && result.fallbackSerial) adspowerSerialNumber = result.fallbackSerial;
+        adspowerError = result.error;
+      }
+
+      const display = computeDisplay({
+        instanceName: current.instanceName,
+        profileHint: current.adspowerProfile,
+        adspowerName,
+        adspowerSerialNumber,
+        adspowerUserId,
+      });
+
+      const updated: BrowserUsageRecord = {
+        instanceId: current.instanceId,
+        instanceName: current.instanceName,
+        ...(current.adspowerProfile ? { adspowerProfile: current.adspowerProfile } : {}),
+        ...(adspowerUserId ? { adspowerUserId } : {}),
+        ...(adspowerSerialNumber ? { adspowerSerialNumber } : {}),
+        ...(adspowerName ? { adspowerName } : {}),
+        adspowerQueriedAt: Math.max(current.adspowerQueriedAt ?? 0, queryNow),
+        ...(adspowerError ? { adspowerError } : {}),
+        displayName: display.displayName,
+        labelSource: display.labelSource,
+        labelSourceText: display.labelSourceText,
+        lastPostAt: current.lastPostAt,
+        status: current.status,
+        ...(current.reason ? { reason: current.reason } : {}),
+        fiveHour: current.fiveHour,
+        weekly: current.weekly,
+      };
+
+      this.records.set(instanceId, updated);
+      this.clearAutoDetectedOnMultiInstance();
+      await this.save(this.nowFn());
+    });
   }
 
   private async save(now: number): Promise<void> {
@@ -313,6 +540,45 @@ export class BrowserUsageStore {
     });
   }
 
+  async settings(now = this.nowFn()): Promise<BrowserUsageSettings> {
+    await this.load(now);
+    await this.tail;
+    return { adspowerApiKeyConfigured: Boolean(this.getApiKey()) };
+  }
+
+  async saveApiKey(rawKey: string, now = this.nowFn()): Promise<BrowserUsageSettings> {
+    const { apiKey } = BrowserUsageApiKeyInputSchema.parse({ apiKey: rawKey });
+    await this.load(now);
+    return this.serial(async () => {
+      this.configuredApiKey = apiKey;
+      this.userCache.clear();
+      this.serialToUserId.clear();
+      const singleExtension = this.records.size === 1;
+      for (const [instanceId, item] of this.records) {
+        const trimmedName = item.instanceName.trim();
+        const needsAdsPower = Boolean(item.adspowerProfile) || (trimmedName === '未命名浏览器环境' && singleExtension);
+        if (needsAdsPower && (item.adspowerError || !item.adspowerName)) {
+          const nextItem: BrowserUsageRecord = { ...item };
+          delete nextItem.adspowerQueriedAt;
+          delete nextItem.adspowerError;
+          this.records.set(instanceId, nextItem);
+          this.triggerAsyncNameQuery(instanceId, item.adspowerProfile, now);
+        }
+      }
+      await this.save(now);
+      return { adspowerApiKeyConfigured: Boolean(this.getApiKey()) };
+    });
+  }
+
+  async removeApiKey(now = this.nowFn()): Promise<BrowserUsageSettings> {
+    await this.load(now);
+    return this.serial(async () => {
+      this.configuredApiKey = undefined;
+      await this.save(now);
+      return { adspowerApiKeyConfigured: Boolean(this.getApiKey()) };
+    });
+  }
+
   record = async (body: unknown, now = this.nowFn()): Promise<void> => {
     const input = BrowserUsagePostSchema.parse(body);
     return this.serial(async () => {
@@ -330,78 +596,44 @@ export class BrowserUsageStore {
       let adspowerSerialNumber = previous?.adspowerSerialNumber;
       let adspowerName = previous?.adspowerName;
       let adspowerQueriedAt = previous?.adspowerQueriedAt;
+      let adspowerError = previous?.adspowerError;
 
       const profileChanged = (previous?.adspowerProfile ?? undefined) !== profileHint;
-      const shouldQuery = !previous
-        || profileChanged
-        || adspowerQueriedAt === undefined
-        || now - adspowerQueriedAt >= ADSPOWER_QUERY_INTERVAL_MS;
-
-      if (profileHint) {
-        if (profileChanged) {
-          adspowerUserId = undefined;
-          adspowerSerialNumber = undefined;
-          adspowerName = undefined;
-        }
-        if (shouldQuery) {
-          adspowerQueriedAt = now;
-          const resolved = await this.fetchUserByHint(profileHint, now);
-          if (resolved.ok && resolved.entry) {
-            adspowerUserId = resolved.entry.userId;
-            adspowerSerialNumber = resolved.entry.serialNumber;
-            adspowerName = resolved.entry.name;
-          }
-        }
-      } else if (trimmedName === '未命名浏览器环境' && singleExtension) {
-        if (profileChanged) {
-          adspowerUserId = undefined;
-          adspowerSerialNumber = undefined;
-          adspowerName = undefined;
-        }
-        if (shouldQuery) {
-          adspowerQueriedAt = now;
-          const activeData = await this.requestAdsPower('/api/v1/browser/local-active');
-          if (activeData && Array.isArray(activeData.list)) {
-            if (activeData.list.length === 1) {
-              const active = activeData.list[0];
-              const activeUserId = typeof active?.user_id === 'string' && active.user_id.trim() ? active.user_id.trim().slice(0, 120) : undefined;
-              const rawSerial = active?.serial_number !== undefined && active?.serial_number !== null ? String(active.serial_number).trim() : '';
-              const activeSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
-              const activeName = typeof active?.name === 'string' && active.name.trim() ? active.name.trim().slice(0, 120) : undefined;
-              if (activeName) {
-                adspowerUserId = activeUserId;
-                adspowerSerialNumber = activeSerial;
-                adspowerName = activeName;
-                this.storeCachedUser({ userId: activeUserId, serialNumber: activeSerial, name: activeName, fetchedAt: now });
-              } else if (activeUserId || activeSerial) {
-                const resolved = await this.fetchUserByHint(activeUserId ?? activeSerial!, now);
-                if (resolved.ok && resolved.entry) {
-                  adspowerUserId = resolved.entry.userId ?? activeUserId;
-                  adspowerSerialNumber = resolved.entry.serialNumber ?? activeSerial;
-                  adspowerName = resolved.entry.name;
-                } else {
-                  adspowerUserId = activeUserId;
-                  adspowerSerialNumber = activeSerial;
-                  adspowerName = undefined;
-                }
-              } else {
-                adspowerUserId = undefined;
-                adspowerSerialNumber = undefined;
-                adspowerName = undefined;
-              }
-            } else {
-              adspowerUserId = undefined;
-              adspowerSerialNumber = undefined;
-              adspowerName = undefined;
-            }
-          }
-        }
-      } else {
+      if (profileChanged) {
         adspowerUserId = undefined;
         adspowerSerialNumber = undefined;
         adspowerName = undefined;
         adspowerQueriedAt = undefined;
+        adspowerError = undefined;
       }
+
+      let hitCache = false;
+      if (profileHint) {
+        const isSerial = /^\d+$/.test(profileHint);
+        const cached = this.getCachedUser(isSerial ? { serialNumber: profileHint } : { userId: profileHint }, now);
+        if (cached) {
+          adspowerUserId = cached.userId;
+          adspowerSerialNumber = cached.serialNumber;
+          adspowerName = cached.name;
+          adspowerQueriedAt = cached.fetchedAt;
+          adspowerError = undefined;
+          hitCache = true;
+        }
+      } else if (!(trimmedName === '未命名浏览器环境' && singleExtension)) {
+        adspowerUserId = undefined;
+        adspowerSerialNumber = undefined;
+        adspowerName = undefined;
+        adspowerQueriedAt = undefined;
+        adspowerError = undefined;
+      }
+
+      const needsAdsPower = Boolean(profileHint) || (trimmedName === '未命名浏览器环境' && singleExtension);
+      const shouldQuery = needsAdsPower && !hitCache && (
+        !previous
+        || profileChanged
+        || adspowerQueriedAt === undefined
+        || now - adspowerQueriedAt >= ADSPOWER_QUERY_INTERVAL_MS
+      );
 
       const display = computeDisplay({
         instanceName: input.instanceName,
@@ -422,6 +654,7 @@ export class BrowserUsageStore {
         ...(adspowerSerialNumber ? { adspowerSerialNumber } : {}),
         ...(adspowerName ? { adspowerName } : {}),
         ...(adspowerQueriedAt !== undefined ? { adspowerQueriedAt } : {}),
+        ...(adspowerError ? { adspowerError } : {}),
         displayName: display.displayName,
         labelSource: display.labelSource,
         labelSourceText: display.labelSourceText,
@@ -437,6 +670,7 @@ export class BrowserUsageStore {
         || previous.adspowerUserId !== next.adspowerUserId
         || previous.adspowerSerialNumber !== next.adspowerSerialNumber
         || previous.adspowerName !== next.adspowerName
+        || previous.adspowerError !== next.adspowerError
         || previous.displayName !== next.displayName
         || previous.labelSource !== next.labelSource
         || previous.status !== next.status
@@ -444,14 +678,30 @@ export class BrowserUsageStore {
         || JSON.stringify(previous.fiveHour) !== JSON.stringify(next.fiveHour)
         || JSON.stringify(previous.weekly) !== JSON.stringify(next.weekly);
       this.records.set(input.instanceId, next);
-      this.clearAutoDetectedOnMultiInstance();
-      if (changed || now - this.lastSavedAt >= SAVE_INTERVAL_MS) {
+      const clearedOther = this.clearAutoDetectedOnMultiInstance();
+      if (changed || clearedOther || now - this.lastSavedAt >= SAVE_INTERVAL_MS) {
         await this.save(now);
+      }
+      if (shouldQuery) {
+        this.triggerAsyncNameQuery(input.instanceId, profileHint, now);
       }
     });
   };
 
+  async flushQueries(): Promise<void> {
+    while (this.inflightQueries.size > 0) {
+      await Promise.allSettled([...this.inflightQueries.values()]);
+    }
+    await this.tail;
+  }
+
   async get(instanceId: string, now = this.nowFn()): Promise<BrowserUsageRecord | null> {
+    if (this.inflightQueries.size > 0) {
+      await Promise.race([
+        this.flushQueries(),
+        new Promise<void>(resolve => setTimeout(resolve, 100)),
+      ]);
+    }
     await this.tail;
     this.prune(now);
     const found = this.records.get(instanceId);
@@ -459,6 +709,12 @@ export class BrowserUsageStore {
   }
 
   async discover(now = this.nowFn()): Promise<UsageAccount[]> {
+    if (this.inflightQueries.size > 0) {
+      await Promise.race([
+        this.flushQueries(),
+        new Promise<void>(resolve => setTimeout(resolve, 100)),
+      ]);
+    }
     await this.tail;
     this.prune(now);
     const list = [...this.records.values()];
@@ -538,6 +794,14 @@ export function toUsageReport(record: BrowserUsageRecord | null | undefined, now
   const details: UsageDetail[] = [];
   if (stateText) {
     details.push({ id: 'state', label: '状态', value: stateText, tone: 'warning' });
+  }
+  if (record.adspowerError) {
+    details.push({
+      id: 'adspower-error',
+      label: '环境名称',
+      value: `AdsPower 查询失败（${record.adspowerError}）`,
+      tone: 'warning',
+    });
   }
   const fiveMs = record.fiveHour ? Date.parse(record.fiveHour.observedAt) : -Infinity;
   const weeklyMs = record.weekly ? Date.parse(record.weekly.observedAt) : -Infinity;
