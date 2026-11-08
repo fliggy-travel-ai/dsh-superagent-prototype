@@ -55,6 +55,19 @@ macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app
 
 令牌保存前请求 GitHub `/user` 验证。请求仅发往 `api.github.com`，拒绝重定向、跨主机分页和 `/notifications`。客户端令牌输入为密文，保存成功后清空；RPC 快照、日志、状态文件不包含令牌。令牌文件本身是权限受限的本机文件，未声称由系统钥匙串加密。
 
+## 模块、机器配置和两个实例（#1737）
+
+服务端入口 `index.server.ts` 只做组装：读机器配置，建共享守护进程连接和服务，注册模块。
+
+- **模块**：`server/modules/<名称>/index.ts` 导出一个 `Module`，加到 `server/modules/index.ts` 的 `MODULES`。每个模块的注册单独捕获错误，失败只停这个模块；处理函数、钩子和 Provider 回调在模块的异步上下文中运行。进程级 `unhandledRejection` 和 `uncaughtException` 按模块记录，不让插件进程退出。RPC `modules.status` 返回每个模块的状态（运行、关闭、出错和原因）。
+- **共享连接**：`server/core/daemon.ts` 的 `SharedDaemon`，用法 `const { paseo, client } = await context.services.daemon.ready()`。守护进程启动初期 `paseo.pid` 没有监听地址，连接最多等 60 秒；失败后下次调用重试。不要在模块中另开本机连接。
+- **机器配置**：`~/.paseo/github-subscriptions/machine.json`（可用环境变量 `PASEO_GHSUB_MACHINE_CONFIG` 指定），样例见 `config/machine.example.json`。同步读取。`modules` 写模块开关；其他键是各模块登记的区块（模块定义中的 `config: { section, spec: { schema, fallback } }`）。一个区块不合法只停用依赖它的模块。没有文件时全部用默认值，默认值等于整合前的行为。
+- **两个实例**：角色由 `shared/instance.ts` 决定。仓库中为 `null`（兼容模式：按 main 处理并保留云端会话）。部署脚本在部署目录中写入 `'main'` 或 `'provider'`：
+  - `main`（安装 ID `github-subscriptions`）：页面和除 Provider 以外的全部模块。云端程序写死调用这个 ID，所以主实例保留云端会话的 RPC 并转给 Provider 实例。
+  - `provider`（安装 ID `dev-automation-providers`）：只注册 Provider 模块，状态写到 `~/.paseo/github-subscriptions/providers/`，不注册任何界面。
+- **部署**：`node --experimental-strip-types scripts/deploy.ts --role main|provider --ref <标签或提交> [--install] [--reload]`。重载前检查旧实例和新实例托管的 Provider 有没有运行中轮次，有就停止。
+- **提交前扫描**：`npm run scan`（已包含在 `npm run check`），命中邮箱、Apple 隐藏邮箱、webhook 地址或令牌格式时失败。测试数据所在行写 `scan-allow`。
+
 ## 开发检查
 
 在本目录执行：
