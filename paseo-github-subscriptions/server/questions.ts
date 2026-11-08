@@ -21,11 +21,16 @@ export function nativePrompts(request: AgentPermissionRequest): QuestionPrompt[]
   return parsed.success && new Set(parsed.data.map(prompt => prompt.question)).size === parsed.data.length ? parsed.data : null;
 }
 
-export function validateAnswers(prompts: QuestionPrompt[], answers: QuestionAnswer['answers']) {
+export function validateAnswers(prompts: QuestionPrompt[], answers: Record<string, string[]>, otherAnswers?: Record<string, string>) {
   if (Object.keys(answers).length !== prompts.length) throw new Error('请回答每一个问题');
+  if (otherAnswers && Object.keys(otherAnswers).some(key => !prompts.some(prompt => prompt.question === key))) throw new Error('选项已变化，请重新读取问题');
   for (const prompt of prompts) {
     const selected = answers[prompt.question];
-    if (!selected?.length || !prompt.multiSelect && selected.length !== 1 || new Set(selected).size !== selected.length ||
+    const hasOtherKey = Boolean(otherAnswers && Object.hasOwn(otherAnswers, prompt.question) && otherAnswers[prompt.question] !== undefined);
+    const other = hasOtherKey ? otherAnswers![prompt.question]!.trim() : '';
+    if (hasOtherKey && (!prompt.allowOther || !other || other.length > 2000)) throw new Error('选项已变化，请重新读取问题');
+    const count = (selected?.length ?? 0) + (hasOtherKey ? 1 : 0);
+    if (!Array.isArray(selected) || (!prompt.multiSelect ? count !== 1 : count < 1) || new Set(selected).size !== selected.length ||
       selected.some(label => prompt.options.filter(option => option.label === label).length !== 1)) throw new Error('选项已变化，请重新读取问题');
   }
 }

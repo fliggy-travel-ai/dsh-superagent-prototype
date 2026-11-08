@@ -16,6 +16,7 @@ export const PresenceObservationSchema = z.strictObject({
 export const QuestionPromptSchema = z.strictObject({
   question: z.string().min(1).max(4000), header: z.string().max(200).optional(),
   multiSelect: z.boolean().default(false),
+  allowOther: z.boolean().optional(),
   options: z.array(z.strictObject({ label: z.string().min(1).max(1000), description: z.string().max(4000).default(''), recommended: z.boolean() })).max(30),
 });
 export const BrowserQuestionSchema = z.strictObject({
