@@ -104,9 +104,11 @@ export const ackInbox = defineRpc({
  * The caller identity, endpoint, and credentials come from the daemon's session configuration for that agent; the
  * cloud program cannot choose them, and they never appear in a response or a log. Every Paseo tool is forwarded.
  * Fails with `not_opened` until the daemon has opened the agent's provider session at least once in this epoch.
+ * `timeoutMs` bounds the local MCP call. Its maximum stays below the Paseo client's 60-second plugin RPC request timeout,
+ * so the plugin always answers before the cloud caller gives up while the tool keeps running.
  */
 export const forwardMcp = defineRpc({
   name: 'cloud-session.mcp',
-  input: z.object({ cloudSessionId: CloudSessionIdSchema, message: z.record(z.string(), z.unknown()), timeoutMs: z.number().int().min(1_000).max(120_000).default(60_000) }),
+  input: z.object({ cloudSessionId: CloudSessionIdSchema, message: z.record(z.string(), z.unknown()), timeoutMs: z.number().int().min(1_000).max(50_000).default(45_000) }),
   output: z.object({ status: z.number().int(), messages: z.array(z.record(z.string(), z.unknown())) }),
 });
