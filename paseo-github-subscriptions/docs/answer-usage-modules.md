@@ -46,7 +46,7 @@
 迁入 `subsession-quiet`（待查看清除）和 `event-notifications` 中“子会话事件转发给主会话”的部分。
 
 - **免提醒**（`quietChildren.enabled`，默认开）：子会话结束、出错或提问后清除“待查看”；等待工具授权的子会话保留提醒。清除用未公开接口 `clearAgentAttention` 和 `clearWorkspaceAttention`，Paseo 升级后要核对。Paseo 先发通知、插件后清除，所以系统弹窗仍会出现一下。
-- **事件转发**（`quietChildren.forwardEvents`，默认**关**）：子会话的提问，以及需要用户接续的事件（合并 master、复盘），发给所属主会话；主会话有待答问题时先等。普通的完成、出错、命令失败只记录，不叫醒主会话。旧插件还订阅每个子会话的时间线检查 shell 命令失败，**本期没有迁移这条路径**：它要给每个子会话建订阅，而且只在命令文字含合并 master 或复盘时才会转发。
+- **事件转发**（`quietChildren.forwardEvents`，默认**关**）：子会话的提问，以及需要用户接续的事件（合并 master、复盘），发给所属主会话；主会话有待答问题时先等。普通的完成、出错、命令失败只记录，不叫醒主会话。与旧插件一致，还会订阅每个子会话的时间线检查 shell 命令失败（带退出码的终态或失败；`gh pr checks` 退出码 8 不算）：普通失败只记录，命令文字含合并 master 或复盘时才转给主会话。每个子会话一个订阅，随事件转发开关一起启停。
 - **旧插件保护**：旧插件 `event-notifications` 仍启用时，事件转发不能打开（页面显示原因）。免提醒可以和旧插件 `subsession-quiet` 同时运行，清除操作是幂等的。
 - **跨主机**：父会话在另一台主机时，经已登记的主机通道转发，并调用对方的 RPC `quiet.resolve-main` 确认现任主会话；两台都要安装本版插件。
 - 状态目录 `quiet-children/`：`settings.json`、`handled.json`（最近处理记录）、`forward-state.json`、`forward-events.jsonl`。旧 `subsession-quiet` 没有状态，不需要迁移。

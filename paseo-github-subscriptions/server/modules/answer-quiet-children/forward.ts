@@ -7,6 +7,7 @@ import { isMainSession, parentLink, parseWorkspaceRoles, type RolesReader, type 
 import { summarizeError } from '../../core/modules.ts';
 import { createAuditWriter } from '../../notify/audit.ts';
 import type { NotifyConfig } from '../../notify/config.ts';
+import { shellCommandNotice } from '../../notify/commands.ts';
 import { Engine, expireOutbox, type Notice } from '../../notify/engine.ts';
 import { deliverToCurrentMain } from '../../notify/parent.ts';
 import { connectRegisteredHost } from '../../notify/peer.ts';
@@ -33,8 +34,7 @@ export interface ForwardOptions {
  * 普通的完成、出错、命令失败只记录，不叫醒主会话。谁是主会话由会话角色决定（置顶工作区）；
  * 父会话标签只用来找转发目标，接班后改发同工作区最近活动的会话。
  *
- * 与旧插件的差别：旧插件还订阅每个子会话的时间线来检查 shell 命令失败。那条路径要为每个子会话
- * 建一个订阅，而且只在命令文字含合并 master 或复盘时才会转发，这次没有迁移。
+ * 与旧插件一致：订阅子会话的时间线检查 shell 命令失败（每个子会话一个订阅）。
  */
 export class ForwardRuntime {
   private readonly options: ForwardOptions;
@@ -163,6 +163,27 @@ export class ForwardRuntime {
         await engine.tick();
       });
     }));
+    // 子会话的 shell 命令失败：订阅该子会话的时间线（与旧插件一致）。普通失败只记录，
+    // 命令文字含合并 master 或复盘时才转给主会话。
+    const observed = new Set<string>();
+    const observe = async (id: string) => {
+      if (observed.has(id) || !config.children[id]) return;
+      observed.add(id);
+      const subscription = paseo.agents.ref(id).timeline.subscribe(message => {
+        if (!config.children[id] || message.event.type !== 'timeline') return;
+        const notice = shellCommandNotice(id, message.event.item);
+        if (!notice) return;
+        run(async () => {
+          const target = config.children[id];
+          if (!target) return;
+          await engine.enqueue(notice.event, id, notice.data, notice.key, target);
+          await engine.tick();
+        });
+      });
+      this.removers.push(() => { void subscription.ready.then(() => subscription(), () => {}); });
+      await subscription.ready;
+    };
+    const watch = (id: string) => { void observe(id).catch(() => { observed.delete(id); this.log('子会话时间线订阅失败，稍后重试'); }); };
     const { subscription } = await paseo.agents.list({ subscribe: {}, signal: this.lifetime.signal });
     this.removers.push(() => { void subscription.release().catch(() => {}); });
     this.removers.push(subscription.subscribe({
@@ -170,6 +191,7 @@ export class ForwardRuntime {
         run(async () => {
           for (const { agent } of entries) {
             updateAgent(agent as never);
+            watch(agent.id);
             for (const request of agent.pendingPermissions ?? []) await childQuestion(agent, request as never);
           }
           await engine.tick();
@@ -180,6 +202,7 @@ export class ForwardRuntime {
         const agent = message.payload.agent;
         run(async () => {
           updateAgent(agent as never);
+          watch(agent.id);
           for (const request of agent.pendingPermissions ?? []) await childQuestion(agent, request as never);
           await engine.tick();
         });
