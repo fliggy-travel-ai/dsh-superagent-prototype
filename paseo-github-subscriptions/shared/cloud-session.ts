@@ -30,11 +30,18 @@ export const EpochSchema = z.string().min(1);
  * Finds the agent for a cloud session or imports a new one. Calls for the same `cloudSessionId` run one at a time, so
  * concurrent callers get the same agent. An archived agent does not count: the next call imports a new agent.
  * `title` is used only when a new agent is imported.
- * Errors carry the daemon's original message.
+ *
+ * The agent's working directory must exist on the Mac, so the provider does not use the cloud path itself:
+ * - `cwd` is the cloud session's working directory; its last path segment is the repository name. The provider uses
+ *   the directory of the Paseo project with that name. When several projects share the name, it prefers one that has
+ *   an active workspace, then the first in the daemon's project list.
+ * - With no matching project, it uses `fallbackCwd` (a Mac directory the member configures in the cloud environment)
+ *   when that directory exists, otherwise the Mac user's home directory.
+ * The provider creates no project. Errors carry the daemon's original message.
  */
 export const ensureSession = defineRpc({
   name: 'cloud-session.ensure',
-  input: z.object({ cloudSessionId: CloudSessionIdSchema, title: z.string().min(1).max(60), cwd: z.string().min(1) }),
+  input: z.object({ cloudSessionId: CloudSessionIdSchema, title: z.string().min(1).max(60), cwd: z.string().min(1), fallbackCwd: z.string().min(1).optional() }),
   output: z.object({ agentId: z.string(), serverId: z.string(), epoch: EpochSchema, created: z.boolean() }),
 });
 
