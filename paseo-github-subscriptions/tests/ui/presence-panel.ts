@@ -21,14 +21,19 @@ export function installTsxAndReactNativeHooks() {
     "export const Pressable = 'Pressable';",
     "export const Switch = 'Switch';",
     "export const ScrollView = 'ScrollView';",
+    "export const Linking = { openURL: async () => {} };",
     "export const Platform = { select: (obj) => obj.default ?? obj.ios };",
   ].join('\n');
   const rnDataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(rnSource)}`;
+  const pluginUiDataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent("export const useToast = () => ({ show: () => {} });")}`;
 
   registerHooks({
     resolve(specifier, context, nextResolve) {
       if (specifier === 'react-native') {
         return { url: rnDataUrl, shortCircuit: true };
+      }
+      if (specifier === '@getpaseo/plugin/client/ui') {
+        return { url: pluginUiDataUrl, shortCircuit: true };
       }
       return nextResolve(specifier, context);
     },

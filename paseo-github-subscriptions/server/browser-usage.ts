@@ -8,6 +8,7 @@ import {
   BrowserUsageApiKeyInputSchema,
   BrowserUsagePostSchema,
   BrowserUsageWindowSchema,
+  type BrowserUsageApiKeySource,
   type BrowserUsagePost,
   type BrowserUsageSettings,
   type BrowserUsageWindow,
@@ -32,6 +33,7 @@ export type BrowserUsageLabelSource = z.infer<typeof BrowserUsageLabelSourceSche
 export const BrowserUsageAdsPowerErrorSchema = z.enum([
   '连接失败',
   '需要在额度设置填写 AdsPower API key',
+  'API key 无效，请在额度设置重新填写',
   '需要 api key',
   '被限流',
   '未找到环境',
@@ -149,7 +151,7 @@ function mergeWindow(previous: BrowserUsageWindow | null, incoming: BrowserUsage
 
 function classifyAdsPowerFailure(status: number, msg: string, hasApiKey: boolean): BrowserUsageAdsPowerError {
   if (status === 401 || status === 403 || /api[_\s-]*key|unauthorized|auth|token|permission|forbidden|密钥|鉴权|认证/i.test(msg)) {
-    return hasApiKey ? '需要 api key' : '需要在额度设置填写 AdsPower API key';
+    return hasApiKey ? 'API key 无效，请在额度设置重新填写' : '需要在额度设置填写 AdsPower API key';
   }
   if (status === 429 || /too many request|rate\s*limit|频繁|限流|qps/i.test(msg)) {
     return '被限流';
@@ -166,10 +168,14 @@ export class BrowserUsageStore {
   private options: BrowserUsageStoreOptions;
   private configuredApiUrl?: string;
   private configuredApiKey?: string;
+  private apiKeyVersion = 0;
+  private stopped = false;
+  private activeAbortControllers = new Set<AbortController>();
   private records = new Map<string, BrowserUsageRecord>();
   private userCache = new Map<string, AdsPowerUserEntry>();
   private serialToUserId = new Map<string, string>();
-  private inflightQueries = new Map<string, Promise<void>>();
+  private inflightQueries = new Map<string, { version: number; promise: Promise<void> }>();
+  private allInflightPromises = new Set<Promise<void>>();
   private requestQueue: Promise<unknown> = Promise.resolve();
   private lastRequestAt = 0;
   private lastSavedAt = 0;
@@ -190,6 +196,7 @@ export class BrowserUsageStore {
 
   private enqueueAdsPowerRequest<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.requestQueue.then(async () => {
+      if (this.stopped) return fn();
       const minIntervalMs = this.options.adspowerMinIntervalMs ?? DEFAULT_ADSPOWER_MIN_INTERVAL_MS;
       if (this.lastRequestAt > 0 && minIntervalMs > 0) {
         const elapsed = Date.now() - this.lastRequestAt;
@@ -225,16 +232,25 @@ export class BrowserUsageStore {
     return url.replace(/\/+$/, '');
   }
 
+  private getApiKeyInfo(): { key: string; source: BrowserUsageApiKeySource } {
+    const pluginKey = this.options.adspowerApiKey?.trim() || this.configuredApiKey?.trim() || '';
+    if (pluginKey) {
+      return { key: pluginKey, source: 'plugin' };
+    }
+    const envKey = process.env.PASEO_ADSPOWER_API_KEY?.trim() || process.env.ADSPOWER_API_KEY?.trim() || '';
+    if (envKey) {
+      return { key: envKey, source: 'env' };
+    }
+    return { key: '', source: 'none' };
+  }
+
   private getApiKey(): string {
-    return this.options.adspowerApiKey?.trim()
-      || this.configuredApiKey?.trim()
-      || process.env.PASEO_ADSPOWER_API_KEY?.trim()
-      || process.env.ADSPOWER_API_KEY?.trim()
-      || '';
+    return this.getApiKeyInfo().key;
   }
 
   private requestAdsPower(pathAndQuery: string): Promise<AdsPowerResponse> {
     return this.enqueueAdsPowerRequest(async () => {
+      if (this.stopped) return { ok: false, error: '连接失败' };
       const fetchImpl = this.options.fetchFn ?? globalThis.fetch;
       if (typeof fetchImpl !== 'function') return { ok: false, error: '连接失败' };
       const timeoutMs = this.options.adspowerTimeoutMs ?? DEFAULT_ADSPOWER_TIMEOUT_MS;
@@ -243,6 +259,7 @@ export class BrowserUsageStore {
       const headers: Record<string, string> = {};
       if (apiKey) headers.authorization = `Bearer ${apiKey}`;
       const controller = new AbortController();
+      this.activeAbortControllers.add(controller);
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetchImpl(`${this.getApiBaseUrl()}${pathAndQuery}`, {
@@ -269,6 +286,7 @@ export class BrowserUsageStore {
         return { ok: false, error: '连接失败' };
       } finally {
         clearTimeout(timer);
+        this.activeAbortControllers.delete(controller);
       }
     });
   }
@@ -299,25 +317,14 @@ export class BrowserUsageStore {
     }
   }
 
-  private async fetchUserByHint(
-    hint: string,
-    now: number,
-  ): Promise<{ ok: true; entry: AdsPowerUserEntry } | { ok: false; error: BrowserUsageAdsPowerError }> {
-    const isSerial = /^\d+$/.test(hint);
-    const cached = this.getCachedUser(isSerial ? { serialNumber: hint } : { userId: hint }, now);
-    if (cached) return { ok: true, entry: cached };
-
-    const res = await this.requestAdsPower('/api/v1/user/list?page_size=100');
-    if (!res.ok) return res;
-    const data = res.data;
-    if (!data || !Array.isArray(data.list)) return { ok: false, error: '连接失败' };
-
-    for (const row of data.list) {
+  private cacheRows(rows: unknown[], now: number): void {
+    for (const row of rows) {
       if (!row || typeof row !== 'object') continue;
-      const rowUserId = typeof row.user_id === 'string' && row.user_id.trim() ? row.user_id.trim().slice(0, 120) : undefined;
-      const rawSerial = row.serial_number !== undefined && row.serial_number !== null ? String(row.serial_number).trim() : '';
+      const record = row as Record<string, unknown>;
+      const rowUserId = typeof record.user_id === 'string' && record.user_id.trim() ? record.user_id.trim().slice(0, 120) : undefined;
+      const rawSerial = record.serial_number !== undefined && record.serial_number !== null ? String(record.serial_number).trim() : '';
       const rowSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
-      const rowName = typeof row.name === 'string' && row.name.trim() ? row.name.trim().slice(0, 120) : undefined;
+      const rowName = typeof record.name === 'string' && record.name.trim() ? record.name.trim().slice(0, 120) : undefined;
       if (rowUserId || rowSerial) {
         this.storeCachedUser({
           ...(rowUserId ? { userId: rowUserId } : {}),
@@ -327,12 +334,49 @@ export class BrowserUsageStore {
         });
       }
     }
+  }
 
-    const item = data.list.find((row: any) =>
+  private async fetchUserByHint(
+    hint: string,
+    now: number,
+    queryVersion: number,
+  ): Promise<{ ok: true; entry: AdsPowerUserEntry } | { ok: false; error: BrowserUsageAdsPowerError }> {
+    const isSerial = /^\d+$/.test(hint);
+    const cached = this.getCachedUser(isSerial ? { serialNumber: hint } : { userId: hint }, now);
+    if (cached) return { ok: true, entry: cached };
+
+    const matchRow = (row: any) =>
       isSerial
         ? String(row?.serial_number ?? '').trim() === hint
-        : String(row?.user_id ?? '').trim() === hint,
-    );
+        : String(row?.user_id ?? '').trim() === hint;
+
+    const batchRes = await this.requestAdsPower('/api/v1/user/list?page_size=100');
+    if (!batchRes.ok) return batchRes;
+    const batchData = batchRes.data;
+    if (!batchData || !Array.isArray(batchData.list)) return { ok: false, error: '连接失败' };
+
+    if (!this.stopped && queryVersion === this.apiKeyVersion) {
+      this.cacheRows(batchData.list, now);
+    }
+
+    let item = batchData.list.find(matchRow);
+    if (!item || typeof item !== 'object') {
+      if (this.stopped || queryVersion !== this.apiKeyVersion) {
+        return { ok: false, error: '未找到环境' };
+      }
+      const filterQuery = isSerial
+        ? `/api/v1/user/list?serial_number=${encodeURIComponent(hint)}`
+        : `/api/v1/user/list?user_id=${encodeURIComponent(hint)}`;
+      const filteredRes = await this.requestAdsPower(filterQuery);
+      if (!filteredRes.ok) return filteredRes;
+      const filteredData = filteredRes.data;
+      if (!filteredData || !Array.isArray(filteredData.list)) return { ok: false, error: '连接失败' };
+      if (!this.stopped && queryVersion === this.apiKeyVersion) {
+        this.cacheRows(filteredData.list, now);
+      }
+      item = filteredData.list.find(matchRow);
+    }
+
     if (!item || typeof item !== 'object') {
       return { ok: false, error: '未找到环境' };
     }
@@ -346,7 +390,9 @@ export class BrowserUsageStore {
       ...(name ? { name } : {}),
       fetchedAt: now,
     };
-    this.storeCachedUser(entry);
+    if (!this.stopped && queryVersion === this.apiKeyVersion) {
+      this.storeCachedUser(entry);
+    }
     return { ok: true, entry };
   }
 
@@ -375,19 +421,33 @@ export class BrowserUsageStore {
   }
 
   private triggerAsyncNameQuery(instanceId: string, profileHint: string | undefined, queryNow: number): void {
-    if (this.inflightQueries.has(instanceId)) return;
-    const task = this.runAsyncNameQuery(instanceId, profileHint, queryNow)
+    if (this.stopped) return;
+    const existing = this.inflightQueries.get(instanceId);
+    if (existing && existing.version === this.apiKeyVersion) return;
+    const queryVersion = this.apiKeyVersion;
+    const promise = this.runAsyncNameQuery(instanceId, profileHint, queryNow, queryVersion)
       .catch(() => {})
       .finally(() => {
-        this.inflightQueries.delete(instanceId);
+        this.allInflightPromises.delete(promise);
+        const current = this.inflightQueries.get(instanceId);
+        if (current?.promise === promise) {
+          this.inflightQueries.delete(instanceId);
+        }
       });
-    this.inflightQueries.set(instanceId, task);
+    this.inflightQueries.set(instanceId, { version: queryVersion, promise });
+    this.allInflightPromises.add(promise);
   }
 
-  private async runAsyncNameQuery(instanceId: string, profileHint: string | undefined, queryNow: number): Promise<void> {
+  private async runAsyncNameQuery(
+    instanceId: string,
+    profileHint: string | undefined,
+    queryNow: number,
+    queryVersion: number,
+  ): Promise<void> {
+    if (this.stopped || queryVersion !== this.apiKeyVersion) return;
     let result: AsyncQueryResult;
     if (profileHint) {
-      const resolved = await this.fetchUserByHint(profileHint, queryNow);
+      const resolved = await this.fetchUserByHint(profileHint, queryNow, queryVersion);
       if (resolved.ok) {
         result = {
           ok: true,
@@ -415,10 +475,12 @@ export class BrowserUsageStore {
         const activeSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
         const activeName = typeof active?.name === 'string' && active.name.trim() ? active.name.trim().slice(0, 120) : undefined;
         if (activeName) {
-          this.storeCachedUser({ userId: activeUserId, serialNumber: activeSerial, name: activeName, fetchedAt: queryNow });
+          if (!this.stopped && queryVersion === this.apiKeyVersion) {
+            this.storeCachedUser({ userId: activeUserId, serialNumber: activeSerial, name: activeName, fetchedAt: queryNow });
+          }
           result = { ok: true, userId: activeUserId, serialNumber: activeSerial, name: activeName };
         } else if (activeUserId || activeSerial) {
-          const resolved = await this.fetchUserByHint(activeUserId ?? activeSerial!, queryNow);
+          const resolved = await this.fetchUserByHint(activeUserId ?? activeSerial!, queryNow, queryVersion);
           if (resolved.ok) {
             result = {
               ok: true,
@@ -440,7 +502,10 @@ export class BrowserUsageStore {
       }
     }
 
+    if (this.stopped || queryVersion !== this.apiKeyVersion) return;
+
     await this.serial(async () => {
+      if (this.stopped || queryVersion !== this.apiKeyVersion) return;
       const current = this.records.get(instanceId);
       if (!current) return;
       if ((current.adspowerProfile ?? undefined) !== profileHint) return;
@@ -504,6 +569,7 @@ export class BrowserUsageStore {
   }
 
   private async save(now: number): Promise<void> {
+    if (this.stopped) return;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const path = join(this.directory, 'browser-usage.json');
     const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
@@ -518,7 +584,7 @@ export class BrowserUsageStore {
 
   async load(now = this.nowFn()): Promise<void> {
     return this.serial(async () => {
-      if (this.loaded) return;
+      if (this.loaded || this.stopped) return;
       try {
         const raw = JSON.parse(await readFile(join(this.directory, 'browser-usage.json'), 'utf8'));
         const parsed = z.strictObject({
@@ -540,48 +606,77 @@ export class BrowserUsageStore {
     });
   }
 
+  private currentSettings(): BrowserUsageSettings {
+    const info = this.getApiKeyInfo();
+    return {
+      adspowerApiKeyConfigured: Boolean(info.key),
+      adspowerApiKeySource: info.source,
+    };
+  }
+
+  private refreshQueriesOnKeyChange(now: number): void {
+    this.apiKeyVersion += 1;
+    this.userCache.clear();
+    this.serialToUserId.clear();
+    this.inflightQueries.clear();
+    const singleExtension = this.records.size === 1;
+    for (const [instanceId, item] of this.records) {
+      const trimmedName = item.instanceName.trim();
+      const needsAdsPower = Boolean(item.adspowerProfile) || (trimmedName === '未命名浏览器环境' && singleExtension);
+      if (needsAdsPower) {
+        const nextItem: BrowserUsageRecord = { ...item };
+        delete nextItem.adspowerQueriedAt;
+        delete nextItem.adspowerError;
+        this.records.set(instanceId, nextItem);
+        this.triggerAsyncNameQuery(instanceId, item.adspowerProfile, now);
+      }
+    }
+  }
+
   async settings(now = this.nowFn()): Promise<BrowserUsageSettings> {
     await this.load(now);
     await this.tail;
-    return { adspowerApiKeyConfigured: Boolean(this.getApiKey()) };
+    return this.currentSettings();
   }
 
   async saveApiKey(rawKey: string, now = this.nowFn()): Promise<BrowserUsageSettings> {
     const { apiKey } = BrowserUsageApiKeyInputSchema.parse({ apiKey: rawKey });
     await this.load(now);
     return this.serial(async () => {
+      if (this.stopped) return this.currentSettings();
       this.configuredApiKey = apiKey;
-      this.userCache.clear();
-      this.serialToUserId.clear();
-      const singleExtension = this.records.size === 1;
-      for (const [instanceId, item] of this.records) {
-        const trimmedName = item.instanceName.trim();
-        const needsAdsPower = Boolean(item.adspowerProfile) || (trimmedName === '未命名浏览器环境' && singleExtension);
-        if (needsAdsPower && (item.adspowerError || !item.adspowerName)) {
-          const nextItem: BrowserUsageRecord = { ...item };
-          delete nextItem.adspowerQueriedAt;
-          delete nextItem.adspowerError;
-          this.records.set(instanceId, nextItem);
-          this.triggerAsyncNameQuery(instanceId, item.adspowerProfile, now);
-        }
-      }
+      this.refreshQueriesOnKeyChange(now);
       await this.save(now);
-      return { adspowerApiKeyConfigured: Boolean(this.getApiKey()) };
+      return this.currentSettings();
     });
   }
 
   async removeApiKey(now = this.nowFn()): Promise<BrowserUsageSettings> {
     await this.load(now);
     return this.serial(async () => {
+      if (this.stopped) return this.currentSettings();
       this.configuredApiKey = undefined;
+      this.refreshQueriesOnKeyChange(now);
       await this.save(now);
-      return { adspowerApiKeyConfigured: Boolean(this.getApiKey()) };
+      return this.currentSettings();
     });
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.apiKeyVersion += 1;
+    for (const controller of this.activeAbortControllers) {
+      controller.abort();
+    }
+    this.activeAbortControllers.clear();
+    this.inflightQueries.clear();
+    await this.flushQueries();
   }
 
   record = async (body: unknown, now = this.nowFn()): Promise<void> => {
     const input = BrowserUsagePostSchema.parse(body);
     return this.serial(async () => {
+      if (this.stopped) return;
       this.prune(now);
       const previous = this.records.get(input.instanceId);
       const trimmedName = input.instanceName.trim();
@@ -689,14 +784,14 @@ export class BrowserUsageStore {
   };
 
   async flushQueries(): Promise<void> {
-    while (this.inflightQueries.size > 0) {
-      await Promise.allSettled([...this.inflightQueries.values()]);
+    while (this.allInflightPromises.size > 0) {
+      await Promise.allSettled([...this.allInflightPromises]);
     }
     await this.tail;
   }
 
   async get(instanceId: string, now = this.nowFn()): Promise<BrowserUsageRecord | null> {
-    if (this.inflightQueries.size > 0) {
+    if (this.allInflightPromises.size > 0) {
       await Promise.race([
         this.flushQueries(),
         new Promise<void>(resolve => setTimeout(resolve, 100)),
@@ -709,7 +804,7 @@ export class BrowserUsageStore {
   }
 
   async discover(now = this.nowFn()): Promise<UsageAccount[]> {
-    if (this.inflightQueries.size > 0) {
+    if (this.allInflightPromises.size > 0) {
       await Promise.race([
         this.flushQueries(),
         new Promise<void>(resolve => setTimeout(resolve, 100)),

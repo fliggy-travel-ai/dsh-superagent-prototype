@@ -13,13 +13,16 @@ export const BrowserUsagePostSchema = z.strictObject({
   fiveHour: BrowserUsageWindowSchema.nullable(),
   weekly: BrowserUsageWindowSchema.nullable(),
 }).transform(({ account: _account, ...rest }) => rest);
+export const BrowserUsageApiKeySourceSchema = z.enum(['plugin', 'env', 'none']);
 export const BrowserUsageSettingsSchema = z.strictObject({
   adspowerApiKeyConfigured: z.boolean(),
+  adspowerApiKeySource: BrowserUsageApiKeySourceSchema.default('none'),
 });
 export const BrowserUsageApiKeyInputSchema = z.strictObject({
   apiKey: z.string().trim().min(1).max(512),
 });
 export type BrowserUsageWindow = z.infer<typeof BrowserUsageWindowSchema>;
 export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
+export type BrowserUsageApiKeySource = z.infer<typeof BrowserUsageApiKeySourceSchema>;
 export type BrowserUsageSettings = z.infer<typeof BrowserUsageSettingsSchema>;
 export type BrowserUsageApiKeyInput = z.infer<typeof BrowserUsageApiKeyInputSchema>;

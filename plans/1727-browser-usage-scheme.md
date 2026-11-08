@@ -240,11 +240,11 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
 
 `BrowserUsageStore`：
 
-- 每个环境一条记录：`instanceId`、`instanceName`、`adspowerProfile`、`adspowerUserId`、`adspowerSerialNumber`、`adspowerName`、`adspowerQueriedAt`、`adspowerError`（`'连接失败' | '需要在额度设置填写 AdsPower API key' | '需要 api key' | '被限流' | '未找到环境'`）、`displayName`、`labelSource`（`'adspower_name' | 'serial_number' | 'user_id' | 'instance_name'`）、`labelSourceText`、`lastPostAt`（插件接收时间）、`status`、`reason`、`fiveHour`、`weekly`。`BrowserUsagePostSchema` 与 `StoredRecordSchema` 均向后兼容可选的 `account` 字段并自动剥离丢弃。
-- `record(body)`：用 `BrowserUsagePostSchema.parse` 校验，失败时抛错（路由返回 400）。先将额度窗口数据与已有缓存名称立即落盘并返回，不阻塞 `BrowserBridge` 请求队列；需要在后台查询 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，保留可配置，超时 3 秒，支持在插件“额度设置”配置页填写 AdsPower API key 并保存在权限 0600 的 `browser-usage.json` 中——不写日志、不返回给前端，前端仅显示“已配置/未配置”，可清除、可重新填写，保留环境变量作为后备来源；全局请求队列保证两次请求至少间隔 1.1 秒，按 `user_id` 缓存并在首次出现、上报序号变化或距上次查询满 10 分钟时才查询，同一环境最多 1 个在途查询）时，在队列外异步执行并在完成后更新 `displayName` 与 `adspowerError` 落盘：
-  - 扩展上报了 `adspowerProfile`（或数字 `instanceName`）时，查 `/api/v1/user/list?page_size=100` 批量缓存并按 `serial_number` 或 `user_id` 精确匹配对应环境的 `name`（无精确匹配时记为 `未找到环境`，不拿列表第一条顶替）；
-  - 扩展未填且仍为默认 `未命名浏览器环境` 时，仅当本机只有 1 个扩展上报且 `/api/v1/browser/local-active` 恰好返回 1 个已打开环境时，取其 `user_id` / `serial_number` 并查 `/api/v1/user/list?page_size=100` 取 `name`；
-  - 若 `name` 为空或本地 API 未开启/查询失败，按顺序回退显示 `serial_number`、`user_id`、`instanceName`（已有解析结果的保留上次名称），记录 `labelSource` / `labelSourceText` 调试字段，并将失败原因（`连接失败` / 未配置 API key 时 `需要在额度设置填写 AdsPower API key` / 已配置仍被拒时 `需要 api key` / `被限流` / `未找到环境`）写入该环境额度详情行（`环境名称: AdsPower 查询失败（原因）`），不影响额度上报。
+- 每个环境一条记录：`instanceId`、`instanceName`、`adspowerProfile`、`adspowerUserId`、`adspowerSerialNumber`、`adspowerName`、`adspowerQueriedAt`、`adspowerError`（`'连接失败' | '需要在额度设置填写 AdsPower API key' | 'API key 无效，请在额度设置重新填写' | '需要 api key' | '被限流' | '未找到环境'`）、`displayName`、`labelSource`（`'adspower_name' | 'serial_number' | 'user_id' | 'instance_name'`）、`labelSourceText`、`lastPostAt`（插件接收时间）、`status`、`reason`、`fiveHour`、`weekly`。`BrowserUsagePostSchema` 与 `StoredRecordSchema` 均向后兼容可选的 `account` 字段并自动剥离丢弃。
+- `record(body)`：用 `BrowserUsagePostSchema.parse` 校验，失败时抛错（路由返回 400）。先将额度窗口数据与已有缓存名称立即落盘并返回，不阻塞 `BrowserBridge` 请求队列；需要在后台查询 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，保留可配置，超时 3 秒，支持在插件“额度设置”配置页填写 AdsPower API key 并保存在权限 0600 的 `browser-usage.json` 中——不写日志、不返回给前端，前端接收 `adspowerApiKeyConfigured` 与 `adspowerApiKeySource` 显示“已配置/已配置（来自环境变量）/未配置”，来自环境变量时隐藏清除按钮，保存或清除 key 时递增版本号丢弃旧在途结果并立即重查，额度模块支持 `stop()` 并在插件停止时调用；全局请求队列保证两次请求至少间隔 1.1 秒，按 `user_id` 缓存并在首次出现、上报序号变化或距上次查询满 10 分钟时才查询，同一环境同一版本最多 1 个在途查询）时，在队列外异步执行并在完成后更新 `displayName` 与 `adspowerError` 落盘：
+  - 扩展上报了 `adspowerProfile`（或数字 `instanceName`）时，先查 `/api/v1/user/list?page_size=100` 批量缓存并按 `serial_number` 或 `user_id` 精确匹配；若批量列表未命中，再用 `serial_number` 或 `user_id` 过滤参数查一次（仍走全局限速队列），仍无精确匹配时记为 `未找到环境`（不拿列表第一条顶替）；
+  - 扩展未填且仍为默认 `未命名浏览器环境` 时，仅当本机只有 1 个扩展上报且 `/api/v1/browser/local-active` 恰好返回 1 个已打开环境时，取其 `user_id` / `serial_number` 并查 `/api/v1/user/list?page_size=100`（未命中时带过滤参数再查一次）取 `name`；
+  - 若 `name` 为空或本地 API 未开启/查询失败，按顺序回退显示 `serial_number`、`user_id`、`instanceName`（已有解析结果的保留上次名称），记录 `labelSource` / `labelSourceText` 调试字段，并将失败原因（`连接失败` / 未配置 API key 时 `需要在额度设置填写 AdsPower API key` / 已带 key 仍被拒时 `API key 无效，请在额度设置重新填写` / `被限流` / `未找到环境`）写入该环境额度详情行（`环境名称: AdsPower 查询失败（原因）`），不影响额度上报。
 - 持久化到状态目录 `browser-usage.json`，权限 0600，先写临时文件再改名（写法同 `browser-bridge.ts` 的 `save`）。只在 `status`、`reason`、窗口、名称、AdsPower 字段变化或多实例清理单环境自动识别结果时立即写入，或距上次写入超过 1 小时时写入。
 - 超过 3 天没有收到 POST 的记录，在读取时删除。
 
@@ -327,7 +327,7 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
    - 用户把这个标签页切走、改地址或关闭时，扩展不强行改回，下一轮再按规则处理（地址不再是用量页面时，视为不再由扩展维护，另开一个）。
 2. **面板条目名称使用 AdsPower（SunBrowser）环境名称（2026-11-08 用户决定）**：
    - 不再读取 `claude.ai` 前端缓存 IndexedDB 中的邮箱。
-   - 由插件服务端通过 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，超时 3 秒，支持在插件“额度设置”配置页填写 AdsPower API key 并仅保存在本机 0600 状态文件中，不写日志、不返回前端，前端只显示“已配置/未配置”，可清除、可重新填写，保留环境变量作为后备来源；全局请求队列间隔至少 1.1 秒）按 `serial_number` 或 `user_id`（或本机唯一活跃环境且唯一上报扩展时的 `/api/v1/browser/local-active`）查询环境 `name`，按 `user_id` 缓存并在首次出现、序号变化或满 10 分钟时才查询；要准确显示名称需在扩展选项页填一次环境序号，单环境自动识别只在单个活跃环境且单个扩展上报时生效；读不到名称时按顺序回退显示环境序号、`user_id` 或扩展上报的 `instanceName`，并在额度详情行写出失败原因（连接失败 / 需要在额度设置填写 AdsPower API key / 需要 api key / 被限流 / 未找到环境）及在记录中保存 `labelSource` / `labelSourceText` 供验收核对。
+   - 由插件服务端通过 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，超时 3 秒，支持在插件“额度设置”配置页填写 AdsPower API key 并仅保存在本机 0600 状态文件中，不写日志、不返回前端，前端显示“已配置/已配置（来自环境变量）/未配置”且来自环境变量时隐藏清除按钮，可清除、可重新填写，保留环境变量作为后备来源；全局请求队列间隔至少 1.1 秒）按 `serial_number` 或 `user_id`（或本机唯一活跃环境且唯一上报扩展时的 `/api/v1/browser/local-active`）查询环境 `name`，按 `user_id` 缓存并在首次出现、序号变化或满 10 分钟时才查询；要准确显示名称需在扩展选项页填一次环境序号，单环境自动识别只在单个活跃环境且单个扩展上报时生效；读不到名称时按顺序回退显示环境序号、`user_id` 或扩展上报的 `instanceName`，并在额度详情行写出失败原因（连接失败 / 需要在额度设置填写 AdsPower API key / API key 无效，请在额度设置重新填写 / 被限流 / 未找到环境）及在记录中保存 `labelSource` / `labelSourceText` 供验收核对。
 
 已知限制（不需要决定，除非有反馈）：
 
