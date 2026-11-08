@@ -1,0 +1,363 @@
+{
+ "source": "claude.ai 测试会话，2026-11-08，SunBrowser 29 号环境，界面语言 en-US",
+ "note": "一次两题时分页显示的第 1 页（单选）。外层带 data-tool-anchor（工具调用编号，已替换为占位符）；有“1 of 2”、上一题/下一题图标按钮；主按钮文字是 Next。",
+ "format": "[标签, 属性, ...子节点]；子节点为字符串时是文本；属性名以“.”开头的是元素运行时属性（checked、value、disabled）",
+ "tree": [
+  "div",
+  {},
+  [
+   "div",
+   {
+    "data-find-omitted": "",
+    "data-item-key": "msg_TEST1:card:toolu_TEST1"
+   },
+   [
+    "div",
+    {
+     "data-tool-anchor": "toolu_TEST1"
+    },
+    [
+     "div",
+     {
+      "data-question-card-slot": "",
+      "data-find-omitted": ""
+     },
+     [
+      "div",
+      {
+       "data-approval-card-root": ""
+      },
+      [
+       "div",
+       {
+        "tabindex": "-1",
+        "role": "group",
+        "aria-label": "测试多题一：选颜色？",
+        "data-approval-card-root": "",
+        "data-skip-approval-enter": "",
+        "data-approval-presentation": "card",
+        "data-fixed-code-size": ""
+       },
+       [
+        "div",
+        {},
+        [
+         "div",
+         {},
+         "测试多题一：选颜色？"
+        ],
+        [
+         "span",
+         {},
+         [
+          "button",
+          {
+           "type": "button",
+           "disabled": "",
+           "data-cds": "Button",
+           "data-cds-icon-only": "",
+           "data-cds-ghost": "",
+           "data-size": "sm",
+           "aria-label": "Show previous question",
+           "id": "_r_r2_",
+           "data-base-ui-tooltip-trigger": ""
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "data-cds-part": "paint"
+            }
+           ]
+          ],
+          [
+           "span",
+           {},
+           [
+            "span",
+            {
+             "data-cds": "Icon",
+             "data-cds-mirror": "",
+             "aria-hidden": "true"
+            },
+            ""
+           ]
+          ]
+         ],
+         [
+          "span",
+          {},
+          "1 of 2"
+         ],
+         [
+          "button",
+          {
+           "type": "button",
+           "data-cds": "Button",
+           "data-cds-icon-only": "",
+           "data-cds-ghost": "",
+           "data-size": "sm",
+           "aria-label": "Show next question",
+           "id": "_r_r5_",
+           "data-base-ui-tooltip-trigger": ""
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "data-cds-part": "paint"
+            }
+           ]
+          ],
+          [
+           "span",
+           {},
+           [
+            "span",
+            {
+             "data-cds": "Icon",
+             "data-cds-mirror": "",
+             "aria-hidden": "true"
+            },
+            ""
+           ]
+          ]
+         ]
+        ]
+       ],
+       [
+        "span",
+        {
+         "data-approval-allow": ""
+        },
+        [
+         "div",
+         {},
+         [
+          "button",
+          {
+           "type": "button",
+           "aria-pressed": "true",
+           "data-question-answer": ""
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true",
+            "data-checked": ""
+           },
+           [
+            "span",
+            {}
+           ]
+          ],
+          [
+           "div",
+           {
+            "id": "_r_r8_"
+           },
+           [
+            "div",
+            {},
+            "PASEO_RED"
+           ],
+           [
+            "div",
+            {},
+            "红"
+           ]
+          ]
+         ],
+         [
+          "button",
+          {
+           "type": "button",
+           "aria-pressed": "false",
+           "data-question-answer": ""
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true",
+            "data-unchecked": ""
+           }
+          ],
+          [
+           "div",
+           {
+            "id": "_r_r9_"
+           },
+           [
+            "div",
+            {},
+            "PASEO_BLUE"
+           ],
+           [
+            "div",
+            {},
+            "蓝"
+           ]
+          ]
+         ],
+         [
+          "div",
+          {},
+          [
+           "button",
+           {
+            "type": "button",
+            "aria-pressed": "false",
+            "aria-label": "Other",
+            "data-question-answer": ""
+           }
+          ],
+          [
+           "div",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "aria-hidden": "true",
+             "data-unchecked": ""
+            }
+           ],
+           [
+            "span",
+            {
+             "aria-hidden": "true"
+            },
+            "Other"
+           ]
+          ]
+         ]
+        ]
+       ],
+       [
+        "span",
+        {
+         "role": "status",
+         "data-find-omitted": ""
+        }
+       ],
+       [
+        "div",
+        {},
+        [
+         "span",
+         {
+          "data-approval-allow": ""
+         },
+         [
+          "button",
+          {
+           "type": "button",
+           "data-cds": "Button"
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "data-cds-part": "paint"
+            }
+           ]
+          ],
+          [
+           "span",
+           {},
+           "Skip"
+          ]
+         ],
+         [
+          "button",
+          {
+           "type": "button",
+           "data-cds": "Button",
+           "aria-keyshortcuts": "Meta+Enter"
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "data-cds-part": "paint"
+            }
+           ]
+          ],
+          [
+           "span",
+           {},
+           "Next",
+           [
+            "span",
+            {
+             "aria-hidden": "true",
+             "data-cds": "Shortcut",
+             "data-variant": "keycap"
+            },
+            [
+             "kbd",
+             {},
+             [
+              "span",
+              {
+               "aria-hidden": "true"
+              },
+              "⌘"
+             ],
+             [
+              "span",
+              {},
+              "Command"
+             ]
+            ],
+            [
+             "kbd",
+             {},
+             [
+              "span",
+              {
+               "aria-hidden": "true"
+              },
+              "⏎"
+             ],
+             [
+              "span",
+              {},
+              "Enter"
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ],
+   [
+    "div",
+    {
+     "data-find-omitted": ""
+    }
+   ]
+  ]
+ ]
+}

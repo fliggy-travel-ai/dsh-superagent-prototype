@@ -3,7 +3,7 @@
 需求：fliggy-travel-ai/deepseek-harness#1704 与 #1707 的交接部分。
 基线：`origin/main` = `021ed85`（插件内容等于两台 Mac 部署的 `db43b07`）。分支 `1704-answer-web-request`。
 输入：方案雏形（主会话本地 `plans/odd/scheme-draft.md`）；用户决定 #1704 评论 6720538414（分层）、6720692225（本方案第 7 节三个问题和测试会话）；商定接口 #1704 评论 6717458097、6717464101。
-状态：主会话已审核同意（2026-11-08）。代码由 MacBook 的 Argon 会话从第 5 节步骤 1 开始写。第 6.2 节真实页面取证进行中，结果补进本文件。
+状态：主会话已审核同意（2026-11-08）。代码由 MacBook 的 Argon 会话从第 5 节步骤 1 开始写。第 6.2 节真实页面取证已完成，第 2.9 节已按样本修订。
 
 ---
 
@@ -115,7 +115,7 @@ claude.ai 页面显示权限框
    - 新鲜环境都没有这个会话、没有陈旧环境：`page_not_open`。
    - 两个以上环境打开了这个会话：`unknown`（`multiple_instances`）。
    - 恰好一个新鲜环境打开了这个会话：选它。
-4. **找网页提问。** 在该环境、该会话的网页提问里，找问题结构与 `expected.input.questions` 完全相同的一条：题数和顺序、每题原文（压缩空白后）、单选或多选、选项标签集合都相同（页面上的“其他”项不算选项；标签比较规则按第 6.2 节样本确定）。有“其他”文本的题，网页提问该题必须 `allowOther` 为真，否则 `unknown`（`other_not_on_page`）。网页提问必须在 10 秒内被扫描到过。
+4. **找网页提问。** 在该环境、该会话的网页提问里，先按 `toolUseId` 过滤（网页提问带编号时必须与请求相同，见第 6.2 节第 2 条），再找问题结构与 `expected.input.questions` 完全相同的一条：题数和顺序、每题原文（压缩空白后）、单选或多选、选项标签集合都相同（页面上的“其他”项不算选项；标签比较规则按第 6.2 节样本确定）。有“其他”文本的题，网页提问该题必须 `allowOther` 为真，否则 `unknown`（`other_not_on_page`）。网页提问必须在 10 秒内被扫描到过。
    - 没找到时最多等 10 秒（页面上有提问时扩展每 2 秒同步一次）。仍没找到：该会话本次扫描完整（`observedSessionIds` 含它）时返回 `unknown`（`not_found`），否则 `unknown`（`scan_incomplete`）。
    - 找到两条以上：`unknown`（`multiple_candidates`）。
 5. **转交。** 调用 `PresenceRuntime.delegateBrowserAnswer(网页提问编号, answers, otherAnswers, source)`。它在现有 `decisions` 表里放入这条答案，不受在线离线模式限制（决策已在上游完成），但仍受“暂停”、模式切换代次、插件停止的约束。之后走现有通路：同步时下发（5 秒有效期）、扩展复核后点击、下次同步回执。
@@ -136,8 +136,9 @@ claude.ai 页面显示权限框
 4. **云端会话的网页提问永不自动作答**（用户决定第 7.1 条）。云端会话集合取自两处：会话清单里 `provider === 'cloud-session'` 的 agent 的 `cloud-session.id` 标签（`cse_<后缀>` → 内部编号 `<后缀>`）；待处理原生请求的 `metadata.webSessionId`。属于这个集合的网页提问：
    - 有结构相同的待处理云端提问时，设 `delegatedTo`（原生提问编号），不在人工待办里显示，不处理。
    - 没有对应云端提问时（钩子约 3 秒的通知延迟，或同步失败），仍显示在人工待办，原因“云端会话提问，等待同步到 Paseo；只接受人工回答”。离线也不代答。
+   - 分页提问（`pages > 1`）在网页侧只能读到当前页，题目不完整：不在人工待办里接受作答，原因“多题提问，请在 Paseo 云端提问或 claude.ai 作答”；非云端会话的分页提问也不离线代答。
 5. **自由文本。**
-   - `QuestionPromptSchema` 加可选字段 `allowOther`；`QuestionAnswerSchema` 加可选字段 `otherAnswers`（问题原文 → 文本），`answers` 每题的数组允许为空（由 `validateAnswers` 按 2.2 校验）。`BrowserDecisionSchema` 加 `otherAnswers`（可选）和 `source`（`automatic` | `manual`）。
+   - `QuestionPromptSchema` 加可选字段 `allowOther`；`QuestionAnswerSchema` 加可选字段 `otherAnswers`（问题原文 → 文本），`answers` 每题的数组允许为空（由 `validateAnswers` 按 2.2 校验）。`BrowserDecisionSchema` 加 `otherAnswers`（可选）和 `source`（`automatic` | `manual`）。`BrowserQuestionSchema` 加可选字段 `toolUseId` 和 `pages`（分页提问的总页数；这时 `prompts` 只有当前页的题目，执行器按 `toolUseId`、题数和第 1 页结构匹配，其余页由扩展逐页复核）。
    - `nativeResponse`：云端请求（`provider === 'cloud-session'`）发结构化格式 `{ answers: 问题原文 → 标签数组, otherAnswers }`；Claude Code 本地会话的 `AskUserQuestion` 按 Claude Code 约定转字符串：单选“其他”时值为文本，多选时为 `标签1, 标签2, 文本`；多选标签含逗号时仍拒绝（现有规则）。
    - 待核实（步骤 2 用守护进程集成测试或真机证明）：Paseo 把 `respond` 的 `updatedInput` 原样传给插件 Provider，包括额外字段 `otherAnswers`。如果 Paseo 丢掉额外字段，改为在 `answers` 值里放 `{ labels, other }` 对象；仍不行就退回字符串格式并接受 2.3 的已知限制。
 6. **给执行器的三个方法**：`browserCandidates(instanceId, sessionId)`、`delegateBrowserAnswer(id, answers, otherAnswers, source)`、`browserState(id)`。
@@ -162,15 +163,22 @@ claude.ai 页面显示权限框
 - `index.server.ts`：交接函数改为 `async request => (await readyBrowser()).answerWebRequest(request)`；把登记表和执行器传给云端模块和在线离线运行时；注册 `web-request.audit`。
 - `client/presence-panel.tsx`：`allowOther` 为真的题显示“其他”输入框。单选时输入文字会清除已选选项，点选选项会清空文字；多选时可以同时有。完成判定和提交按 2.2 规则，提交时带 `otherAnswers`。已提交答案的回显也显示“其他”文本。
 
-### 2.9 扩展（改 `background.js` 两个函数、`questions.js`、`manifest.json` 版本）
+### 2.9 扩展（改 `background.js` 两个函数、`questions.js`、`approval.js`、`manifest.json` 版本）
 
-- `background.js`：`cleanQuestion` 保留每题的 `allowOther`；`cleanDecision` 保留 `otherAnswers`（每题最长 2000 字符）和 `source`。消息入口和同步流程不改。
-- `questions.js`：
-  1. **关键词拦截只对自动代答生效。** `SENSITIVE` 命中时，`source === 'manual'` 的 decision 照常执行；`automatic` 或没有 `source` 时仍返回 `unknown`。读到的推荐标记处理不变（命中关键词时不报推荐项，离线不会代答）。
-  2. **“其他”输入框。** 按样本识别每题的“其他”控件和输入框，该题报 `allowOther: true`，“其他”项不算选项。执行时：单选先选中“其他”项（如果它是单选控件），多选按需要勾选；用 `HTMLInputElement.prototype`（或 `HTMLTextAreaElement.prototype`）的 `value` 设置器写入文本并派发 `input` 事件；150 毫秒后核对输入框的值和每题选中状态；不一致返回 `unknown`。
-  3. **一次多个问题。** 同屏显示多题时沿用现有逻辑（一个容器、多个题组、唯一提交按钮）。如果样本显示是分页（每页一题，有“下一题”），增加分步执行：每页复核题目与计划一致 → 点选 → 点语义明确的“下一题”按钮 → 重新读取下一页 → 最后一页点提交；任何一页不一致就停下返回 `unknown`。
-  4. 识别时排除顶部模式切换（`[data-cds=SegmentedControl]`）。
-  5. 其他识别差异按第 6.2 节样本修改。
+第 6.2 节样本证明：现有 `questions.js` 读不出真实提问卡片（只读消息 `read-questions` 返回空数组）；现有 `approval.js` 点不到 MCP 工具权限卡片上的“允许一次”。两个脚本都要按样本改。
+
+- `background.js`：`cleanQuestion` 保留每题的 `allowOther` 和每条提问的 `toolUseId`；`cleanDecision` 保留 `otherAnswers`（每题最长 2000 字符）和 `source`。消息入口和同步流程不改。
+- `questions.js` 增加 claude.ai 提问卡片识别分支（保留现有表单识别分支）：
+  1. **卡片。** `[role=group][data-approval-card-root]`，`aria-label` 等于题目原文（`aria-label` 不以 `Permission request:` 开头）。外层 `[data-tool-anchor]` 的值是工具调用编号（`toolu_…`），作为提问的 `toolUseId` 上报。卡片不在 `form` 或对话框里。
+  2. **选项。** `button[data-question-answer]`，选中状态是 `aria-pressed="true"`。标签取按钮内第一个 `div > div` 的文字，说明取第二个；不用按钮的 `innerText`（里面有图标字体私用区字符，例如 U+E03B）。带 `aria-label="Other"` 的按钮是“其他”，不算选项，该题报 `allowOther: true`。
+  3. **单选和多选。** 卡片里 `[role=status]` 的文字是 `N selected` 时为多选，否则为单选。单选题第一个选项默认已选中，所以执行时必须明确点击目标选项，不能假设初始状态为空。
+  4. **“其他”文本。** 点击“其他”按钮后才出现 `textarea[data-cds=TextArea][aria-label="Other option"]`。单选时点“其他”会取消已选选项。写入方法已在真实页面验证：用 `HTMLTextAreaElement.prototype` 的 `value` 设置器写入，再派发冒泡的 `input` 事件。
+  5. **分页。** 一次多题时每页一题，卡片标题区有 `N of M` 和 `Show previous question`、`Show next question` 图标按钮。主按钮文字：非最后一页是 `Next`，最后一页是 `Submit`；另有 `Skip`。页面一次只渲染当前页，所以读取时只能看到第 1 页：上报 `pages: M`、当前页题目；服务端按 `toolUseId` 和第 1 页结构匹配，其他页在执行时逐页复核。翻页后已选内容保留（已验证）。
+  6. **执行。** 逐页：复核 `aria-label`、页码、选项标签与计划一致 → 点击目标选项使 `aria-pressed` 与计划一致 → 需要时点“其他”并写入文本 → 150 毫秒后核对 → 点主按钮（`Next` 或最后一页的 `Submit`）→ 等新页渲染再复核。任何一页不一致返回 `unknown`。最后一页的主按钮 `disabled` 时返回 `unknown`。不点 `Skip`。
+  7. **关键词拦截只对自动代答生效。** `SENSITIVE` 命中时，`source === 'manual'` 的 decision 照常执行；`automatic` 或没有 `source` 时返回 `unknown`。读取时命中关键词仍不报推荐项。
+  8. 程序化 `element.click()` 对选项、“其他”、`Next`、`Submit` 都有效（已验证），不需要模拟鼠标事件。
+  9. 识别时排除顶部模式切换（`[data-cds=SegmentedControl]`）和权限卡片。
+- `approval.js`（用户决定“权限由扩展自动点同意”的前提）：MCP 工具权限卡片 `[role=group][data-approval-card-root][aria-label^="Permission request:"]` 上可见按钮只有 `Deny` 和 `Always allow`（本会话有效），“允许一次”在 `button[aria-label="More allow options"]` 打开的菜单里（`[role=menu][data-cds=Menu]` 挂在 `body` 下，菜单项 `[role=menuitem]` 文字 `Allow once`）。现有脚本找不到可见的 `Allow once` 按钮，所以不点击（扩展记录里没有这次预约），云端会话一直等待。修改：在权限卡片上没有可见的一次性按钮、但有 `More allow options` 时，先预约，再点开菜单，只点文字完全等于 `Allow once` 的菜单项；菜单里没有它时按 `Escape` 关闭菜单并记 `skipped`。永不点 `Always allow`。程序化点击菜单项已在真实页面验证有效，云端继续执行、Paseo 待处理请求随之清除。
 - `manifest.json` 版本升到 0.5.0。
 
 ---
@@ -213,7 +221,7 @@ claude.ai 页面显示权限框
 | 2 | 在线离线运行时和问答工具：云端提问按普通提问处理、答复后保持“已提交”、登记答案来源、云端会话网页提问不自动作答和转交隐藏、自由文本 schema 和校验、`nativeResponse` 两种格式、三个给执行器的方法；核实 Paseo 是否原样传递 `updatedInput` 额外字段。 | `tests/presence.test.ts`、问答工具测试新增用例通过；`npm run check` 通过。推送、交付回报。 |
 | 3 | 执行器、登记表、桥接方法、入口注入、审计 RPC。 | 执行器测试（假桥接、假运行时）覆盖第 2.5 节全部分支；`npm run check` 通过。推送、交付回报。 |
 | 4 | 人工待办界面的“其他”输入框。 | UI 测试（`tests/ui/`）覆盖单选互斥、多选并存、完成判定；`npm run check` 通过。推送、交付回报。 |
-| 5 | 扩展：`background.js` 两个函数、`questions.js` 关键词按来源、“其他”输入框、多问题（同屏或分页，按第 6.2 节样本）、版本 0.5.0。 | 基于第 6.2 节真实样本夹具的测试通过；`npm run check` 通过。推送、交付回报。 |
+| 5 | 扩展：`background.js` 两个函数、`questions.js` 的 claude.ai 卡片识别和逐页执行（含“其他”、关键词按来源）、`approval.js` 的“More allow options → Allow once”、版本 0.5.0。 | 基于 `tests/fixtures/claude-web/` 真实样本的测试通过；`npm run check` 通过。推送、交付回报。 |
 | 6 | 真机验收（第 9 节）。部署和扩展更新由主会话协调窗口。 | 场景证据写入 #1704，主会话复核。 |
 
 步骤 1～4 不依赖页面样本。步骤 5 依赖第 6.2 节。第 2 步的行为变化（离线时云端提问会被自动代答）只在第 3 步完成后一起部署，否则代答结果只会得到“请在 claude.ai 作答”。
@@ -232,11 +240,31 @@ claude.ai 页面显示权限框
 4. 页面上的 `data-testid` 锚点：`transcript-rows`、`transcript-after-rows`、`transcript-before-cards`、`transcript-trailing-slot`、`transcript-tail-slot`、`code-prompt-input`、`code-prompt-send` 等。
 5. 扩展存储（打开扩展选项页只读读取后关闭该页）：已配对；环境名称没有设置（同步时显示“未命名浏览器环境”）；自动点同意记录只有 1 条：07:44:05 UTC 点击“Allow once”，1.5 秒后按钮仍可见（`still-visible`）；`questionState` 不存在，说明网页提问通路从没在真实页面上下发过答案。
 
-### 6.2 测试会话取证（进行中）
+### 6.2 测试会话取证（已完成，2026-11-08 11:05–11:20 UTC）
 
-方式：在 29 号环境新开标签页建专用测试会话。先装只读 DOM 记录器（MutationObserver，只把候选卡片的脱敏元素树存到页面变量，不点击），再经 Paseo 给测试会话发指令触发请求。另用扩展选项页向测试标签页发现有只读消息 `read-questions`，直接证明 `questions.js` 能否读出提问。覆盖：单选、多选、一次多个问题、“其他”输入框、权限框。脱敏样本放 `paseo-github-subscriptions/tests/fixtures/claude-web/`。
+方式：在 29 号环境新开标签页，自建测试云端会话 `session_01XKJ85hZUQLht46hyFAk6Ec`（标题“网页作答验收测试”，Default 云环境，仓库 dsh-superagent-prototype，权限模式 Accept edits），Paseo agent `a289cb98-d2a7-4ba8-9d4a-347b18cd61f2`（provider `cloud-session`）。先装只读 DOM 记录器，再经 Paseo 给测试会话发指令触发请求。作答在测试页上用 CDP 执行与扩展相同的程序化方法（`element.click()`、`value` 设置器 + `input` 事件），同时验证执行方法。业务会话标签页没有操作。
 
-结果待补。
+样本（脱敏，工具调用编号和消息编号换成占位符）：`paseo-github-subscriptions/tests/fixtures/claude-web/`
+
+| 文件 | 内容 |
+| --- | --- |
+| `question-single.json` | 单选题初始状态（第一个选项默认已选中） |
+| `question-single-other.json` | 单选题点“其他”后（出现文本框） |
+| `question-multi.json` | 多选题初始状态（标签含逗号，`0 selected`，Submit 不可用） |
+| `question-paged-1.json`、`question-paged-2.json` | 一次两题，分页的第 1 页和第 2 页 |
+| `permission-mcp.json`、`permission-mcp-menu.json` | MCP 工具权限卡片和“More allow options”菜单 |
+| `answers-observed.json` | 三次作答后云端 Claude 收到的回答原文 |
+
+核对结论：
+
+1. **现有 `questions.js` 读不出真实提问卡片。** 提问在页面上显示时，经扩展只读消息 `read-questions` 读取测试标签页，返回 `{"questions": []}`。原因：卡片不在 `form` 或对话框里，选项是 `button[aria-pressed]`，不是单选框或复选框。第 2.9 节加识别分支。
+2. **结构**：见第 2.9 节第 1～5 条。卡片外层 `[data-tool-anchor]` 带工具调用编号，和 Paseo 待处理请求的编号格式一致（`toolu_…`；权限请求已核对 Paseo `PendingPermissions[0].id` 与云端工具调用编号相同）。执行器第 4 步匹配时，提问带 `toolUseId` 就必须与请求的 `toolUseId` 相同，再核对结构；这比只按结构匹配更可靠，同一会话里结构相同的两次提问也能区分。
+3. **执行方法已验证。** 单选只填“其他”、多选两项加“其他”、两题分页（第 1 页单选、第 2 页多选加“其他”）三次都提交成功，云端收到的回答与页面操作一致（`answers-observed.json`）。翻回上一页再翻回，已选内容和“其他”文本保留。提交后卡片从页面移除，记录里只留不可操作的问答摘要。
+4. **云端收到的回答格式**：单选“其他”时值是文本本身；多选时是 `其他文本,标签1,标签2`（“其他”在前，英文逗号无空格连接）。这只影响云端会话自己解析，不影响插件。
+5. **`approval.js` 不误点提问卡片。** 三次提问期间扩展点同意记录没有新增。
+6. **权限框。** 在这个云环境里，Bash（包括 `dangerouslyDisableSandbox: true`）和 WebFetch 都没有弹权限框，直接执行；Paseo MCP 工具 `list_hosts` 弹了权限框。MCP 权限卡片的“允许一次”藏在下拉菜单里，现有 `approval.js` 没有点击，请求一直等待；用程序化点击菜单项 `Allow once` 后云端继续执行，Paseo 待处理请求清除。第 2.9 节修改 `approval.js`。卡片本身没有工具调用编号。
+7. 07:44 UTC 业务会话那次“Allow once / still-visible”记录对应的卡片样式没有样本；可能是可见的一次性按钮样式（其他工具类型）。新的 `approval.js` 两种样式都支持。
+8. 同一会话两个标签页的情况没有取证，留给真机验收场景 10。
 
 ---
 
@@ -269,7 +297,8 @@ claude.ai 页面显示权限框
 | `tests/automation.test.ts`（改） | 云端请求不被原生权限自动审批 |
 | `tests/browser-bridge.test.ts`（改） | `answerWebRequest` 转调执行器；`freshSessions` 只返回新鲜记录 |
 | `tests/browser-extension.test.ts`（改） | `cleanQuestion` 保留 `allowOther`；`cleanDecision` 保留 `otherAnswers`、`source`，超长文本拒绝 |
-| `tests/browser-questions.test.ts`（改） | 第 6.2 节真实样本夹具：单选、多选、多问题、“其他”输入框读取和写入；模式切换单选组不算提问；关键词提问在 `manual` 时执行、`automatic` 时拒绝；写入后核对失败返回 `unknown` |
+| `tests/browser-approval.test.ts`（改） | `permission-mcp.json` 样本：打开菜单只点 `Allow once`；菜单里没有时关闭菜单、记 `skipped`；永不点 `Always allow` |
+| `tests/browser-questions.test.ts`（改） | 第 6.2 节真实样本夹具：卡片识别和 `toolUseId`；单选默认已选中时仍点击目标；分页逐页执行；单选、多选、多问题、“其他”输入框读取和写入；模式切换单选组不算提问；关键词提问在 `manual` 时执行、`automatic` 时拒绝；写入后核对失败返回 `unknown` |
 | `tests/ui/`（改） | 人工待办“其他”输入框：单选互斥、多选并存、完成判定、回显 |
 
 每步都跑 `npm run check`（类型检查 + 全部测试）。
@@ -315,7 +344,8 @@ claude.ai 页面显示权限框
 | `index.server.ts` | 注入和 RPC 注册 | 改 10 |
 | `client/presence-panel.tsx` | “其他”输入框 | 改 40 |
 | `browser-extension/background.js` | `cleanQuestion`、`cleanDecision` | 改 10 |
-| `browser-extension/questions.js` | 2.9（按样本） | 改 80～150 |
+| `browser-extension/questions.js` | 2.9（claude.ai 卡片识别、逐页执行） | 改 150～200 |
+| `browser-extension/approval.js` | 2.9（下拉菜单里的 Allow once） | 改 30 |
 | `browser-extension/manifest.json` | 版本 0.5.0 | 改 1 |
 | `tests/*`、`tests/fixtures/claude-web/*` | 第 8 节 | 800 |
 | `README.md`、`browser-extension/README.md` | 网页作答说明、权限只显示、自由文本、已知限制 | 30 |

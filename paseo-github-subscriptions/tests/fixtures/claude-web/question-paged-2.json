@@ -1,0 +1,410 @@
+{
+ "source": "claude.ai 测试会话，2026-11-08，SunBrowser 29 号环境，界面语言 en-US",
+ "note": "一次两题时的第 2 页（多选），主按钮文字是 Submit。选项按钮文字里有图标字体的私用区字符，取标签时要用选项内第一个 div 的文字。",
+ "format": "[标签, 属性, ...子节点]；子节点为字符串时是文本；属性名以“.”开头的是元素运行时属性（checked、value、disabled）",
+ "tree": [
+  "div",
+  {
+   "data-find-omitted": "",
+   "data-item-key": "msg_TEST1:card:toolu_TEST1"
+  },
+  [
+   "div",
+   {
+    "data-tool-anchor": "toolu_TEST1"
+   },
+   [
+    "div",
+    {
+     "data-question-card-slot": "",
+     "data-find-omitted": ""
+    },
+    [
+     "div",
+     {
+      "data-approval-card-root": ""
+     },
+     [
+      "div",
+      {
+       "tabindex": "-1",
+       "role": "group",
+       "aria-label": "测试多题二：选形状？",
+       "data-approval-card-root": "",
+       "data-skip-approval-enter": "",
+       "data-approval-presentation": "card",
+       "data-fixed-code-size": ""
+      },
+      [
+       "div",
+       {},
+       [
+        "div",
+        {},
+        "测试多题二：选形状？"
+       ],
+       [
+        "span",
+        {},
+        [
+         "button",
+         {
+          "type": "button",
+          "data-cds": "Button",
+          "data-cds-icon-only": "",
+          "data-cds-ghost": "",
+          "data-size": "sm",
+          "aria-label": "Show previous question",
+          "id": "_r_r2_",
+          "data-base-ui-tooltip-trigger": "",
+          ".disabled": false
+         },
+         [
+          "span",
+          {
+           "aria-hidden": "true"
+          },
+          [
+           "span",
+           {
+            "data-cds-part": "paint"
+           }
+          ]
+         ],
+         [
+          "span",
+          {},
+          [
+           "span",
+           {
+            "data-cds": "Icon",
+            "data-cds-mirror": "",
+            "aria-hidden": "true"
+           },
+           ""
+          ]
+         ]
+        ],
+        [
+         "span",
+         {},
+         "2 of 2"
+        ],
+        [
+         "button",
+         {
+          "type": "button",
+          "data-cds": "Button",
+          "data-cds-icon-only": "",
+          "data-cds-ghost": "",
+          "data-size": "sm",
+          "aria-label": "Show next question",
+          "id": "_r_r5_",
+          "data-base-ui-tooltip-trigger": "",
+          "disabled": "",
+          ".disabled": true
+         },
+         [
+          "span",
+          {
+           "aria-hidden": "true"
+          },
+          [
+           "span",
+           {
+            "data-cds-part": "paint"
+           }
+          ]
+         ],
+         [
+          "span",
+          {},
+          [
+           "span",
+           {
+            "data-cds": "Icon",
+            "data-cds-mirror": "",
+            "aria-hidden": "true"
+           },
+           ""
+          ]
+         ]
+        ]
+       ]
+      ],
+      [
+       "span",
+       {
+        "data-approval-allow": ""
+       },
+       [
+        "div",
+        {},
+        [
+         "button",
+         {
+          "type": "button",
+          "aria-pressed": "false",
+          "data-question-answer": "",
+          ".disabled": false
+         },
+         [
+          "span",
+          {
+           "data-unchecked": ""
+          }
+         ],
+         [
+          "div",
+          {
+           "id": "_r_ra_"
+          },
+          [
+           "div",
+           {},
+           "PASEO_CIRCLE"
+          ],
+          [
+           "div",
+           {},
+           "圆"
+          ]
+         ]
+        ],
+        [
+         "button",
+         {
+          "type": "button",
+          "aria-pressed": "false",
+          "data-question-answer": "",
+          ".disabled": false
+         },
+         [
+          "span",
+          {
+           "data-unchecked": ""
+          }
+         ],
+         [
+          "div",
+          {
+           "id": "_r_rb_"
+          },
+          [
+           "div",
+           {},
+           "PASEO_SQUARE"
+          ],
+          [
+           "div",
+           {},
+           "方"
+          ]
+         ]
+        ],
+        [
+         "button",
+         {
+          "type": "button",
+          "aria-pressed": "false",
+          "data-question-answer": "",
+          ".disabled": false
+         },
+         [
+          "span",
+          {
+           "data-unchecked": ""
+          }
+         ],
+         [
+          "div",
+          {
+           "id": "_r_rc_"
+          },
+          [
+           "div",
+           {},
+           "PASEO_TRI"
+          ],
+          [
+           "div",
+           {},
+           "三角"
+          ]
+         ]
+        ],
+        [
+         "div",
+         {},
+         [
+          "button",
+          {
+           "type": "button",
+           "aria-pressed": "false",
+           "aria-label": "Other",
+           "data-question-answer": "",
+           ".disabled": false
+          }
+         ],
+         [
+          "div",
+          {
+           "aria-hidden": "true"
+          },
+          [
+           "span",
+           {
+            "data-unchecked": ""
+           }
+          ],
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           "Other"
+          ]
+         ]
+        ]
+       ]
+      ],
+      [
+       "span",
+       {
+        "role": "status",
+        "data-find-omitted": ""
+       },
+       "0 selected"
+      ],
+      [
+       "div",
+       {},
+       [
+        "span",
+        {
+         "data-approval-allow": ""
+        },
+        [
+         "button",
+         {
+          "type": "button",
+          "data-cds": "Button",
+          ".disabled": false
+         },
+         [
+          "span",
+          {
+           "aria-hidden": "true"
+          },
+          [
+           "span",
+           {
+            "data-cds-part": "paint"
+           }
+          ]
+         ],
+         [
+          "span",
+          {},
+          "Skip"
+         ]
+        ],
+        [
+         "span",
+         {
+          "tabindex": "0",
+          "aria-describedby": "_r_re_",
+          "data-cds-disabled-reason-wrapper": "",
+          "id": "_r_rf_",
+          "data-base-ui-tooltip-trigger": ""
+         },
+         [
+          "button",
+          {
+           "type": "button",
+           "disabled": "",
+           "data-cds": "Button",
+           "aria-keyshortcuts": "Meta+Enter",
+           ".disabled": true
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "data-cds-part": "paint"
+            }
+           ]
+          ],
+          [
+           "span",
+           {},
+           "Submit",
+           [
+            "span",
+            {
+             "aria-hidden": "true",
+             "data-cds": "Shortcut",
+             "data-variant": "keycap"
+            },
+            [
+             "kbd",
+             {},
+             [
+              "span",
+              {
+               "aria-hidden": "true"
+              },
+              "⌘"
+             ],
+             [
+              "span",
+              {},
+              "Command"
+             ]
+            ],
+            [
+             "kbd",
+             {},
+             [
+              "span",
+              {
+               "aria-hidden": "true"
+              },
+              "⏎"
+             ],
+             [
+              "span",
+              {},
+              "Enter"
+             ]
+            ]
+           ]
+          ]
+         ],
+         [
+          "span",
+          {
+           "id": "_r_re_",
+           "data-cds-disabled-reason": ""
+          },
+          "Choose an option or skip this question"
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  [
+   "div",
+   {
+    "data-find-omitted": ""
+   }
+  ]
+ ]
+}
