@@ -6,18 +6,41 @@ import { EventTypeSchema } from './shared/model.ts';
 import * as rpc from './shared/contracts.ts';
 import { Runtime } from './server/runtime.ts';
 import { connectDaemon } from './server/daemon.ts';
+import { AutomationRuntime } from './server/automation.ts';
+import { automationPort } from './server/automation-port.ts';
+import { BrowserBridge } from './server/browser-bridge.ts';
+import * as automationRpc from './shared/automation.ts';
+import * as browserRpc from './shared/browser-contracts.ts';
+import * as presenceRpc from './shared/presence.ts';
+import { PresenceRuntime } from './server/presence.ts';
+import { PresenceHosts, presencePort } from './server/presence-port.ts';
+import { readGuardPresence } from './server/guard-presence.ts';
+import * as bluetoothRpc from './shared/bluetooth.ts';
+import { listBluetoothTargets, saveBluetoothTarget } from './server/bluetooth-target.ts';
+import { stalledSnapshot } from './shared/stalled.ts';
+import { StalledRuntime } from './server/stalled.ts';
+import { stalledPort } from './server/stalled-port.ts';
 
 export default function contribute(server: PluginServerContext) {
   let runtime: Runtime | null = null;
   let connection: Awaited<ReturnType<typeof connectDaemon>> | null = null;
   let stopped = false;
   let initializing: Promise<Runtime> | null = null;
+  let automation: AutomationRuntime | null = null;
+  let browser: BrowserBridge | null = null;
+  let presence: PresenceRuntime | null = null;
+  let presenceHosts: PresenceHosts | null = null;
+  let stalled: StalledRuntime | null = null;
+  let presenceInitializing: Promise<PresenceRuntime> | null = null;
+  let automationInitializing: Promise<AutomationRuntime> | null = null;
+  let browserInitializing: Promise<BrowserBridge> | null = null;
+  const home = process.env.PASEO_HOME ?? join(homedir(), '.paseo');
+  const directory = process.env.PASEO_GHSUB_STATE_DIR ?? join(home, 'github-subscriptions');
   const controller = new AbortController();
   const initialize = async () => {
-    const home = process.env.PASEO_HOME ?? join(homedir(), '.paseo');
     connection = await connectDaemon(home, controller.signal);
     if (stopped) { await connection.close(); throw new Error('插件已停止'); }
-    runtime = new Runtime(process.env.PASEO_GHSUB_STATE_DIR ?? join(home, 'github-subscriptions'), connection.paseo);
+    runtime = new Runtime(directory, connection.paseo);
     await runtime.start();
     if (stopped) await runtime.stop();
     return runtime;
@@ -35,6 +58,82 @@ export default function contribute(server: PluginServerContext) {
     return initializing;
   };
   void ready().catch(() => {});
+
+  const readyAutomation = () => {
+    if (stopped) return Promise.reject(new Error('插件已停止'));
+    automationInitializing ??= (async () => {
+      await ready();
+      automation = new AutomationRuntime(directory, automationPort(connection!.paseo, connection!.approve));
+      await automation.start();
+      if (stopped) await automation.stop();
+      return automation;
+    })().catch(async error => { await automation?.stop(); automationInitializing = null; throw error; });
+    return automationInitializing;
+  };
+  const readyPresence = () => {
+    if (stopped) return Promise.reject(new Error('插件已停止'));
+    presenceInitializing ??= (async () => {
+      await ready();
+      presenceHosts = new PresenceHosts(connection!.client);
+      presence = new PresenceRuntime(directory, presencePort(connection!, presenceHosts));
+      await presence.start();
+      if (stopped) await presence.stop();
+      return presence;
+    })().catch(async error => { await presence?.stop(); await presenceHosts?.stop(); presenceInitializing = null; throw error; });
+    return presenceInitializing;
+  };
+  const readyBrowser = () => {
+    if (stopped) return Promise.reject(new Error('插件已停止'));
+    browserInitializing ??= (async () => {
+      await ready();
+      browser = new BrowserBridge(directory, async agentId => {
+        const agent = (await connection!.paseo.agents.ref(agentId).refresh())?.agent;
+        return agent && !agent.archivedAt ? { id: agent.id, title: agent.title || '未命名 Paseo 会话' } : null;
+      }, async (...input) => (await readyPresence()).browserSync(...input));
+      await browser.start();
+      if (stopped) await browser.stop();
+      return browser;
+    })().catch(async error => { await browser?.stop(); browserInitializing = null; throw error; });
+    return browserInitializing;
+  };
+  void readyAutomation().catch(() => {});
+  void readyBrowser().catch(() => {});
+  void readyPresence().catch(() => {});
+
+  server.handle(presenceRpc.presenceSnapshot, async () => (await readyPresence()).snapshot());
+  server.handle(stalledSnapshot, async () => {
+    await readyPresence();
+    stalled ??= new StalledRuntime(stalledPort(connection!.client, presenceHosts!, () => runtime!.storage.state.preferences.enabled && !runtime!.storage.state.preferences.shadow
+      ? runtime!.storage.state.subscriptions.filter(subscription => !subscription.expiresAt || Date.parse(subscription.expiresAt) > Date.now()).map(subscription => subscription.agentId) : []));
+    return stalled.snapshot();
+  });
+  server.handle(presenceRpc.presenceConfigure, async input => (await readyPresence()).configure(input));
+  server.handle(presenceRpc.presenceAnswer, async input => (await readyPresence()).answer(input));
+  server.handle(presenceRpc.presenceRead, async input => (await readyPresence()).markRead(input));
+  server.handle(presenceRpc.presenceLocal, async () => readGuardPresence());
+  server.handle(presenceRpc.presenceSpeak, async ({ id, text }) => { await readyPresence(); return presenceHosts!.localSpeech(id, text); });
+  server.handle(presenceRpc.presenceSpeakCancel, async ({ id }) => ({ cancelled: presenceHosts?.localCancel(id) ?? false }));
+  server.handle(bluetoothRpc.bluetoothLocalList, async () => listBluetoothTargets());
+  server.handle(bluetoothRpc.bluetoothLocalSelect, async input => saveBluetoothTarget(input));
+  server.handle(bluetoothRpc.bluetoothList, async ({ hostId }) => {
+    const current = await readyPresence();
+    if (!presenceHosts!.sameHost(hostId, current.snapshot().settings.sourceHostId)) throw new Error('来源主机已变化，请刷新');
+    const result = await presenceHosts!.bluetooth(hostId);
+    if (!presenceHosts!.sameHost(hostId, current.snapshot().settings.sourceHostId)) throw new Error('来源主机已变化，请刷新');
+    return result;
+  });
+  server.handle(bluetoothRpc.bluetoothSelect, async ({ hostId, target }) => {
+    const current = await readyPresence();
+    return current.changeBluetoothTarget(hostId, (left, right) => presenceHosts!.sameHost(left, right), () => presenceHosts!.selectBluetooth(hostId, target));
+  });
+
+  server.handle(automationRpc.automationSnapshot, async () => (await readyAutomation()).snapshot());
+  server.handle(automationRpc.automationPause, async ({ paused }) => (await readyAutomation()).pause(paused));
+  server.handle(automationRpc.automationPolicy, async input => (await readyAutomation()).policy(input));
+  server.handle(browserRpc.browserSnapshot, async () => (await readyBrowser()).snapshot());
+  server.handle(browserRpc.browserConfigure, async input => (await readyBrowser()).configure(input));
+  server.handle(browserRpc.browserBind, async input => (await readyBrowser()).bind(input));
+  server.handle(browserRpc.browserPairing, async () => (await readyBrowser()).pairing());
 
   server.handle(rpc.snapshot, async () => (await ready()).snapshot());
   server.handle(rpc.unsubscribe, async ({ id }) => (await ready()).remove(id));
@@ -60,14 +159,23 @@ export default function contribute(server: PluginServerContext) {
       execute: (input, context) => result(current => current.read(input.target, input.resource, input.page), context) }),
   ];
   const removeOpen = server.addHook('agent.open.before', async ({ request }) => request.purpose === 'history' ? request : ({ ...request, tools: [...request.tools, ...tools.filter(tool => !request.tools.some(existing => existing.name === tool.name))] }));
-  const removeArchive = server.addHook('agent.archive.after', async ({ agent }) => { await (await ready()).archive(agent.id); });
+  const removeArchive = server.addHook('agent.archive.after', async ({ agent }) => {
+    await Promise.allSettled([ready().then(current => current.archive(agent.id)), readyAutomation().then(current => current.archive(agent.id))]);
+  });
+  const removeRequested = server.addHook('agent.permission.before', async () => { void readyAutomation().then(current => current.refresh()).catch(() => {}); void readyPresence().then(current => current.refresh()).catch(() => {}); });
+  const removeResolved = server.addHook('agent.permission.after', async ({ agent, requestId, resolution }) => { void readyAutomation().then(current => current.resolved(agent.id, requestId, resolution.behavior)).catch(() => {}); });
 
   return async () => {
     stopped = true;
     controller.abort();
     removeOpen();
     removeArchive();
+    removeRequested();
+    removeResolved();
     try { await initializing; } catch {}
+    await Promise.allSettled([automationInitializing, browserInitializing, presenceInitializing]);
+    await Promise.allSettled([automation?.stop(), browser?.stop(), presence?.stop()]);
+    await presenceHosts?.stop();
     await runtime?.stop();
     await connection?.close();
   };
