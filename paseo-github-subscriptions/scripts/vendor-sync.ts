@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { comparePaseoVendor, paseoVendors } from './paseo-vendor.ts';
 
 export interface VendorFile { source: string; target: string }
 
@@ -54,6 +55,16 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (check && drifted.length) {
     console.error(`同步副本与原型源文件不一致：${drifted.join('、')}。运行 node scripts/vendor-sync.ts 重新生成。`);
     process.exit(1);
+  }
+  if (check) {
+    const flag = process.argv.indexOf('--paseo-builtin');
+    const builtin = flag >= 0 ? process.argv[flag + 1] : undefined;
+    for (const vendor of paseoVendors) {
+      const different = comparePaseoVendor(join(roots.pluginRoot, 'server/vendor'), vendor, builtin);
+      if (different === null) console.log(`没有找到 Paseo 自带的 ${vendor.plugin}，跳过与自带文件的比较`);
+      else if (different.length) { console.error(`${vendor.plugin} 的副本与 Paseo 自带文件不一致：${different.join('、')}。原样重新复制，并更新 scripts/paseo-vendor.ts 里的版本和 OVERVIEW。`); process.exit(1); }
+      else console.log(`${vendor.plugin} 的副本与 Paseo 自带文件一致`);
+    }
   }
   console.log(check ? '同步副本与原型源文件一致' : drifted.length ? `已更新：${drifted.join('、')}` : '同步副本已是最新');
 }

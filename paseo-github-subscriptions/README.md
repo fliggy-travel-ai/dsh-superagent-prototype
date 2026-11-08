@@ -93,6 +93,10 @@ npm run test:daemon
 
 界面预览说明与复现命令见 [界面验收](validation/ui/README.md)。该预览使用真实客户端组件、假宿主和假 RPC，主题颜色为近似值，不能代替原生 Paseo 的生产验收。Mac Mini 已验证从胶囊进入全局页；用户报告的重复弹层尚未复现，根因待确认。手机系统面板、真实胶囊排序、MacBook 原生界面和二十四小时影子观测仍需验证。
 
+## 账号额度与问题答复模块（#1737 第二期）
+
+`usage.claudeAccounts`、`answer.quietChildren`、`answer.escalation` 三个模块和 `core/session-roles`（主会话 = 置顶工作区中的会话）。默认关闭，在 `machine.json` 的 `modules` 中打开；区块 `claudeAccounts`、`quietChildren`、`escalation` 见 `config/machine.example.json`。行为变化、旧状态迁移（只复制）、旧插件保护和已知限制见 [docs/answer-usage-modules.md](docs/answer-usage-modules.md)。
+
 ## 原型复用边界
 
 `server/vendor/dsh-superagent` 由 `scripts/vendor-sync.ts` 生成三个纯逻辑副本，只调整导入并记录原文件 SHA-256。`shim.ts` 是本插件适配层。漂移检查会在原型变更时失败，更新时运行 `node --experimental-strip-types scripts/vendor-sync.ts` 后检查差异。
