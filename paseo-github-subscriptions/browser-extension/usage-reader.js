@@ -21,70 +21,7 @@
       for (let i = 0; i < 6 && labelEl && row.parentElement && !row.contains(labelEl); i++) row = row.parentElement;
       return { label: labelEl?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
     });
-    let account = null;
-    try {
-      if (typeof indexedDB !== 'undefined' && typeof indexedDB?.open === 'function') {
-        const raw = await new Promise(resolve => {
-          let settled = false;
-          const finish = value => { if (!settled) { settled = true; resolve(value); } };
-          let openReq;
-          try {
-            openReq = indexedDB.open('keyval-store');
-          } catch {
-            finish(null);
-            return;
-          }
-          openReq.onupgradeneeded = () => {
-            try { openReq.transaction?.abort(); } catch {}
-            finish(null);
-          };
-          openReq.onerror = () => finish(null);
-          openReq.onblocked = () => finish(null);
-          openReq.onsuccess = () => {
-            const db = openReq.result;
-            try {
-              const names = db?.objectStoreNames;
-              const storeName = names?.contains?.('keyval') ? 'keyval' : names?.[0];
-              if (!storeName) {
-                try { db?.close?.(); } catch {}
-                finish(null);
-                return;
-              }
-              const tx = db.transaction(storeName, 'readonly');
-              const getReq = tx.objectStore(storeName).get('react-query-cache');
-              getReq.onsuccess = () => {
-                const value = getReq.result;
-                try { db?.close?.(); } catch {}
-                finish(value ?? null);
-              };
-              getReq.onerror = () => {
-                try { db?.close?.(); } catch {}
-                finish(null);
-              };
-            } catch {
-              try { db?.close?.(); } catch {}
-              finish(null);
-            }
-          };
-        });
-        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        const clientState = typeof parsed?.clientState === 'string' ? JSON.parse(parsed.clientState) : (parsed?.clientState ?? parsed);
-        const queries = Array.isArray(clientState?.queries) ? clientState.queries : Array.isArray(parsed) ? parsed : [];
-        for (const query of queries) {
-          const key = query?.queryKey;
-          const hasCurrentAccount = Array.isArray(key) && key[0] === 'current_account';
-          if (!hasCurrentAccount) continue;
-          const rawData = query?.state?.data ?? query?.data;
-          const data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
-          const email = data?.email_address ?? data?.account?.email_address;
-          if (typeof email === 'string' && email.trim()) {
-            account = email.trim();
-            break;
-          }
-        }
-      }
-    } catch {}
-    return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
+    return { path: location.pathname, title: document.title, rows, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
   }
 
   function isUsageUrl(value) {
@@ -156,8 +93,7 @@
     const fiveHour = parseWindowRow(sessionRow, nowMs, tzOffset, observedAt);
     const weekly = parseWindowRow(weekRow, nowMs, tzOffset, observedAt);
     if (!fiveHour || !weekly) return null;
-    const account = typeof data.account === 'string' && data.account.trim() ? data.account.trim().slice(0, 320) : null;
-    return { observedAt, account, fiveHour, weekly };
+    return { observedAt, fiveHour, weekly };
   }
 
   async function readUsagePage(state) {
@@ -262,7 +198,7 @@
   let running = null;
 
   async function runTick() {
-    const data = await chrome.storage.local.get(['instanceId', 'instanceName', 'pairing', 'usageState']);
+    const data = await chrome.storage.local.get(['instanceId', 'instanceName', 'adspowerProfile', 'pairing', 'usageState']);
     const pairing = data.pairing;
     const match = typeof pairing?.url === 'string' && pairing.url.match(PAIR_RE);
     if (!pairing || !match || Number(match[1]) > 65535 || !/^[a-f0-9]{64}$/.test(pairing?.token || '')) return;
@@ -272,11 +208,11 @@
       await chrome.storage.local.set({ instanceId });
     }
     const instanceName = typeof data.instanceName === 'string' && data.instanceName.trim() ? data.instanceName.trim().slice(0, 120) : '未命名浏览器环境';
+    const adspowerProfile = typeof data.adspowerProfile === 'string' && data.adspowerProfile.trim() ? data.adspowerProfile.trim().slice(0, 120) : undefined;
     const rawState = data.usageState && typeof data.usageState === 'object' ? data.usageState : {};
     const state = {
       nextReadAt: typeof rawState.nextReadAt === 'number' ? rawState.nextReadAt : 0,
       failures: typeof rawState.failures === 'number' ? rawState.failures : 0,
-      account: typeof rawState.account === 'string' && rawState.account.trim() ? rawState.account.trim().slice(0, 320) : null,
       fiveHour: rawState.fiveHour ?? null,
       weekly: rawState.weekly ?? null,
       status: ['pending', 'ok', 'signed_out', 'failed'].includes(rawState.status) ? rawState.status : 'pending',
@@ -294,7 +230,6 @@
         state.status = 'ok';
         delete state.reason;
         state.failures = 0;
-        if (outcome.account) state.account = outcome.account;
         state.fiveHour = outcome.fiveHour;
         state.weekly = outcome.weekly;
         state.nextReadAt = readNow + 10 * 60_000;
@@ -315,7 +250,7 @@
     const body = {
       instanceId,
       instanceName,
-      account: state.account ?? null,
+      ...(adspowerProfile ? { adspowerProfile } : {}),
       status: state.status,
       ...(state.status === 'failed' && state.reason ? { reason: state.reason } : {}),
       observedAt: state.observedAt,

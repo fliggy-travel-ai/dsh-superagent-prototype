@@ -48,93 +48,261 @@ function assertNoAbsoluteTime(report: UsageReport) {
   }
 }
 
-test('多环境 discover 与账号邮箱显示：有邮箱显示“环境名称 · 邮箱”，无邮箱显示环境名称，持久化重载及离线仍保留上次邮箱', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-discover-'));
+test('AdsPower 本地 API 环境名称解析：按序号/user_id 查询并缓存 10 分钟、单活跃环境自动识别、多环境或无名称时回退、支持可选 API Key 与 3 秒超时', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-adspower-'));
   let now = Date.parse('2026-11-08T12:00:00.000Z');
   let registered: UsageSourceRegistration | null = null;
+  const apiCalls: Array<{ url: string; auth?: string }> = [];
+  let activeList: Array<{ user_id?: string; serial_number?: string; name?: string }> = [
+    { user_id: 'k129xyz', serial_number: '29' },
+  ];
+  let userProfiles: Record<string, { user_id: string; serial_number?: string; name?: string }> = {
+    '29': { user_id: 'k129xyz', serial_number: '29', name: 'Claude 29 号环境' },
+    'k129xyz': { user_id: 'k129xyz', serial_number: '29', name: 'Claude 29 号环境' },
+    '30': { user_id: 'k130abc', serial_number: '30', name: '' },
+    'k1onlyid': { user_id: 'k1onlyid', serial_number: '', name: '' },
+  };
+  let apiShouldFail = false;
+
+  const fakeFetch: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    apiCalls.push({ url, auth: headers.authorization });
+    if (apiShouldFail) throw new Error('connect ECONNREFUSED');
+    const parsed = new URL(url);
+    if (parsed.pathname === '/api/v1/browser/local-active') {
+      return {
+        ok: true,
+        async json() {
+          return { code: 0, msg: 'success', data: { list: activeList } };
+        },
+      } as Response;
+    }
+    if (parsed.pathname === '/api/v1/user/list') {
+      const serial = parsed.searchParams.get('serial_number');
+      const userId = parsed.searchParams.get('user_id');
+      const hit = (serial && userProfiles[serial]) || (userId && userProfiles[userId]) || null;
+      return {
+        ok: true,
+        async json() {
+          return { code: 0, msg: 'success', data: { list: hit ? [hit] : [] } };
+        },
+      } as Response;
+    }
+    return { ok: false, async json() { return { code: -1 }; } } as Response;
+  };
+
   try {
+    // 1. 未配置 API Key、仅 1 个扩展上报且未填序号（默认“未命名浏览器环境”）、本机恰好 1 个活跃环境 -> 自动查 local-active + user/list 解析出 AdsPower 名称
     const store = registerBrowserUsage(
       { registerUsageSource(source) { registered = source; } },
       async () => ({ setUsageRoute() {}, snapshot: () => ({ settings: { enabled: true, port: 17373 } }) } as unknown as BrowserBridge),
       dir,
       () => now,
+      { adspowerApiUrl: 'http://127.0.0.1:50325', fetchFn: fakeFetch },
     );
     assert.ok(registered);
     const source = registered as UsageSourceRegistration;
 
     await store.record({
-      instanceId: 'env-alpha',
-      instanceName: '独立环境',
-      account: 'alice@example.com',
+      instanceId: 'env-29',
+      instanceName: '未命名浏览器环境',
       status: 'ok',
       observedAt: '2026-11-08T11:59:00.000Z',
       fiveHour: { usedPct: 25, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
       weekly: { usedPct: 40, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
     }, now);
-    await store.record({
-      instanceId: 'env-no-email',
-      instanceName: '无邮箱环境',
-      account: null,
-      status: 'ok',
-      observedAt: '2026-11-08T11:59:00.000Z',
-      fiveHour: { usedPct: 10, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
-      weekly: { usedPct: 20, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
-    }, now);
-    await store.record({
-      instanceId: 'env-dup-1',
-      instanceName: '同名环境',
-      status: 'pending',
-      observedAt: '2026-11-08T11:59:00.000Z',
-      fiveHour: null,
-      weekly: null,
-    }, now);
-    await store.record({
-      instanceId: 'env-dup-2',
-      instanceName: '同名环境',
-      status: 'pending',
-      observedAt: '2026-11-08T11:59:00.000Z',
-      fiveHour: null,
-      weekly: null,
-    }, now);
 
-    assert.deepEqual(await source.discover({ kind: 'session', provider: 'claude', env: {} }), []);
-
-    const accounts = await source.discover({ kind: 'global' });
-    const keyAlpha = hashAccountKey('env-alpha');
-    const keyNoEmail = hashAccountKey('env-no-email');
-    const keyDup1 = hashAccountKey('env-dup-1');
-    const keyDup2 = hashAccountKey('env-dup-2');
-    assert.deepEqual(accounts, [
-      { key: keyAlpha, label: '独立环境 · alice@example.com', input: { instanceId: 'env-alpha' } },
-      { key: keyNoEmail, label: '无邮箱环境', input: { instanceId: 'env-no-email' } },
-      { key: keyDup1, label: `同名环境 · ${keyDup1.slice(0, 4)}`, input: { instanceId: 'env-dup-1' } },
-      { key: keyDup2, label: `同名环境 · ${keyDup2.slice(0, 4)}`, input: { instanceId: 'env-dup-2' } },
+    assert.equal(apiCalls.length, 2);
+    assert.equal(apiCalls[0]!.url, 'http://127.0.0.1:50325/api/v1/browser/local-active');
+    assert.equal(apiCalls[0]!.auth, undefined);
+    assert.equal(apiCalls[1]!.url, 'http://127.0.0.1:50325/api/v1/user/list?user_id=k129xyz');
+    const rec29 = await store.get('env-29', now);
+    assert.equal(rec29?.displayName, 'Claude 29 号环境');
+    assert.equal(rec29?.labelSource, 'adspower_name');
+    assert.equal(rec29?.labelSourceText, 'AdsPower 名称');
+    assert.deepEqual(await source.discover({ kind: 'global' }), [
+      { key: hashAccountKey('env-29'), label: 'Claude 29 号环境', input: { instanceId: 'env-29' } },
     ]);
 
-    // 后续上报 account 为 null（例如读取失败）时，保留上次持久化的邮箱
+    // 2. 10 分钟内重复上报 /usage：命中缓存且未满 10 分钟，不发起任何 AdsPower API 请求
     now += 60_000;
     await store.record({
-      instanceId: 'env-alpha',
-      instanceName: '独立环境',
-      account: null,
-      status: 'failed',
-      reason: 'timeout',
+      instanceId: 'env-29',
+      instanceName: '未命名浏览器环境',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 28, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: new Date(now).toISOString() },
+      weekly: { usedPct: 40, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: new Date(now).toISOString() },
+    }, now);
+    assert.equal(apiCalls.length, 2);
+
+    // 3. 第 2 个扩展开始上报：env-29 未配置序号，不再使用单环境自动识别结果，直接回退为 instanceName；而显式配置了序号 30（AdsPower name 为空）的环境回退显示序号 "30"（labelSource: serial_number）
+    await store.record({
+      instanceId: 'env-30',
+      instanceName: '未命名浏览器环境',
+      adspowerProfile: '30',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 10, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: new Date(now).toISOString() },
+      weekly: { usedPct: 20, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: new Date(now).toISOString() },
+    }, now);
+    const rec29AfterMulti = await store.get('env-29', now);
+    assert.equal(rec29AfterMulti?.displayName, '未命名浏览器环境');
+    assert.equal(rec29AfterMulti?.labelSource, 'instance_name');
+    const rec30 = await store.get('env-30', now);
+    assert.equal(rec30?.displayName, '30');
+    assert.equal(rec30?.labelSource, 'serial_number');
+    assert.equal(rec30?.labelSourceText, 'AdsPower 序号');
+
+    // 4. 给 env-29 填上序号 29：序号变化触发查询，命中 user_id 缓存（< 10 分钟）直接拿到 "Claude 29 号环境"，不额外发 HTTP 请求
+    const callsBeforeBind29 = apiCalls.length;
+    await store.record({
+      instanceId: 'env-29',
+      instanceName: '未命名浏览器环境',
+      adspowerProfile: '29',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 28, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: new Date(now).toISOString() },
+      weekly: { usedPct: 40, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: new Date(now).toISOString() },
+    }, now);
+    assert.equal(apiCalls.length, callsBeforeBind29);
+    assert.equal((await store.get('env-29', now))?.displayName, 'Claude 29 号环境');
+    assert.equal((await store.get('env-29', now))?.labelSource, 'adspower_name');
+
+    // 5. 满 10 分钟后再次上报，且配置了 adspowerApiKey：重新请求 /api/v1/user/list 并携带 Authorization: Bearer
+    now += 10 * 60_000;
+    const authedStore = new BrowserUsageStore(dir, () => now, {
+      adspowerApiUrl: 'http://127.0.0.1:50325',
+      adspowerApiKey: 'secret-adspower-key',
+      fetchFn: fakeFetch,
+    });
+    await authedStore.load(now);
+    userProfiles['29'] = { user_id: 'k129xyz', serial_number: '29', name: 'Claude 29 号改名后' };
+    await authedStore.record({
+      instanceId: 'env-29',
+      instanceName: '未命名浏览器环境',
+      adspowerProfile: '29',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 30, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: new Date(now).toISOString() },
+      weekly: { usedPct: 42, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: new Date(now).toISOString() },
+    }, now);
+    assert.equal(apiCalls.at(-1)?.url, 'http://127.0.0.1:50325/api/v1/user/list?serial_number=29');
+    assert.equal(apiCalls.at(-1)?.auth, 'Bearer secret-adspower-key');
+    assert.equal((await authedStore.get('env-29', now))?.displayName, 'Claude 29 号改名后');
+
+    // 6. AdsPower API 失败时不影响额度上报：只填了 user_id 时回退显示 user_id（labelSource: user_id），既无序号也无 user_id 时回退显示 instanceName（labelSource: instance_name），已有解析结果的保留上次名称
+    apiShouldFail = true;
+    await authedStore.record({
+      instanceId: 'env-userid',
+      instanceName: '未命名浏览器环境',
+      adspowerProfile: 'k1onlyid',
+      status: 'ok',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: { usedPct: 15, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: new Date(now).toISOString() },
+      weekly: { usedPct: 25, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: new Date(now).toISOString() },
+    }, now);
+    const recUserId = await authedStore.get('env-userid', now);
+    assert.equal(recUserId?.displayName, 'k1onlyid');
+    assert.equal(recUserId?.labelSource, 'user_id');
+    assert.equal(recUserId?.labelSourceText, 'AdsPower user_id');
+    assert.equal(recUserId?.fiveHour?.usedPct, 15);
+
+    // 同名环境在 discover 中自动追加 4 位哈希后缀，离线重载后仍保留持久化的 AdsPower 名称
+    await authedStore.record({
+      instanceId: 'env-dup-1',
+      instanceName: '同名自定义环境',
+      status: 'pending',
       observedAt: new Date(now).toISOString(),
       fiveHour: null,
       weekly: null,
     }, now);
-    assert.equal((await source.discover({ kind: 'global' }))[0].label, '独立环境 · alice@example.com');
+    await authedStore.record({
+      instanceId: 'env-dup-2',
+      instanceName: '同名自定义环境',
+      status: 'pending',
+      observedAt: new Date(now).toISOString(),
+      fiveHour: null,
+      weekly: null,
+    }, now);
 
-    // 未打开浏览器（离线）且重建存储重载后，仍然显示上一次持久化的邮箱
-    now += 10 * 60_000;
-    const reloadedStore = new BrowserUsageStore(dir, () => now);
-    await reloadedStore.load(now);
-    const reloadedAccounts = await reloadedStore.discover(now);
-    assert.equal(reloadedAccounts[0].key, keyAlpha);
-    assert.equal(reloadedAccounts[0].label, '独立环境 · alice@example.com');
-    const offlineReport = toUsageReport(await reloadedStore.get('env-alpha', now), now, true);
-    assert.equal(offlineReport.status, 'available');
-    assert.equal(offlineReport.details?.[0].value, '未打开浏览器，无法检测剩余额度，只展示上一次同步的额度');
+    now += 15 * 60_000;
+    const reloaded = new BrowserUsageStore(dir, () => now, { fetchFn: fakeFetch });
+    await reloaded.load(now);
+    const discovered = await reloaded.discover(now);
+    const keyDup1 = hashAccountKey('env-dup-1');
+    const keyDup2 = hashAccountKey('env-dup-2');
+    assert.deepEqual(discovered, [
+      { key: hashAccountKey('env-29'), label: 'Claude 29 号改名后', input: { instanceId: 'env-29' } },
+      { key: hashAccountKey('env-30'), label: '30', input: { instanceId: 'env-30' } },
+      { key: hashAccountKey('env-userid'), label: 'k1onlyid', input: { instanceId: 'env-userid' } },
+      { key: keyDup1, label: `同名自定义环境 · ${keyDup1.slice(0, 4)}`, input: { instanceId: 'env-dup-1' } },
+      { key: keyDup2, label: `同名自定义环境 · ${keyDup2.slice(0, 4)}`, input: { instanceId: 'env-dup-2' } },
+    ]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('AdsPower 本地 API 边界条件：local-active 返回多个活跃环境时不猜测，请求超时中止并按顺序回退且不影响额度写入', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-adspower-edge-'));
+  const now = Date.parse('2026-11-08T12:00:00.000Z');
+  try {
+    // 1. 本机有 2 个活跃环境时，即使只有 1 个扩展上报，也不猜测，回退显示 instanceName
+    const multiActiveStore = new BrowserUsageStore(dir, () => now, {
+      fetchFn: async () => ({
+        ok: true,
+        async json() {
+          return {
+            code: 0,
+            data: {
+              list: [
+                { user_id: 'k1', serial_number: '29', name: '环境 29' },
+                { user_id: 'k2', serial_number: '30', name: '环境 30' },
+              ],
+            },
+          };
+        },
+      } as Response),
+    });
+    await multiActiveStore.record({
+      instanceId: 'env-single-ext',
+      instanceName: '未命名浏览器环境',
+      status: 'ok',
+      observedAt: '2026-11-08T11:59:00.000Z',
+      fiveHour: { usedPct: 33, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
+      weekly: { usedPct: 44, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
+    }, now);
+    const recMulti = await multiActiveStore.get('env-single-ext', now);
+    assert.equal(recMulti?.displayName, '未命名浏览器环境');
+    assert.equal(recMulti?.labelSource, 'instance_name');
+    assert.equal(recMulti?.fiveHour?.usedPct, 33);
+
+    // 2. AdsPower API 响应超时时由 AbortSignal 中止，回退显示序号且额度正常保存
+    let aborted = false;
+    const timeoutStore = new BrowserUsageStore(dir, () => now, {
+      adspowerTimeoutMs: 30,
+      fetchFn: async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new Error('Aborted'));
+        });
+      }),
+    });
+    await timeoutStore.record({
+      instanceId: 'env-timeout',
+      instanceName: '29',
+      status: 'ok',
+      observedAt: '2026-11-08T11:59:00.000Z',
+      fiveHour: { usedPct: 50, resetsAt: '2026-11-08T16:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
+      weekly: { usedPct: 60, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-08T11:59:00.000Z' },
+    }, now);
+    assert.equal(aborted, true);
+    const recTimeout = await timeoutStore.get('env-timeout', now);
+    assert.equal(recTimeout?.displayName, '29');
+    assert.equal(recTimeout?.labelSource, 'serial_number');
+    assert.equal(recTimeout?.fiveHour?.usedPct, 50);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

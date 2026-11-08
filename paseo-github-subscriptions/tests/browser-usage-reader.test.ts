@@ -172,7 +172,6 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   const parsed = structuredClone(parseDialog(extracted));
   assert.deepEqual(parsed, {
     observedAt: '2026-11-08T11:07:20.885Z',
-    account: null,
     fiveHour: {
       usedPct: 59,
       resetsAt: '2026-11-08T11:50:00.000Z',
@@ -250,7 +249,6 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
   const notStartedParsed = structuredClone(parseDialog(notStartedExtracted));
   assert.deepEqual(notStartedParsed, {
     observedAt: '2026-11-08T11:07:20.885Z',
-    account: null,
     fiveHour: {
       usedPct: 0,
       resetsAt: null,
@@ -262,132 +260,6 @@ test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个�
       observedAt: '2026-11-08T11:07:20.885Z',
     },
   });
-});
-
-test('readDialog 从 IndexedDB keyval-store 只读提取 current_account 邮箱：支持对象值、JSON 字符串、缺少 current_account 与打开失败', async () => {
-  const { readDialog, parseDialog } = loadHelpers();
-  const sampleNow = Date.parse('2026-11-08T11:07:20.885Z');
-  const dom = parseHtmlDocument(dialogFixtureHtml, '/new', 'New session - Claude');
-  const FakeDate = Object.assign(
-    function () { return { getTimezoneOffset: () => 300 }; },
-    { now: () => sampleNow },
-  );
-
-  const txModes: string[] = [];
-  function makeFakeIndexedDB(behavior: { value?: any; failOpen?: boolean; failGet?: boolean }) {
-    return {
-      open(dbName: string) {
-        assert.equal(dbName, 'keyval-store');
-        const req: Record<string, any> = { result: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
-        Promise.resolve().then(() => {
-          if (behavior.failOpen) {
-            req.onerror?.();
-            return;
-          }
-          req.result = {
-            objectStoreNames: { contains: (name: string) => name === 'keyval', 0: 'keyval' },
-            transaction(storeName: string, mode: string) {
-              assert.equal(storeName, 'keyval');
-              txModes.push(mode);
-              return {
-                objectStore() {
-                  return {
-                    get(key: string) {
-                      assert.equal(key, 'react-query-cache');
-                      const getReq: Record<string, any> = { result: undefined, onsuccess: null, onerror: null };
-                      Promise.resolve().then(() => {
-                        if (behavior.failGet) {
-                          getReq.onerror?.();
-                        } else {
-                          getReq.result = behavior.value;
-                          getReq.onsuccess?.();
-                        }
-                      });
-                      return getReq;
-                    },
-                  };
-                },
-              };
-            },
-            close() {},
-          };
-          req.onsuccess?.();
-        });
-        return req;
-      },
-    };
-  }
-
-  // 1. 值为对象且含 current_account 查询结果
-  const withObject = await runInNewContext(`(${readDialog.toString()})()`, {
-    document: dom.document,
-    location: dom.location,
-    Date: FakeDate,
-    indexedDB: makeFakeIndexedDB({
-      value: {
-        clientState: {
-          queries: [
-            { queryKey: ['other_query'], state: { data: { name: 'noop' } } },
-            { queryKey: ['current_account'], state: { data: { email_address: 'alice@example.com' } } },
-          ],
-        },
-      },
-    }),
-  });
-  assert.equal(withObject.account, 'alice@example.com');
-  assert.equal(parseDialog(withObject).account, 'alice@example.com');
-  assert.deepEqual(txModes, ['readonly']);
-
-  // 2. 值为 JSON 字符串（且只匹配 queryKey[0] === 'current_account'，忽略非首项含 current_account 的查询）
-  const withJsonString = await runInNewContext(`(${readDialog.toString()})()`, {
-    document: dom.document,
-    location: dom.location,
-    Date: FakeDate,
-    indexedDB: makeFakeIndexedDB({
-      value: JSON.stringify({
-        clientState: {
-          queries: [
-            { queryKey: ['account', 'current_account'], state: { data: { email_address: 'wrong@example.com' } } },
-            { queryKey: ['current_account', 'org_1'], state: { data: { email_address: 'bob@example.com' } } },
-          ],
-        },
-      }),
-    }),
-  });
-  assert.equal(withJsonString.account, 'bob@example.com');
-  assert.equal(parseDialog(withJsonString).account, 'bob@example.com');
-
-  // 3. 没有 current_account 查询：返回 null，不影响额度读取
-  const withoutCurrentAccount = await runInNewContext(`(${readDialog.toString()})()`, {
-    document: dom.document,
-    location: dom.location,
-    Date: FakeDate,
-    indexedDB: makeFakeIndexedDB({
-      value: {
-        clientState: {
-          queries: [{ queryKey: ['organizations'], state: { data: { id: 'org_1' } } }],
-        },
-      },
-    }),
-  });
-  assert.equal(withoutCurrentAccount.account, null);
-  const parsedNoAccount = parseDialog(withoutCurrentAccount);
-  assert.equal(parsedNoAccount.account, null);
-  assert.equal(parsedNoAccount.fiveHour.usedPct, 59);
-  assert.equal(parsedNoAccount.weekly.usedPct, 46);
-
-  // 4. IndexedDB 打开失败：返回 null，不影响额度读取
-  const openFailed = await runInNewContext(`(${readDialog.toString()})()`, {
-    document: dom.document,
-    location: dom.location,
-    Date: FakeDate,
-    indexedDB: makeFakeIndexedDB({ failOpen: true }),
-  });
-  assert.equal(openFailed.account, null);
-  const parsedOpenFailed = parseDialog(openFailed);
-  assert.equal(parsedOpenFailed.account, null);
-  assert.equal(parsedOpenFailed.fiveHour.usedPct, 59);
-  assert.equal(parsedOpenFailed.weekly.usedPct, 46);
 });
 
 function createHarness(initialState: Record<string, any> = {}) {
@@ -543,6 +415,7 @@ test('保持单个后台用量标签页：首次后台打开并记住编号，�
   const harness = createHarness({
     instanceId: 'env-29',
     instanceName: 'SunBrowser 29',
+    adspowerProfile: '29',
     pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
   });
   // 同时存在一个业务会话标签页，确认扩展不会向它注入或刷新它
@@ -559,6 +432,7 @@ test('保持单个后台用量标签页：首次后台打开并记住编号，�
   assert.equal(harness.posts.length, 1);
   assert.equal(harness.posts[0].url, 'http://127.0.0.1:17373/usage');
   assert.equal(harness.posts[0].headers.authorization, `Bearer ${'a'.repeat(64)}`);
+  assert.equal(harness.posts[0].body.adspowerProfile, '29');
   assert.equal(harness.posts[0].body.status, 'ok');
   assert.equal(harness.posts[0].body.fiveHour.usedPct, 59);
   assert.equal(harness.posts[0].body.weekly.usedPct, 46);

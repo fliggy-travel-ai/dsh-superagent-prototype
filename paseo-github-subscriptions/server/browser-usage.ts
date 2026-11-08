@@ -11,14 +11,34 @@ const MAX_AGE = 150_000;
 const RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const SAVE_INTERVAL_MS = 60 * 60 * 1000;
 const WEEKLY_SYNC_DIFF_MS = 10 * 60 * 1000;
+const ADSPOWER_QUERY_INTERVAL_MS = 10 * 60 * 1000;
+const DEFAULT_ADSPOWER_URL = 'http://local.adspower.net:50325';
+const DEFAULT_ADSPOWER_TIMEOUT_MS = 3000;
 
 const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 export const BrowserUsageInputSchema = z.strictObject({ instanceId: id });
 
+export const BrowserUsageLabelSourceSchema = z.enum(['adspower_name', 'serial_number', 'user_id', 'instance_name']);
+export type BrowserUsageLabelSource = z.infer<typeof BrowserUsageLabelSourceSchema>;
+
+export const LABEL_SOURCE_TEXT: Record<BrowserUsageLabelSource, string> = {
+  adspower_name: 'AdsPower 名称',
+  serial_number: 'AdsPower 序号',
+  user_id: 'AdsPower user_id',
+  instance_name: '扩展上报名称',
+};
+
 const StoredRecordSchema = z.strictObject({
   instanceId: id,
   instanceName: z.string().trim().min(1).max(120),
-  account: z.string().trim().min(1).max(320).nullable().optional(),
+  adspowerProfile: z.string().trim().min(1).max(120).optional(),
+  adspowerUserId: z.string().trim().min(1).max(120).optional(),
+  adspowerSerialNumber: z.string().trim().min(1).max(120).optional(),
+  adspowerName: z.string().trim().min(1).max(120).optional(),
+  adspowerQueriedAt: z.number().finite().optional(),
+  displayName: z.string().trim().min(1).max(120).optional(),
+  labelSource: BrowserUsageLabelSourceSchema.optional(),
+  labelSourceText: z.string().trim().min(1).max(120).optional(),
   lastPostAt: z.number().finite(),
   status: z.enum(['pending', 'ok', 'signed_out', 'failed']),
   reason: z.enum(['no_window', 'parse', 'timeout', 'challenge', 'tab_closed']).optional(),
@@ -26,6 +46,44 @@ const StoredRecordSchema = z.strictObject({
   weekly: BrowserUsageWindowSchema.nullable(),
 });
 export type BrowserUsageRecord = z.infer<typeof StoredRecordSchema>;
+
+export interface BrowserUsageStoreOptions {
+  adspowerApiUrl?: string;
+  adspowerApiKey?: string;
+  adspowerTimeoutMs?: number;
+  fetchFn?: typeof fetch;
+}
+
+interface AdsPowerUserEntry {
+  userId?: string;
+  serialNumber?: string;
+  name?: string;
+  fetchedAt: number;
+}
+
+function computeDisplay(input: {
+  instanceName: string;
+  profileHint?: string;
+  adspowerName?: string;
+  adspowerSerialNumber?: string;
+  adspowerUserId?: string;
+}): { displayName: string; labelSource: BrowserUsageLabelSource; labelSourceText: string } {
+  const name = input.adspowerName?.trim();
+  if (name) {
+    return { displayName: name.slice(0, 120), labelSource: 'adspower_name', labelSourceText: LABEL_SOURCE_TEXT.adspower_name };
+  }
+  const serial = input.adspowerSerialNumber?.trim()
+    || (input.profileHint && /^\d+$/.test(input.profileHint) ? input.profileHint : undefined);
+  if (serial) {
+    return { displayName: serial.slice(0, 120), labelSource: 'serial_number', labelSourceText: LABEL_SOURCE_TEXT.serial_number };
+  }
+  const userId = input.adspowerUserId?.trim() || input.profileHint?.trim();
+  if (userId) {
+    return { displayName: userId.slice(0, 120), labelSource: 'user_id', labelSourceText: LABEL_SOURCE_TEXT.user_id };
+  }
+  const fallback = input.instanceName.trim().slice(0, 120) || '未命名浏览器环境';
+  return { displayName: fallback, labelSource: 'instance_name', labelSourceText: LABEL_SOURCE_TEXT.instance_name };
+}
 
 const REASON_LABELS: Record<NonNullable<BrowserUsagePost['reason']>, string> = {
   no_window: '没有打开的浏览器窗口',
@@ -63,14 +121,20 @@ function mergeWindow(previous: BrowserUsageWindow | null, incoming: BrowserUsage
 export class BrowserUsageStore {
   private directory: string;
   private nowFn: () => number;
+  private options: BrowserUsageStoreOptions;
+  private configuredApiUrl?: string;
+  private configuredApiKey?: string;
   private records = new Map<string, BrowserUsageRecord>();
+  private userCache = new Map<string, AdsPowerUserEntry>();
+  private serialToUserId = new Map<string, string>();
   private lastSavedAt = 0;
   private loaded = false;
   private tail: Promise<unknown> = Promise.resolve();
 
-  constructor(directory: string, nowFn: () => number = Date.now) {
+  constructor(directory: string, nowFn: () => number = Date.now, options: BrowserUsageStoreOptions = {}) {
     this.directory = directory;
     this.nowFn = nowFn;
+    this.options = options;
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -85,11 +149,141 @@ export class BrowserUsageStore {
     }
   }
 
+  private getApiBaseUrl(): string {
+    const url = this.options.adspowerApiUrl?.trim()
+      || this.configuredApiUrl?.trim()
+      || process.env.PASEO_ADSPOWER_API_URL?.trim()
+      || process.env.ADSPOWER_API_URL?.trim()
+      || DEFAULT_ADSPOWER_URL;
+    return url.replace(/\/+$/, '');
+  }
+
+  private getApiKey(): string {
+    return this.options.adspowerApiKey?.trim()
+      || this.configuredApiKey?.trim()
+      || process.env.PASEO_ADSPOWER_API_KEY?.trim()
+      || process.env.ADSPOWER_API_KEY?.trim()
+      || '';
+  }
+
+  private async requestAdsPower(pathAndQuery: string): Promise<any | null> {
+    const fetchImpl = this.options.fetchFn ?? globalThis.fetch;
+    if (typeof fetchImpl !== 'function') return null;
+    const timeoutMs = this.options.adspowerTimeoutMs ?? DEFAULT_ADSPOWER_TIMEOUT_MS;
+    const apiKey = this.getApiKey();
+    const headers: Record<string, string> = {};
+    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetchImpl(`${this.getApiBaseUrl()}${pathAndQuery}`, {
+        method: 'GET',
+        ...(Object.keys(headers).length ? { headers } : {}),
+        signal: controller.signal,
+      });
+      if (!response?.ok) return null;
+      const body = await response.json();
+      if (!body || typeof body !== 'object' || body.code !== 0) return null;
+      return body.data ?? null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private getCachedUser(lookup: { userId?: string; serialNumber?: string }, now: number): AdsPowerUserEntry | null {
+    if (lookup.userId) {
+      const entry = this.userCache.get(lookup.userId);
+      if (entry && now - entry.fetchedAt < ADSPOWER_QUERY_INTERVAL_MS) return entry;
+    }
+    if (lookup.serialNumber) {
+      const mappedId = this.serialToUserId.get(lookup.serialNumber);
+      if (mappedId) {
+        const entry = this.userCache.get(mappedId);
+        if (entry && now - entry.fetchedAt < ADSPOWER_QUERY_INTERVAL_MS) return entry;
+      }
+      const bySerial = this.userCache.get(`serial:${lookup.serialNumber}`);
+      if (bySerial && now - bySerial.fetchedAt < ADSPOWER_QUERY_INTERVAL_MS) return bySerial;
+    }
+    return null;
+  }
+
+  private storeCachedUser(entry: AdsPowerUserEntry): void {
+    if (entry.userId) {
+      this.userCache.set(entry.userId, entry);
+      if (entry.serialNumber) this.serialToUserId.set(entry.serialNumber, entry.userId);
+    } else if (entry.serialNumber) {
+      this.userCache.set(`serial:${entry.serialNumber}`, entry);
+    }
+  }
+
+  private async fetchUserByHint(hint: string, now: number): Promise<{ ok: boolean; entry?: AdsPowerUserEntry }> {
+    const isSerial = /^\d+$/.test(hint);
+    const cached = this.getCachedUser(isSerial ? { serialNumber: hint } : { userId: hint }, now);
+    if (cached) return { ok: true, entry: cached };
+
+    const query = isSerial
+      ? `/api/v1/user/list?serial_number=${encodeURIComponent(hint)}`
+      : `/api/v1/user/list?user_id=${encodeURIComponent(hint)}`;
+    const data = await this.requestAdsPower(query);
+    if (!data || !Array.isArray(data.list)) return { ok: false };
+    const item = data.list.find((row: any) =>
+      isSerial
+        ? String(row?.serial_number ?? '').trim() === hint
+        : String(row?.user_id ?? '').trim() === hint,
+    ) ?? data.list[0];
+    if (!item || typeof item !== 'object') {
+      const fallbackEntry: AdsPowerUserEntry = {
+        ...(isSerial ? { serialNumber: hint } : { userId: hint }),
+        fetchedAt: now,
+      };
+      this.storeCachedUser(fallbackEntry);
+      return { ok: true, entry: fallbackEntry };
+    }
+    const userId = typeof item.user_id === 'string' && item.user_id.trim() ? item.user_id.trim().slice(0, 120) : (!isSerial ? hint : undefined);
+    const rawSerial = item.serial_number !== undefined && item.serial_number !== null ? String(item.serial_number).trim() : '';
+    const serialNumber = rawSerial ? rawSerial.slice(0, 120) : (isSerial ? hint : undefined);
+    const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 120) : undefined;
+    const entry: AdsPowerUserEntry = {
+      ...(userId ? { userId } : {}),
+      ...(serialNumber ? { serialNumber } : {}),
+      ...(name ? { name } : {}),
+      fetchedAt: now,
+    };
+    this.storeCachedUser(entry);
+    return { ok: true, entry };
+  }
+
+  private clearAutoDetectedOnMultiInstance(): void {
+    if (this.records.size <= 1) return;
+    for (const [key, item] of this.records) {
+      if (!item.adspowerProfile && (item.adspowerUserId || item.adspowerSerialNumber || item.adspowerName)) {
+        const display = computeDisplay({ instanceName: item.instanceName });
+        this.records.set(key, {
+          instanceId: item.instanceId,
+          instanceName: item.instanceName,
+          displayName: display.displayName,
+          labelSource: display.labelSource,
+          labelSourceText: display.labelSourceText,
+          lastPostAt: item.lastPostAt,
+          status: item.status,
+          ...(item.reason ? { reason: item.reason } : {}),
+          fiveHour: item.fiveHour,
+          weekly: item.weekly,
+        });
+      }
+    }
+  }
+
   private async save(now: number): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const path = join(this.directory, 'browser-usage.json');
     const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
-    await writeFile(tmp, JSON.stringify({ records: [...this.records.values()] }), { mode: 0o600 });
+    const payload: Record<string, unknown> = { records: [...this.records.values()] };
+    if (this.configuredApiUrl) payload.adspowerApiUrl = this.configuredApiUrl;
+    if (this.configuredApiKey) payload.adspowerApiKey = this.configuredApiKey;
+    await writeFile(tmp, JSON.stringify(payload), { mode: 0o600 });
     await rename(tmp, path);
     await chmod(path, 0o600);
     this.lastSavedAt = now;
@@ -100,7 +294,13 @@ export class BrowserUsageStore {
       if (this.loaded) return;
       try {
         const raw = JSON.parse(await readFile(join(this.directory, 'browser-usage.json'), 'utf8'));
-        const parsed = z.strictObject({ records: StoredRecordSchema.array() }).parse(raw);
+        const parsed = z.strictObject({
+          records: StoredRecordSchema.array(),
+          adspowerApiUrl: z.string().trim().min(1).optional(),
+          adspowerApiKey: z.string().trim().min(1).optional(),
+        }).parse(raw);
+        if (parsed.adspowerApiUrl) this.configuredApiUrl = parsed.adspowerApiUrl;
+        if (parsed.adspowerApiKey) this.configuredApiKey = parsed.adspowerApiKey;
         for (const item of parsed.records) {
           if (!this.records.has(item.instanceId)) this.records.set(item.instanceId, item);
         }
@@ -118,14 +318,113 @@ export class BrowserUsageStore {
     return this.serial(async () => {
       this.prune(now);
       const previous = this.records.get(input.instanceId);
-      const account = input.account ?? previous?.account ?? null;
+      const trimmedName = input.instanceName.trim();
+      const rawProfile = input.adspowerProfile?.trim();
+      const profileHint = rawProfile || (/^[1-9][0-9]{0,7}$/.test(trimmedName) ? trimmedName : undefined);
+
+      const reportingIds = new Set<string>([input.instanceId]);
+      for (const existingId of this.records.keys()) reportingIds.add(existingId);
+      const singleExtension = reportingIds.size === 1;
+
+      let adspowerUserId = previous?.adspowerUserId;
+      let adspowerSerialNumber = previous?.adspowerSerialNumber;
+      let adspowerName = previous?.adspowerName;
+      let adspowerQueriedAt = previous?.adspowerQueriedAt;
+
+      const profileChanged = (previous?.adspowerProfile ?? undefined) !== profileHint;
+      const shouldQuery = !previous
+        || profileChanged
+        || adspowerQueriedAt === undefined
+        || now - adspowerQueriedAt >= ADSPOWER_QUERY_INTERVAL_MS;
+
+      if (profileHint) {
+        if (profileChanged) {
+          adspowerUserId = undefined;
+          adspowerSerialNumber = undefined;
+          adspowerName = undefined;
+        }
+        if (shouldQuery) {
+          adspowerQueriedAt = now;
+          const resolved = await this.fetchUserByHint(profileHint, now);
+          if (resolved.ok && resolved.entry) {
+            adspowerUserId = resolved.entry.userId;
+            adspowerSerialNumber = resolved.entry.serialNumber;
+            adspowerName = resolved.entry.name;
+          }
+        }
+      } else if (trimmedName === '未命名浏览器环境' && singleExtension) {
+        if (profileChanged) {
+          adspowerUserId = undefined;
+          adspowerSerialNumber = undefined;
+          adspowerName = undefined;
+        }
+        if (shouldQuery) {
+          adspowerQueriedAt = now;
+          const activeData = await this.requestAdsPower('/api/v1/browser/local-active');
+          if (activeData && Array.isArray(activeData.list)) {
+            if (activeData.list.length === 1) {
+              const active = activeData.list[0];
+              const activeUserId = typeof active?.user_id === 'string' && active.user_id.trim() ? active.user_id.trim().slice(0, 120) : undefined;
+              const rawSerial = active?.serial_number !== undefined && active?.serial_number !== null ? String(active.serial_number).trim() : '';
+              const activeSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
+              const activeName = typeof active?.name === 'string' && active.name.trim() ? active.name.trim().slice(0, 120) : undefined;
+              if (activeName) {
+                adspowerUserId = activeUserId;
+                adspowerSerialNumber = activeSerial;
+                adspowerName = activeName;
+                this.storeCachedUser({ userId: activeUserId, serialNumber: activeSerial, name: activeName, fetchedAt: now });
+              } else if (activeUserId || activeSerial) {
+                const resolved = await this.fetchUserByHint(activeUserId ?? activeSerial!, now);
+                if (resolved.ok && resolved.entry) {
+                  adspowerUserId = resolved.entry.userId ?? activeUserId;
+                  adspowerSerialNumber = resolved.entry.serialNumber ?? activeSerial;
+                  adspowerName = resolved.entry.name;
+                } else {
+                  adspowerUserId = activeUserId;
+                  adspowerSerialNumber = activeSerial;
+                  adspowerName = undefined;
+                }
+              } else {
+                adspowerUserId = undefined;
+                adspowerSerialNumber = undefined;
+                adspowerName = undefined;
+              }
+            } else {
+              adspowerUserId = undefined;
+              adspowerSerialNumber = undefined;
+              adspowerName = undefined;
+            }
+          }
+        }
+      } else {
+        adspowerUserId = undefined;
+        adspowerSerialNumber = undefined;
+        adspowerName = undefined;
+        adspowerQueriedAt = undefined;
+      }
+
+      const display = computeDisplay({
+        instanceName: input.instanceName,
+        profileHint,
+        adspowerName,
+        adspowerSerialNumber,
+        adspowerUserId,
+      });
+
       const fiveHour = mergeWindow(previous?.fiveHour ?? null, input.fiveHour, now);
       const weekly = mergeWindow(previous?.weekly ?? null, input.weekly, now);
       const reason = input.status === 'failed' ? input.reason : undefined;
       const next: BrowserUsageRecord = {
         instanceId: input.instanceId,
         instanceName: input.instanceName,
-        account,
+        ...(profileHint ? { adspowerProfile: profileHint } : {}),
+        ...(adspowerUserId ? { adspowerUserId } : {}),
+        ...(adspowerSerialNumber ? { adspowerSerialNumber } : {}),
+        ...(adspowerName ? { adspowerName } : {}),
+        ...(adspowerQueriedAt !== undefined ? { adspowerQueriedAt } : {}),
+        displayName: display.displayName,
+        labelSource: display.labelSource,
+        labelSourceText: display.labelSourceText,
         lastPostAt: now,
         status: input.status,
         ...(reason ? { reason } : {}),
@@ -134,12 +433,18 @@ export class BrowserUsageStore {
       };
       const changed = !previous
         || previous.instanceName !== next.instanceName
-        || previous.account !== next.account
+        || previous.adspowerProfile !== next.adspowerProfile
+        || previous.adspowerUserId !== next.adspowerUserId
+        || previous.adspowerSerialNumber !== next.adspowerSerialNumber
+        || previous.adspowerName !== next.adspowerName
+        || previous.displayName !== next.displayName
+        || previous.labelSource !== next.labelSource
         || previous.status !== next.status
         || previous.reason !== next.reason
         || JSON.stringify(previous.fiveHour) !== JSON.stringify(next.fiveHour)
         || JSON.stringify(previous.weekly) !== JSON.stringify(next.weekly);
       this.records.set(input.instanceId, next);
+      this.clearAutoDetectedOnMultiInstance();
       if (changed || now - this.lastSavedAt >= SAVE_INTERVAL_MS) {
         await this.save(now);
       }
@@ -157,7 +462,7 @@ export class BrowserUsageStore {
     await this.tail;
     this.prune(now);
     const list = [...this.records.values()];
-    const baseLabel = (item: BrowserUsageRecord) => item.account ? `${item.instanceName} · ${item.account}` : item.instanceName;
+    const baseLabel = (item: BrowserUsageRecord) => item.displayName || item.instanceName;
     const counts = new Map<string, number>();
     for (const item of list) {
       const label = baseLabel(item);
@@ -260,8 +565,9 @@ export function registerBrowserUsage(
   readyBrowser: () => Promise<BrowserBridge>,
   directory: string,
   nowFn: () => number = Date.now,
+  options: BrowserUsageStoreOptions = {},
 ): BrowserUsageStore {
-  const store = new BrowserUsageStore(directory, nowFn);
+  const store = new BrowserUsageStore(directory, nowFn, options);
   const loaded = store.load().catch(() => {});
   let channelEnabled = true;
   const attach = async () => {

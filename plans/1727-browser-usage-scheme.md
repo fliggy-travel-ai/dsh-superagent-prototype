@@ -118,7 +118,7 @@ void tick();
 
 ### 5.1 注入页面的函数（只读）
 
-标签页 `status === 'complete'` 后，用 `chrome.scripting.executeScript({ target: { tabId }, func: readDialog, args: [reloadAt] })` 注入到扩展维护的用量页面标签页。函数同时返回 `performance.timeOrigin`（供 `reload` 后核对是否为新文档），内部短轮询等待 `[role="meter"]` 出现（每 500 毫秒查一次，最多 30 次即 15 秒；遇到 `/login`、`Just a moment` 或检测到 `timeOrigin < reloadAt` 的旧文档时立即结束等待），再只读打开页面前端缓存 IndexedDB `keyval-store` 读取键 `react-query-cache` 里 `current_account` 查询结果的 `email_address`：
+标签页 `status === 'complete'` 后，用 `chrome.scripting.executeScript({ target: { tabId }, func: readDialog, args: [reloadAt] })` 注入到扩展维护的用量页面标签页。函数同时返回 `performance.timeOrigin`（供 `reload` 后核对是否为新文档），内部短轮询等待 `[role="meter"]` 出现（每 500 毫秒查一次，最多 30 次即 15 秒；遇到 `/login`、`Just a moment` 或检测到 `timeOrigin < reloadAt` 的旧文档时立即结束等待）：
 
 ```js
 async function readDialog(minTimeOrigin = null) {
@@ -140,14 +140,11 @@ async function readDialog(minTimeOrigin = null) {
     for (let i = 0; i < 6 && labelEl && row.parentElement && !row.contains(labelEl); i++) row = row.parentElement;
     return { label: labelEl?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
   });
-  let account = null;
-  // 只读打开 IndexedDB 'keyval-store'，读取键 'react-query-cache'（支持对象或 JSON 字符串），
-  // 查找 queryKey 含 'current_account' 的查询并取其数据里的 email_address；失败或缺失时返回 null，不影响额度读取。
-  return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
+  return { path: location.pathname, title: document.title, rows, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
 }
 ```
 
-不要在 `Resets` 前加 `\b`：`textContent` 把标签和重置文字连在一起（`Current sessionResets at 6:50 AM`）。向上查找只到包含本行标签元素（`aria-labelledby` 指向的节点）的那一层行容器为止，避免 5 小时窗口尚未开始（显示 `Starts with your first message`、无 `Resets` 文字）时越过本行读到每周窗口的重置时间。IndexedDB 读取使用 `readonly` 事务，若触发 `onupgradeneeded` 则立即中止事务，不写入、不删除、不发网络请求。
+不要在 `Resets` 前加 `\b`：`textContent` 把标签和重置文字连在一起（`Current sessionResets at 6:50 AM`）。向上查找只到包含本行标签元素（`aria-labelledby` 指向的节点）的那一层行容器为止，避免 5 小时窗口尚未开始（显示 `Starts with your first message`、无 `Resets` 文字）时越过本行读到每周窗口的重置时间。
 
 ### 5.2 解析与校验函数（纯函数，不碰 DOM）
 
@@ -156,7 +153,7 @@ async function readDialog(minTimeOrigin = null) {
   - `Resets at H:MM AM|PM`：当天该时刻；不晚于现在就加 1 天。
   - `Resets <星期全名> H:MM AM|PM`：下一个该星期的该时刻；不晚于现在就加 7 天。
   - 其他格式返回 `null`（窗口仍显示比例）。
-- `parseDialog(data)`：要求 `Current session` 和 `This week` 两行都存在，且 `valueText` 含 `used`、`used` 是 0–100 的数字。否则返回 `null`（记 `parse` 或 `timeout`）。同时提取 `account`（非空邮箱字符串或 `null`）。
+- `parseDialog(data)`：要求 `Current session` 和 `This week` 两行都存在，且 `valueText` 含 `used`、`used` 是 0–100 的数字。否则返回 `null`（记 `parse` 或 `timeout`）。
 
 样本期望值（`now = 2026-11-08T11:07:20.885Z`，`tzOffset = 300`）：
 
@@ -167,15 +164,15 @@ async function readDialog(minTimeOrigin = null) {
 
 ### 5.3 读取规则
 
-状态保存在 `chrome.storage.local` 的独立键 `usageState`：`nextReadAt`、`failures`、`account`、`fiveHour`、`weekly`、`status`、`reason`、`observedAt`、`tab`。不碰其他键。
+状态保存在 `chrome.storage.local` 的独立键 `usageState`：`nextReadAt`、`failures`、`fiveHour`、`weekly`、`status`、`reason`、`observedAt`、`tab`。不碰其他键。
 
 `tick()` 的步骤：
 
-1. 读取 `pairing`、`instanceId`、`instanceName`。未配对或配对格式错误时结束，不读取，不打开页面，不发送。
+1. 读取 `pairing`、`instanceId`、`instanceName`、`adspowerProfile`。未配对或配对格式错误时结束，不读取，不打开页面，不发送。
 2. `now >= nextReadAt` 时执行一次用量页面读取（第 5.4 节）：
-   1. 检查扩展维护的用量页面标签页：已有且仍在用量页面地址时刷新该标签页；没有、已关闭或地址已不是用量页面时，在后台新建一个用量页面标签页。
-   2. 先等待该标签页加载完成（`status === 'complete'`），再注入 `readDialog` 短轮询等待弹窗内出现 `[role="meter"]`，读取 `Current session`（5 小时窗口）、`This week`（每周窗口）和 `account`（邮箱）。
-   3. 读取成功时更新两个窗口的值和 `account`（若非空），状态设为 `ok`；未登录或失败时保留已有的窗口旧值和 `account`，更新 `status`、`reason` 和下次读取时间，不上报刷新前的旧 DOM 数字作为新结果。
+   1. 检查扩展维护的用量页面标签页：已有且仍在用量页面或登录页面地址时刷新该标签页；没有、已关闭或地址已不是用量/登录页面时，在后台新建一个用量页面标签页。
+   2. 先等待该标签页加载完成（`status === 'complete'`），再注入 `readDialog` 短轮询等待弹窗内出现 `[role="meter"]`，读取 `Current session`（5 小时窗口）和 `This week`（每周窗口）。
+   3. 读取成功时更新两个窗口的值，状态设为 `ok`；未登录或失败时保留已有的窗口旧值，更新 `status`、`reason` 和下次读取时间，不上报刷新前的旧 DOM 数字作为新结果。
 3. 不管是否到期，都用当前状态 POST `/usage`（第 6.1 节）。网络失败时忽略，下一分钟重试。
 
 间隔：
@@ -227,7 +224,7 @@ export const BrowserUsageWindowSchema = z.strictObject({ usedPct: z.number().min
 export const BrowserUsagePostSchema = z.strictObject({
   instanceId: id,
   instanceName: z.string().trim().min(1).max(120).default('未命名浏览器环境'),
-  account: z.string().trim().min(1).max(320).nullable().optional().default(null),
+  adspowerProfile: z.string().trim().min(1).max(120).optional(),
   status: z.enum(['pending', 'ok', 'signed_out', 'failed']),
   reason: z.enum(['no_window', 'parse', 'timeout', 'challenge', 'tab_closed']).optional(),
   observedAt: z.string().datetime(),
@@ -237,22 +234,25 @@ export const BrowserUsagePostSchema = z.strictObject({
 export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
 ```
 
-`pending` 表示扩展还没读过一次。`account` 为当前浏览器环境登录的 claude.ai 邮箱（未读到时为 `null`）。请求体不含会话内容。
+`pending` 表示扩展还没读过一次。`adspowerProfile` 为可选的 AdsPower 环境序号（`serial_number`）或环境 ID（`user_id`）。请求体不含会话内容。
 
 ### 6.2 `server/browser-usage.ts`
 
 `BrowserUsageStore`：
 
-- 每个环境一条记录：`instanceId`、`instanceName`、`account`（最近一次读到的邮箱或 `null`）、`lastPostAt`（插件接收时间）、`status`、`reason`、`fiveHour`、`weekly`。
-- `record(body)`：用 `BrowserUsagePostSchema.parse` 校验，失败时抛错（路由返回 400）。`account` 非空时更新，为 `null` 时保留已持久化的旧邮箱。比接收时间晚的 `observedAt` 截断为接收时间。收到 `null` 的窗口时保留旧值；只有新值的 `observedAt` 更新时才替换。
-- 持久化到状态目录 `browser-usage.json`，权限 0600，先写临时文件再改名（写法同 `browser-bridge.ts` 的 `save`）。只在 `status`、`reason`、窗口、名称、邮箱变化时写入，或距上次写入超过 1 小时时写入。
+- 每个环境一条记录：`instanceId`、`instanceName`、`adspowerProfile`、`adspowerUserId`、`adspowerSerialNumber`、`adspowerName`、`adspowerQueriedAt`、`displayName`、`labelSource`（`'adspower_name' | 'serial_number' | 'user_id' | 'instance_name'`）、`labelSourceText`、`lastPostAt`（插件接收时间）、`status`、`reason`、`fiveHour`、`weekly`。
+- `record(body)`：用 `BrowserUsagePostSchema.parse` 校验，失败时抛错（路由返回 400）。由服务端查询 AdsPower 官方本地 API（默认 `http://local.adspower.net:50325`，超时 3 秒，支持可选 API Key 配置或环境变量，按 `user_id` 缓存并在首次出现、上报序号变化或距上次查询满 10 分钟时才查询）：
+  - 扩展上报了 `adspowerProfile`（或数字 `instanceName`）时，查 `/api/v1/user/list` 取对应环境的 `name`；
+  - 扩展未填且仍为默认 `未命名浏览器环境` 时，仅当本机只有 1 个扩展上报且 `/api/v1/browser/local-active` 恰好返回 1 个已打开环境时，取其 `user_id` / `serial_number` 并查 `/api/v1/user/list` 取 `name`；
+  - 若 `name` 为空或本地 API 未开启/查询失败，按顺序回退显示 `serial_number`、`user_id`、`instanceName`，并记录 `labelSource` / `labelSourceText` 调试字段，不影响额度上报。
+- 持久化到状态目录 `browser-usage.json`，权限 0600，先写临时文件再改名（写法同 `browser-bridge.ts` 的 `save`）。只在 `status`、`reason`、窗口、名称或 AdsPower 字段变化时写入，或距上次写入超过 1 小时时写入。
 - 超过 3 天没有收到 POST 的记录，在读取时删除。
 
 `registerBrowserUsage(server, readyBrowser, directory)`：
 
 - 先 `store.load()`，再 `readyBrowser().then(browser => browser.setUsageRoute(store.record))`。`discover` 和 `fetch` 开头也调用一次（幂等），这样浏览器通道重建后还能接上。失败时忽略。
 - `server.registerUsageSource({ id: 'claude-browser', label: 'claude.ai 浏览器环境', input: z.strictObject({ instanceId: id }), discover, fetch })`。
-- `discover(scope)`：`scope.kind !== 'global'` 时返回空数组；否则返回保留期内的每个环境：`key: hashAccountKey(instanceId)`、`label` 有邮箱时为 `环境名称 · 邮箱`，无邮箱时为 `环境名称`（未打开浏览器时仍显示已持久化的上一次邮箱）、`input: { instanceId }`。两个环境显示标签相同时，标签改为“显示标签 · key 前 4 位”。
+- `discover(scope)`：`scope.kind !== 'global'` 时返回空数组；否则返回保留期内的每个环境：`key: hashAccountKey(instanceId)`、`label` 为 `displayName || instanceName`（未打开浏览器时仍显示已持久化的名称）、`input: { instanceId }`。两个环境显示标签相同时，标签改为“显示标签 · key 前 4 位”。
 - `hashAccountKey`、`toneFromUsedPct`、`windowFromUsedPct`、`unavailable` 从 `@getpaseo/plugin/server/usage` 导入。
 
 ### 6.3 `toUsageReport(record, now, channelEnabled)`
@@ -294,7 +294,7 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
 ### 7.1 `tests/browser-usage-reader.test.ts`（`node:vm` 加载 `usage-reader.js`，假 `chrome`）
 
 1. `parseReset`：当天、跨天、跨周；未知格式返回 `null`；用 `tzOffset` 300 和 0 各测一次。
-2. `readDialog` 与 `parseDialog`：用真实样本 `usage-dialog.html` 提取并解析出两个窗口（59% / `2026-11-08T11:50:00.000Z`、46% / `2026-11-14T00:00:00.000Z`）；不读会话圆环样本 `session-usage-ring.html`；只有一行、`valueText` 不含 `used`、比例超出 0–100 时返回 `null`；不把 `Claude Code` 等分类行当成窗口；IndexedDB `keyval-store` 读取 `react-query-cache` 的 `current_account.email_address`（对象值、JSON 字符串值、无 `current_account`、IndexedDB 打开失败均覆盖）。
+2. `readDialog` 与 `parseDialog`：用真实样本 `usage-dialog.html` 提取并解析出两个窗口（59% / `2026-11-08T11:50:00.000Z`、46% / `2026-11-14T00:00:00.000Z`）；不读会话圆环样本 `session-usage-ring.html`；只有一行、`valueText` 不含 `used`、比例超出 0–100 时返回 `null`；不把 `Claude Code` 等分类行当成窗口。
 3. 维护与复用用量标签页：首次读取没有维护标签页时调用 `tabs.create({ url: 'https://claude.ai/settings/usage', active: false })`，先把标签页编号写入存储再等待，读完后保留标签页不调用 `tabs.remove`；下一轮 10 分钟到期且标签页仍在 `/new#settings/usage`（或 `/settings/usage`）时，复用该标签页并只对它调用 `tabs.reload`，不新建标签页，不碰业务会话标签页；`reload` 后先返回 `loading` 再 `complete` 时等待 `complete` 后才注入读取、`[role="meter"]` 延迟出现时短轮询等待成功、加载或 `[role="meter"]` 超时记 `failed`（`timeout`）且不上报刷新前的旧数字。
 4. 用户切走、改地址或关闭标签页：
    - 用户把维护的标签页改地址（如变为 `/new`、`/code/session_abc`、`https://example.com`）时，下一轮不刷新、不强行改回、不关闭原标签页，视为不再由扩展维护，另开一个后台用量页面并记住新标签页编号。
@@ -308,7 +308,7 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
 
 ### 7.2 `tests/browser-usage.test.ts`
 
-1. 多个环境：`discover` 的 `key` 等于 `hashAccountKey(instanceId)`，有邮箱时 `label` 等于 `环境名称 · 邮箱`，无邮箱时 `label` 等于 `环境名称`；显示标签相同时带后缀；持久化后重新加载及未打开浏览器时仍显示上一次邮箱。`scope.kind === 'session'` 时返回空数组。
+1. 多个环境与 AdsPower 名称解析：`discover` 的 `key` 等于 `hashAccountKey(instanceId)`，`label` 优先采用 AdsPower 本地 API 返回的环境名称（`labelSource: 'adspower_name'`），读不到名称时按顺序回退显示 `serial_number`、`user_id`、`instanceName`；按 `user_id` 缓存且 10 分钟内不重复请求；仅在本机单活跃环境且仅 1 个扩展上报时启用 `/api/v1/browser/local-active` 自动识别；显示标签相同时带后缀；持久化后重新加载及未打开浏览器时仍显示上一次解析的名称。`scope.kind === 'session'` 时返回空数组。
 2. 第 6.3 节表格的每一行。
 3. 窗口替换：`null` 不覆盖旧值，旧的 `observedAt` 不覆盖新值，未来时间被截断。
 4. 显示上一次数据且窗口的重置时间已过时，数字保留，状态行有说明。
@@ -325,9 +325,9 @@ export type BrowserUsagePost = z.infer<typeof BrowserUsagePostSchema>;
    - 每个浏览器环境保持一个用量页面标签页：没有就在后台打开一个，已有就复用，打开后保留，不再反复打开和关闭。
    - 每 10 分钟读取一次 5 小时和每周两个窗口，读取前只刷新扩展维护的这个用量页面标签页，不刷新、不点击其他页面。
    - 用户把这个标签页切走、改地址或关闭时，扩展不强行改回，下一轮再按规则处理（地址不再是用量页面时，视为不再由扩展维护，另开一个）。
-2. **展示登录账号邮箱（#1727 评论 6721183577，用户决定“provider要现实展示账号”）**：
-   - 在读用量页的同一次 `executeScript` 里只读打开 IndexedDB `keyval-store`，读键 `react-query-cache` 里 `current_account` 查询的 `email_address`，随 `/usage` 上报并由插件持久化。
-   - `UsageAccount.label` 有邮箱时显示 `环境名称 · 邮箱`，没有邮箱时只显示 `环境名称`，“未打开浏览器”时显示上一次持久化的邮箱。
+2. **面板条目名称使用 AdsPower（SunBrowser）环境名称（2026-11-08 用户决定）**：
+   - 不再读取 `claude.ai` 前端缓存 IndexedDB 中的邮箱。
+   - 由插件服务端通过 AdsPower 官方本地 API（默认 `http://local.adspower.net:50325`，超时 3 秒，支持可选 API Key）按 `serial_number` 或 `user_id`（或本机唯一活跃环境且唯一上报扩展时的 `/api/v1/browser/local-active`）查询环境 `name`，按 `user_id` 缓存并在首次出现、序号变化或满 10 分钟时才查询；读不到名称时按顺序回退显示环境序号、`user_id` 或扩展上报的 `instanceName`，并在记录中保存 `labelSource` / `labelSourceText` 供验收核对。
 
 已知限制（不需要决定，除非有反馈）：
 
