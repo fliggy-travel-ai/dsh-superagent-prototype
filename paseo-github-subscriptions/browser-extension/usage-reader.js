@@ -2,13 +2,15 @@
   const PAIR_RE = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/sync$/;
   const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-  async function readDialog() {
+  async function readDialog(minTimeOrigin = null) {
+    const timeOrigin = typeof performance !== 'undefined' && Number.isFinite(performance?.timeOrigin) ? performance.timeOrigin : null;
+    const isStale = typeof minTimeOrigin === 'number' && typeof timeOrigin === 'number' && timeOrigin < minTimeOrigin;
     let meters = [];
     for (let i = 0; i < 30; i++) {
       if (location.pathname.startsWith('/login') || document.title.includes('Just a moment')) break;
       const root = document.querySelector('[data-testid="usage-page-pace"]');
       meters = [...(root?.querySelectorAll('[role="meter"]') ?? [])];
-      if (meters.length > 0) break;
+      if (meters.length > 0 || isStale) break;
       if (i + 1 < 30 && typeof setTimeout === 'function') {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
@@ -84,7 +86,7 @@
         }
       }
     } catch {}
-    return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
+    return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
   }
 
   function isUsageUrl(value) {
@@ -162,14 +164,14 @@
 
   async function readUsagePage(state) {
     let tabId = null;
-    let reloaded = false;
+    let reloadAt = null;
     if (typeof state.tab?.id === 'number') {
       try {
         const existing = await chrome.tabs.get(state.tab.id);
         if (existing && typeof existing.id === 'number' && isUsageUrl(existing.url)) {
+          reloadAt = Date.now();
           await chrome.tabs.reload(existing.id);
           tabId = existing.id;
-          reloaded = true;
         }
       } catch {}
       if (tabId === null) {
@@ -201,9 +203,8 @@
       await chrome.storage.local.set({ usageState: state });
     }
 
-    let tabReady = false;
     for (let attempt = 0; attempt < 30; attempt++) {
-      if (attempt > 0 || reloaded) {
+      if (attempt > 0) {
         await new Promise(resolve => setTimeout(resolve, 500));
       }
       let currentTab;
@@ -216,49 +217,48 @@
         delete state.tab;
         return { status: 'failed', reason: 'tab_closed', observedAt: new Date(Date.now()).toISOString() };
       }
-      if (currentTab.status === undefined || currentTab.status === 'complete') {
-        tabReady = true;
-        break;
+      if (currentTab.status !== undefined && currentTab.status !== 'complete') {
+        continue;
       }
+      let results;
+      try {
+        results = await chrome.scripting.executeScript({ target: { tabId }, func: readDialog, args: [reloadAt] });
+      } catch {
+        delete state.tab;
+        return { status: 'failed', reason: 'tab_closed', observedAt: new Date(Date.now()).toISOString() };
+      }
+      const pageData = Array.isArray(results) ? results[0]?.result : undefined;
+      if (!pageData || typeof pageData !== 'object') {
+        continue;
+      }
+      if (reloadAt !== null && !(typeof pageData.timeOrigin === 'number' && pageData.timeOrigin >= reloadAt)) {
+        continue;
+      }
+      const observedAt = Number.isFinite(pageData.now) ? new Date(pageData.now).toISOString() : new Date(Date.now()).toISOString();
+      if (typeof pageData.path === 'string' && pageData.path.startsWith('/login')) {
+        return { status: 'signed_out', observedAt };
+      }
+      if (typeof pageData.title === 'string' && pageData.title.includes('Just a moment')) {
+        return { status: 'failed', reason: 'challenge', observedAt };
+      }
+      const parsed = parseDialog(pageData);
+      if (parsed) {
+        return { status: 'ok', ...parsed };
+      }
+      let afterTab;
+      try {
+        afterTab = await chrome.tabs.get(tabId);
+      } catch {
+        afterTab = null;
+      }
+      if (!afterTab || (afterTab.url && !isUsageUrl(afterTab.url) && !isLoginUrl(afterTab.url))) {
+        delete state.tab;
+        return { status: 'failed', reason: 'tab_closed', observedAt };
+      }
+      const sawRows = Array.isArray(pageData.rows) && pageData.rows.length > 0;
+      return { status: 'failed', reason: sawRows ? 'parse' : 'timeout', observedAt };
     }
-    if (!tabReady) {
-      return { status: 'failed', reason: 'timeout', observedAt: new Date(Date.now()).toISOString() };
-    }
-
-    let results;
-    try {
-      results = await chrome.scripting.executeScript({ target: { tabId }, func: readDialog });
-    } catch {
-      delete state.tab;
-      return { status: 'failed', reason: 'tab_closed', observedAt: new Date(Date.now()).toISOString() };
-    }
-    const pageData = Array.isArray(results) ? results[0]?.result : undefined;
-    if (!pageData || typeof pageData !== 'object') {
-      return { status: 'failed', reason: 'timeout', observedAt: new Date(Date.now()).toISOString() };
-    }
-    const observedAt = Number.isFinite(pageData.now) ? new Date(pageData.now).toISOString() : new Date(Date.now()).toISOString();
-    if (typeof pageData.path === 'string' && pageData.path.startsWith('/login')) {
-      return { status: 'signed_out', observedAt };
-    }
-    if (typeof pageData.title === 'string' && pageData.title.includes('Just a moment')) {
-      return { status: 'failed', reason: 'challenge', observedAt };
-    }
-    const parsed = parseDialog(pageData);
-    if (parsed) {
-      return { status: 'ok', ...parsed };
-    }
-    let afterTab;
-    try {
-      afterTab = await chrome.tabs.get(tabId);
-    } catch {
-      afterTab = null;
-    }
-    if (!afterTab || (afterTab.url && !isUsageUrl(afterTab.url) && !isLoginUrl(afterTab.url))) {
-      delete state.tab;
-      return { status: 'failed', reason: 'tab_closed', observedAt };
-    }
-    const sawRows = Array.isArray(pageData.rows) && pageData.rows.length > 0;
-    return { status: 'failed', reason: sawRows ? 'parse' : 'timeout', observedAt };
+    return { status: 'failed', reason: 'timeout', observedAt: new Date(Date.now()).toISOString() };
   }
 
   let running = null;

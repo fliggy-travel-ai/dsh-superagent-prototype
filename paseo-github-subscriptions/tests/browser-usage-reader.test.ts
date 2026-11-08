@@ -404,10 +404,10 @@ function createHarness(initialState: Record<string, any> = {}) {
   let alarmListener: ((alarm: { name: string }) => void) | null = null;
   let onReload: ((id: number) => void) | null = null;
   let onGetTab: ((id: number, tab: { id: number; url: string; active: boolean; status?: string }) => { id: number; url: string; active: boolean; status?: string }) | null = null;
-  let scriptResponder: (tabId: number, func: () => any) => any = async (_tabId, func) => {
+  let scriptResponder: (tabId: number, func: (...args: any[]) => any, args?: any[]) => any = async (_tabId, func, args = []) => {
     const dom = parseHtmlDocument(dialogFixtureHtml, '/new', 'New session - Claude');
     const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => now });
-    return [{ result: await runInNewContext(`(${func.toString()})()`, { document: dom.document, location: dom.location, Date: FakeDate, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
+    return [{ result: await runInNewContext(`(${func.toString()})(...${JSON.stringify(args)})`, { document: dom.document, location: dom.location, Date: FakeDate, performance: { timeOrigin: now }, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
   };
 
   const FakeDate: any = function (...args: any[]) {
@@ -460,10 +460,10 @@ function createHarness(initialState: Record<string, any> = {}) {
       },
     },
     scripting: {
-      async executeScript(input: { target: { tabId: number }; func: () => any }) {
+      async executeScript(input: { target: { tabId: number }; func: (...args: any[]) => any; args?: any[] }) {
         if (state.usageState?.tab?.id === input.target.tabId) tabIdSavedBeforeInject = true;
         injectedTabs.push(input.target.tabId);
-        return scriptResponder(input.target.tabId, input.func);
+        return scriptResponder(input.target.tabId, input.func, input.args);
       },
     },
     alarms: {
@@ -650,7 +650,7 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
   // 第 2 次失败：安全验证（challenge），退避 40 分钟
   harness.setNow(harness.state.usageState.nextReadAt);
   harness.setWindows([{ id: 1 }]);
-  harness.setResponder(() => [{ result: { path: '/new', title: 'Just a moment...', rows: [], now: Date.now(), tzOffset: 300 } }]);
+  harness.setResponder(() => [{ result: { path: '/new', title: 'Just a moment...', rows: [], now: harness.state.usageState.nextReadAt, tzOffset: 300, timeOrigin: harness.state.usageState.nextReadAt } }]);
   await harness.tick();
   assert.equal(harness.state.usageState.status, 'failed');
   assert.equal(harness.state.usageState.reason, 'challenge');
@@ -658,7 +658,7 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
 
   // 第 3 次失败：有 rows 但格式无法识别（parse），退避 60 分钟
   harness.setNow(harness.state.usageState.nextReadAt);
-  harness.setResponder(() => [{ result: { path: '/new', title: 'Claude', rows: [{ label: '未知标签', used: '10', valueText: '10% used', reset: null }], now: Date.now(), tzOffset: 300 } }]);
+  harness.setResponder(() => [{ result: { path: '/new', title: 'Claude', rows: [{ label: '未知标签', used: '10', valueText: '10% used', reset: null }], now: harness.state.usageState.nextReadAt, tzOffset: 300, timeOrigin: harness.state.usageState.nextReadAt } }]);
   await harness.tick();
   assert.equal(harness.state.usageState.status, 'failed');
   assert.equal(harness.state.usageState.reason, 'parse');
@@ -666,7 +666,7 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
 
   // 第 4 次失败：空白超时（timeout），退避封顶 60 分钟
   harness.setNow(harness.state.usageState.nextReadAt);
-  harness.setResponder(() => [{ result: { path: '/new', title: 'Claude', rows: [], now: Date.now(), tzOffset: 300 } }]);
+  harness.setResponder(() => [{ result: { path: '/new', title: 'Claude', rows: [], now: harness.state.usageState.nextReadAt, tzOffset: 300, timeOrigin: harness.state.usageState.nextReadAt } }]);
   await harness.tick();
   assert.equal(harness.state.usageState.status, 'failed');
   assert.equal(harness.state.usageState.reason, 'timeout');
@@ -675,7 +675,7 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
   // 未登录（signed_out）：间隔 30 分钟，且清除 reason，保留旧窗口数值
   const signedOutAt = harness.state.usageState.nextReadAt;
   harness.setNow(signedOutAt);
-  harness.setResponder(() => [{ result: { path: '/login', title: 'Sign in - Claude', rows: [], now: Date.now(), tzOffset: 300 } }]);
+  harness.setResponder(() => [{ result: { path: '/login', title: 'Sign in - Claude', rows: [], now: signedOutAt, tzOffset: 300, timeOrigin: signedOutAt } }]);
   await harness.tick();
   assert.equal(harness.state.usageState.status, 'signed_out');
   assert.equal(harness.state.usageState.reason, undefined);
@@ -683,20 +683,73 @@ test('无窗口、未登录、安全验证、解析失败、超时及 20/40/60 �
   assert.equal(harness.state.usageState.nextReadAt, signedOutAt + 30 * 60_000);
 });
 
-test('reload 后先返回 loading 再 complete、meter 延迟出现、超时三种情况', async () => {
+test('reload 后校验 performance.timeOrigin、等待 status === complete 与 [role="meter"] 延迟出现及超时', async () => {
+  const initialNow = Date.parse('2026-11-08T11:07:20.885Z');
   const harness = createHarness({
     instanceId: 'env-reload',
     instanceName: 'SunBrowser Reload',
     pairing: { url: 'http://127.0.0.1:17373/sync', token: 'c'.repeat(64) },
   });
 
-  // 首次读取成功（59% / 46%）
+  // 首次新开标签页读取成功（59% / 46%）：新开标签页不校验 timeOrigin（即使 timeOrigin 早于当前时间也通过）
+  harness.setResponder(async (_tabId, func, args = []) => {
+    const dom = parseHtmlDocument(dialogFixtureHtml, '/new', 'New session - Claude');
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => initialNow });
+    return [{ result: await runInNewContext(`(${func.toString()})(...${JSON.stringify(args)})`, { document: dom.document, location: dom.location, Date: FakeDate, performance: { timeOrigin: initialNow - 5000 }, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
+  });
   await harness.tick();
   assert.equal(harness.posts.at(-1)?.body.status, 'ok');
   assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 59);
   assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 46);
 
-  // 情况 1：reload 后标签页先返回 2 次 status: 'loading'（期间若提前注入会读到刷新前的 59%/46% 旧 DOM），第 3 次变为 'complete'（新 DOM 为 74%/52%）
+  // 情况 1：reload 后旧文档先返回（status 已是 complete，但 timeOrigin 早于 reload 发起时间，旧文档数字被改为 46.5），前 2 次注入返回旧文档，第 3 次新文档返回（timeOrigin >= reloadAt，数字为 74 / 52）
+  const reloadAt1 = initialNow + 10 * 60_000;
+  let injectCallCount = 0;
+  harness.setResponder(async (_tabId, func, args = []) => {
+    injectCallCount += 1;
+    const isStaleDoc = injectCallCount <= 2;
+    const html = isStaleDoc
+      ? dialogFixtureHtml
+          .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="46.5" aria-valuetext="46.5% used"')
+      : dialogFixtureHtml
+          .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="74" aria-valuetext="74% used"')
+          .replace('aria-valuenow="46" aria-valuetext="46% used"', 'aria-valuenow="52" aria-valuetext="52% used"');
+    const dom = parseHtmlDocument(html, '/new', 'New session - Claude');
+    const docTimeOrigin = isStaleDoc ? initialNow : reloadAt1 + 120;
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => reloadAt1 + 200 });
+    return [{ result: await runInNewContext(`(${func.toString()})(...${JSON.stringify(args)})`, { document: dom.document, location: dom.location, Date: FakeDate, performance: { timeOrigin: docTimeOrigin }, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
+  });
+
+  harness.setNow(reloadAt1);
+  await harness.tick();
+  assert.equal(injectCallCount, 3);
+  assert.equal(harness.posts.at(-1)?.body.status, 'ok');
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 74);
+  assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 52);
+
+  // 情况 2：reload 后一直是旧文档（timeOrigin < reloadAt）直到 30 次重试超时，记为 failed (timeout)，绝不把旧文档的 46.5 上报为 ok
+  const reloadAt2 = reloadAt1 + 10 * 60_000;
+  let staleAttempts = 0;
+  harness.setResponder(async (_tabId, func, args = []) => {
+    staleAttempts += 1;
+    const staleHtml = dialogFixtureHtml.replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="46.5" aria-valuetext="46.5% used"');
+    const dom = parseHtmlDocument(staleHtml, '/new', 'New session - Claude');
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => reloadAt2 + 100 });
+    return [{ result: await runInNewContext(`(${func.toString()})(...${JSON.stringify(args)})`, { document: dom.document, location: dom.location, Date: FakeDate, performance: { timeOrigin: reloadAt1 }, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
+  });
+
+  harness.setNow(reloadAt2);
+  await harness.tick();
+  assert.equal(staleAttempts, 30);
+  assert.equal(harness.state.usageState.status, 'failed');
+  assert.equal(harness.state.usageState.reason, 'timeout');
+  assert.equal(harness.posts.at(-1)?.body.status, 'failed');
+  assert.equal(harness.posts.at(-1)?.body.reason, 'timeout');
+  // 保留上一次成功的新文档数字 74%，而不是旧文档的 46.5%
+  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 74);
+
+  // 情况 3：reload 后先返回 loading 再 complete，且新文档里 [role="meter"] 延迟出现（第 4 次短轮询才渲染出来，值为 81% / 58%）
+  const reloadAt3 = harness.state.usageState.nextReadAt;
   let getCallsAfterReload = 0;
   let currentTabStatus: 'loading' | 'complete' = 'complete';
   harness.setOnReload(() => {
@@ -713,31 +766,9 @@ test('reload 后先返回 loading 再 complete、meter 延迟出现、超时三�
     return { ...tab, status: currentTabStatus };
   });
   const injectedStatuses: string[] = [];
-  harness.setResponder(async (_tabId, func) => {
+  const meterPollDelays: number[] = [];
+  harness.setResponder(async (_tabId, func, args = []) => {
     injectedStatuses.push(currentTabStatus);
-    const updatedHtml = currentTabStatus === 'complete'
-      ? dialogFixtureHtml
-          .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="74" aria-valuetext="74% used"')
-          .replace('aria-valuenow="46" aria-valuetext="46% used"', 'aria-valuenow="52" aria-valuetext="52% used"')
-      : dialogFixtureHtml;
-    const dom = parseHtmlDocument(updatedHtml, '/new', 'New session - Claude');
-    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => Date.parse('2026-11-08T11:17:20.885Z') });
-    return [{ result: await runInNewContext(`(${func.toString()})()`, { document: dom.document, location: dom.location, Date: FakeDate, Promise, setTimeout: (fn: () => void) => { fn(); return 1; } }) }];
-  });
-
-  harness.advanceMs(10 * 60_000);
-  await harness.tick();
-  assert.equal(getCallsAfterReload, 3);
-  assert.deepEqual(injectedStatuses, ['complete']);
-  assert.equal(harness.posts.at(-1)?.body.status, 'ok');
-  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 74);
-  assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 52);
-
-  // 情况 2：标签页 complete 后，弹窗里的 [role="meter"] 延迟出现（第 4 次短轮询才渲染出来，值为 81%/58%）
-  harness.setOnReload(null);
-  harness.setOnGetTab((_id, tab) => ({ ...tab, status: 'complete' }));
-  let meterPollDelays: number[] = [];
-  harness.setResponder(async (_tabId, func) => {
     const emptyDom = parseHtmlDocument('<div data-testid="usage-page-pace"><div>Loading usage...</div></div>', '/new', 'New session - Claude');
     const readyHtml = dialogFixtureHtml
       .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="81" aria-valuetext="81% used"')
@@ -757,11 +788,12 @@ test('reload 后先返回 loading 再 complete、meter 延迟出现、超时三�
         return queryCount <= 3 ? emptyDom.document.querySelectorAll(selector) : readyDom.document.querySelectorAll(selector);
       },
     };
-    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => Date.parse('2026-11-08T11:27:20.885Z') });
-    const result = await runInNewContext(`(${func.toString()})()`, {
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => reloadAt3 + 1500 });
+    const result = await runInNewContext(`(${func.toString()})(...${JSON.stringify(args)})`, {
       document: dynamicDocument,
       location: readyDom.location,
       Date: FakeDate,
+      performance: { timeOrigin: reloadAt3 + 300 },
       Promise,
       setTimeout: (fn: () => void, ms: number) => {
         meterPollDelays.push(ms);
@@ -772,36 +804,28 @@ test('reload 后先返回 loading 再 complete、meter 延迟出现、超时三�
     return [{ result }];
   });
 
-  harness.advanceMs(10 * 60_000);
+  harness.setNow(reloadAt3);
   await harness.tick();
+  assert.equal(getCallsAfterReload, 3);
+  assert.deepEqual(injectedStatuses, ['complete']);
   assert.deepEqual(meterPollDelays, [500, 500, 500]);
   assert.equal(harness.posts.at(-1)?.body.status, 'ok');
   assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 81);
   assert.equal(harness.posts.at(-1)?.body.weekly.usedPct, 58);
 
-  // 情况 3a：超时——reload 后标签页一直停留在 status: 'loading'，不执行 executeScript，记为 failed (timeout)，不上报刷新前旧 DOM 作为新 ok
-  const injectCountBeforeLoadingTimeout = harness.injectedTabs.length;
-  harness.setOnGetTab((_id, tab) => ({ ...tab, status: 'loading' }));
-  harness.advanceMs(10 * 60_000);
-  await harness.tick();
-  assert.equal(harness.injectedTabs.length, injectCountBeforeLoadingTimeout);
-  assert.equal(harness.state.usageState.status, 'failed');
-  assert.equal(harness.state.usageState.reason, 'timeout');
-  assert.equal(harness.posts.at(-1)?.body.status, 'failed');
-  assert.equal(harness.posts.at(-1)?.body.reason, 'timeout');
-  assert.equal(harness.posts.at(-1)?.body.fiveHour.usedPct, 81);
-  assert.equal(harness.posts.at(-1)?.body.fiveHour.observedAt, '2026-11-08T11:27:20.885Z');
-
-  // 情况 3b：超时——标签页已 complete，但 [role="meter"] 在 15 秒（30 次短轮询）内始终未出现，记为 failed (timeout)
+  // 情况 4：新文档已加载（timeOrigin >= reloadAt），但 [role="meter"] 在 15 秒内始终未出现，记为 failed (timeout)
+  const reloadAt4 = harness.state.usageState.nextReadAt;
+  harness.setOnReload(null);
   harness.setOnGetTab((_id, tab) => ({ ...tab, status: 'complete' }));
-  let timeoutPollDelays: number[] = [];
-  harness.setResponder(async (_tabId, func) => {
+  const timeoutPollDelays: number[] = [];
+  harness.setResponder(async (_tabId, func, args = []) => {
     const emptyDom = parseHtmlDocument('<div data-testid="usage-page-pace"><div>Still loading...</div></div>', '/new', 'New session - Claude');
-    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => Date.parse('2026-11-08T11:57:20.885Z') });
-    const result = await runInNewContext(`(${func.toString()})()`, {
+    const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => 300 }; }, { now: () => reloadAt4 + 1000 });
+    const result = await runInNewContext(`(${func.toString()})(...${JSON.stringify(args)})`, {
       document: emptyDom.document,
       location: emptyDom.location,
       Date: FakeDate,
+      performance: { timeOrigin: reloadAt4 + 50 },
       Promise,
       setTimeout: (fn: () => void, ms: number) => {
         timeoutPollDelays.push(ms);
@@ -811,7 +835,7 @@ test('reload 后先返回 loading 再 complete、meter 延迟出现、超时三�
     });
     return [{ result }];
   });
-  harness.setNow(harness.state.usageState.nextReadAt);
+  harness.setNow(reloadAt4);
   await harness.tick();
   assert.equal(timeoutPollDelays.length, 29);
   assert.equal(harness.state.usageState.status, 'failed');

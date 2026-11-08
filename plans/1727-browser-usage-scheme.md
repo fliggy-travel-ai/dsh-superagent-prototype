@@ -118,16 +118,18 @@ void tick();
 
 ### 5.1 注入页面的函数（只读）
 
-标签页 `status === 'complete'` 后，用 `chrome.scripting.executeScript({ target: { tabId }, func })` 注入到扩展维护的用量页面标签页。函数内部先短轮询等待 `[role="meter"]` 出现（每 500 毫秒查一次，最多 30 次即 15 秒；遇到 `/login` 或 `Just a moment` 立即结束等待），再只读打开页面前端缓存 IndexedDB `keyval-store` 读取键 `react-query-cache` 里 `current_account` 查询结果的 `email_address`：
+标签页 `status === 'complete'` 后，用 `chrome.scripting.executeScript({ target: { tabId }, func: readDialog, args: [reloadAt] })` 注入到扩展维护的用量页面标签页。函数同时返回 `performance.timeOrigin`（供 `reload` 后核对是否为新文档），内部短轮询等待 `[role="meter"]` 出现（每 500 毫秒查一次，最多 30 次即 15 秒；遇到 `/login`、`Just a moment` 或检测到 `timeOrigin < reloadAt` 的旧文档时立即结束等待），再只读打开页面前端缓存 IndexedDB `keyval-store` 读取键 `react-query-cache` 里 `current_account` 查询结果的 `email_address`：
 
 ```js
-async function readDialog() {
+async function readDialog(minTimeOrigin = null) {
+  const timeOrigin = typeof performance !== 'undefined' && Number.isFinite(performance?.timeOrigin) ? performance.timeOrigin : null;
+  const isStale = typeof minTimeOrigin === 'number' && typeof timeOrigin === 'number' && timeOrigin < minTimeOrigin;
   let meters = [];
   for (let i = 0; i < 30; i++) {
     if (location.pathname.startsWith('/login') || document.title.includes('Just a moment')) break;
     const root = document.querySelector('[data-testid="usage-page-pace"]');
     meters = [...(root?.querySelectorAll('[role="meter"]') ?? [])];
-    if (meters.length > 0) break;
+    if (meters.length > 0 || isStale) break;
     if (i + 1 < 30 && typeof setTimeout === 'function') {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -141,7 +143,7 @@ async function readDialog() {
   let account = null;
   // 只读打开 IndexedDB 'keyval-store'，读取键 'react-query-cache'（支持对象或 JSON 字符串），
   // 查找 queryKey 含 'current_account' 的查询并取其数据里的 email_address；失败或缺失时返回 null，不影响额度读取。
-  return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset() };
+  return { path: location.pathname, title: document.title, rows, account, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
 }
 ```
 
@@ -198,8 +200,10 @@ async function readDialog() {
 
 等待：
 
-1. `reload` 或 `create` 后，先轮询 `chrome.tabs.get(tabId)`（每 500 毫秒一次，最多 30 次即 15 秒），等待 `tab.status === 'complete'`；若超时仍为 `loading`，记 `failed`、`timeout`，不注入读取刷新前的旧 DOM。
-2. 标签页 `status === 'complete'` 后，注入一次 `readDialog`，在函数内每 500 毫秒短轮询 `[role="meter"]`，最多 30 次（15 秒）。
+1. `reload` 发起前记录 `reloadAt = Date.now()`（新开标签页时 `reloadAt` 为 `null`，不做 `timeOrigin` 校验）。
+2. 每 500 毫秒轮询一次（最多 30 次即约 15 秒）：先用 `chrome.tabs.get(tabId)` 确认标签页 `status === 'complete'`，再注入 `readDialog`。
+3. 对 `reload` 的标签页，只接受 `pageData.timeOrigin >= reloadAt` 的新文档结果；若返回的是旧文档（`timeOrigin < reloadAt`），每 500 毫秒重试，最多约 15 秒，仍不满足则记 `failed`、`timeout`，绝不把旧文档数字上报为新结果。
+4. 进入新文档后，`readDialog` 在函数内每 500 毫秒短轮询 `[role="meter"]`，最多 30 次（15 秒）。
 
 | 页面情况 | 结果 |
 |---|---|
