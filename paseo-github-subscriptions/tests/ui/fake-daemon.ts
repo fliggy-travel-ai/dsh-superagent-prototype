@@ -2,6 +2,9 @@ import type { PluginRpcContract } from '@getpaseo/plugin';
 import { pollNow, removeToken, saveToken, savePreferences, snapshot, unsubscribe } from '../../shared/contracts.ts';
 import type { Snapshot } from '../../shared/model.ts';
 import { makeSnapshot, type Scene } from './fixtures.ts';
+import { makeAutomation, makeBrowser } from './control-fixtures.ts';
+import type { SessionPolicy } from '../../shared/automation.ts';
+import type { BrowserBindingInput, BrowserSettings } from '../../shared/browser.ts';
 
 export interface RpcLogEntry {
   name: string;
@@ -12,6 +15,8 @@ export interface RpcLogEntry {
 
 /** 内存里的假守护进程：用真实合约的 Zod 校验输入和输出。 */
 export class FakeDaemon {
+  automation = makeAutomation();
+  browser = makeBrowser();
   state: Snapshot;
   readonly log: RpcLogEntry[] = [];
   latencyMs = 150;
@@ -33,6 +38,24 @@ export class FakeDaemon {
 
   private handle(name: string, input: Record<string, unknown>): unknown {
     switch (name) {
+      case 'automation.snapshot': return this.automation;
+      case 'automation.pause': this.automation = { ...this.automation, paused: Boolean(input.paused) }; return this.automation;
+      case 'automation.policy': {
+        const policy = input as unknown as SessionPolicy;
+        this.automation = { ...this.automation, policies: [...this.automation.policies.filter(item => item.agentId !== policy.agentId), policy] };
+        return this.automation;
+      }
+      case 'browser.snapshot': return this.browser;
+      case 'browser.configure': this.browser = { ...this.browser, settings: input as unknown as BrowserSettings, connected: Boolean(input.enabled) }; return this.browser;
+      case 'browser.pairing': return { url: `http://127.0.0.1:${this.browser.settings.port}/sync`, token: '演示配对令牌，无实际权限' };
+      case 'browser.bind': {
+        const binding = input as unknown as BrowserBindingInput;
+        this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),
+          sessions: this.browser.sessions.map(session => session.instanceId === binding.instanceId && session.sessionId === binding.sessionId
+            ? { ...session, agentId: binding.agentId, groupTitle: this.automation.sessions.find(item => item.id === binding.agentId)?.title ?? session.title } : session) };
+        if (binding.agentId) this.browser.bindings.push({ ...binding, agentId: binding.agentId });
+        return this.browser;
+      }
       case snapshot.name:
       case pollNow.name:
         return this.state;

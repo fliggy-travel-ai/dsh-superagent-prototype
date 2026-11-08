@@ -1,0 +1,8 @@
+{
+  "id": "cloud-session-probe",
+  "name": "Cloud session probe",
+  "description": "Prototype provider whose sessions are driven by a remote caller through plugin RPC.",
+  "requirements": {
+    "paseo": ">=0.15.0 <0.16.0"
+  }
+}

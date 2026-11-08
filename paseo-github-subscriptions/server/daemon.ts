@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createPaseoApi } from '@getpaseo/client';
 import { createHostClient } from '@getpaseo/client/node';
+import type { AgentPermissionResponse } from '@getpaseo/protocol/agent-types';
 
 export async function connectDaemon(home: string, signal: AbortSignal = new AbortController().signal) {
   const deadline = Date.now() + 60_000;
@@ -35,7 +36,14 @@ export async function connectDaemon(home: string, signal: AbortSignal = new Abor
           signal.removeEventListener('abort', abort);
         }
         if (signal.aborted) throw new Error('插件已停止');
-        return { paseo: createPaseoApi(active), close: () => active.close() };
+        return {
+          paseo: createPaseoApi(active), client: active, close: () => active.close(),
+          respond: (agentId: string, requestId: string, response: AgentPermissionResponse) => active.respondToPermissionAndWait(agentId, requestId, response, 10_000),
+          approve: async (agentId: string, requestId: string) => {
+            await active.respondToPermissionAndWait(agentId, requestId, { behavior: 'allow' }, 10_000);
+            return true;
+          },
+        };
       }
     } catch {
       detail = '无法读取本机连接信息或连接本机守护进程失败';

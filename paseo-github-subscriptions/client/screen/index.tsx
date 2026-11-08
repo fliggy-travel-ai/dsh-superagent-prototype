@@ -12,7 +12,7 @@ function isTab(value: string | undefined): value is Tab {
   return value === 'subs' || value === 'events' || value === 'status';
 }
 
-export function MainScreen({ params }: PluginScreenProps) {
+export function GitHubPanel({ params }: Pick<PluginScreenProps, 'params'>) {
   const { s, openScreen } = useUi();
   const { snapshot, error } = useStoreState();
   const [tab, setTab] = useState<Tab>(isTab(params.tab) ? params.tab : 'subs');
@@ -20,7 +20,7 @@ export function MainScreen({ params }: PluginScreenProps) {
   const watched = snapshot?.repositories.length ?? 0;
 
   return (
-    <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
+    <View style={{ gap: 16 }}>
       <View style={[s.row, { justifyContent: 'space-between', alignItems: 'flex-start' }]}>
         <View style={{ flex: 1, gap: 4 }}>
           <Text style={s.h1}>GitHub 订阅</Text>
@@ -66,6 +66,6 @@ export function MainScreen({ params }: PluginScreenProps) {
         ]}
       />
       {tab === 'subs' ? <SubscriptionsTab /> : tab === 'events' ? <EventsTab /> : <StatusTab />}
-    </ScrollView>
+    </View>
   );
 }
