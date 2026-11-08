@@ -1,5 +1,5 @@
 import { createHostClient } from '@getpaseo/client/node';
-import { ensureSession, pushTimeline, pollInbox, ackInbox, forwardMcp } from '../../../paseo-github-subscriptions/shared/cloud-session.ts';
+import { ensureSession, pushTimeline, pollInbox, ackInbox, forwardMcp, notifyPendingRequest, resolvePendingRequest } from '../../../paseo-github-subscriptions/shared/cloud-session.ts';
 import { realpathSync } from 'node:fs';
 import { readFile, writeFile, mkdir, appendFile, open, stat, unlink, rename } from 'node:fs/promises';
 import { spawn, execFileSync } from 'node:child_process';
@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const workspaceInstructions = id => `这个会话在 Paseo 里有自己的工作区 ${id || '（编号见 PASEO_WORKSPACE_ID）'}；定下需求 Issue 后以及每次需求阶段变化时，用 Paseo 工具 rename_workspace 将它改成 <Issue 号>【<状态>】<需求名>。`;
 const instructions = '请用 run_in_background 运行 node /opt/paseo-cloud-session/paseo-cloud-session.mjs wait；被唤醒后处理消息，处理完再启动下一次 wait。经 Paseo 工具创建子会话时必须传 settings.modeId。';
 const redact = (value, env) => env.PASEO_MINI_HOST ? value.replaceAll(env.PASEO_MINI_HOST, '[已隐藏]') : value;
 const shellQuote = s => "'" + s.replaceAll("'", "'\\''") + "'";
@@ -144,9 +145,34 @@ export async function updateTitle(rpc, env, agentId, title, state={attempted:fal
   const reply=result.messages.find(x=>x.id==='cloud-title');
   if(result.status>=400 || !reply || reply.error || reply.result?.isError) throw Error('Paseo 标题更新失败：'+(reply?.error?.message || reply?.result?.content?.map?.(x=>x.text || '').join(' ') || `HTTP ${result.status}`));
 }
+const requestMarker=(env,id)=>join(sessionDir(env),'requests',createHash('sha256').update(id).digest('hex'));
+function resultOutcome(block,row) {
+  const text=inputText(block.content);
+  if(row.toolUseResult?.interrupted || /\[Request interrupted by user/i.test(text)) return 'canceled';
+  if(block.is_error && /(?:user (?:denied|rejected)|permission (?:denied|rejected) by (?:the )?user|denied by (?:the )?user|tool use was rejected|user (?:does not|doesn't) want to proceed|用户拒绝)/i.test(text)) return 'denied';
+  return 'answered';
+}
+export async function notifyRequest(input, env=process.env, rpc=createRpc(env)) {
+  const toolName=input.tool_name, toolInput=input.tool_input;
+  if(typeof toolName!=='string' || !toolName || !toolInput || typeof toolInput!=='object' || Array.isArray(toolInput)) return;
+  let id=typeof input.tool_use_id==='string' ? input.tool_use_id : '';
+  if(!id && input.transcript_path) {
+    try {const lines=(await readFile(input.transcript_path,'utf8')).split('\n');
+      for(let i=lines.length-1;i>=0 && !id;i--) {try {const row=JSON.parse(lines[i]); if(row.type!=='assistant' || row.isSidechain || row.isMeta) continue; const blocks=row.message?.content; if(!Array.isArray(blocks)) continue; for(let j=blocks.length-1;j>=0;j--) {const b=blocks[j]; if(b.type==='tool_use' && b.name===toolName && typeof b.id==='string' && b.id) {id=b.id;break;}}} catch {}}
+    } catch {}
+  }
+  if(!id) return;
+  await rpc(notifyPendingRequest,{...context(env),request:{toolUseId:id,toolName,kind:toolName==='AskUserQuestion'?'question':'tool',input:toolInput}});
+  const marker=requestMarker(env,id); await mkdir(join(sessionDir(env),'requests'),{recursive:true}); await writeFile(marker,'');
+}
+export function permissionHook(input, env=process.env, launch=spawn) {
+  if(!eligible(env) || input.agent_id || input.agent_type || input.source==='subagent') return;
+  const child=launch(process.execPath,[fileURLToPath(import.meta.url),'permission-notify'],{detached:true,stdio:['pipe','ignore','ignore'],env,cwd:input.cwd || process.cwd()});
+  child.on('error',()=>{}); child.stdin.on('error',()=>{}); child.stdin.end(JSON.stringify(input)); child.unref();
+}
 export async function forward(path, env=process.env, rpc=createRpc(env), startOffset) {
   const lease=await lock(sessionDir(env),path); if(!lease) return;
-  const queue=new ForwardQueue(rpc,env); let offset=startOffset ?? (await stat(path)).size, partial=Buffer.alloc(0), delay=500, registered=false, agentId, titlePending=null;
+  const queue=new ForwardQueue(rpc,env); const requestResults=new Map(); let offset=startOffset ?? (await stat(path)).size, partial=Buffer.alloc(0), delay=500, registered=false, agentId, titlePending=null;
   let titleHandled=lease.titleHandled || (await titleFor(path,offset))!=='云端会话';
   let titleAttempts=0, titleNext=0; const titleMcp={attempted:false,initialized:false};
   if(titleHandled && !lease.titleHandled && !await updateLease(lease,{titleHandled:true})) return;
@@ -155,9 +181,10 @@ export async function forward(path, env=process.env, rpc=createRpc(env), startOf
   try { for (;;) {
     if(!await ownsLock(lease)) return;
     try {
-      const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {const row=JSON.parse(line); const value=queue.map(row); if(value) {queue.enqueue(value); if(!titleHandled && !titlePending) titlePending=value.items.find(x=>x.type==='user_message')?.text || null;}} catch {} } } } finally {await f.close();}
+      const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {const row=JSON.parse(line); if(row.type==='user' && !row.isMeta && !row.isSidechain && Array.isArray(row.message?.content)) for(const block of row.message.content) if(block.type==='tool_result' && typeof block.tool_use_id==='string') requestResults.set(block.tool_use_id,resultOutcome(block,row)); const value=queue.map(row); if(value) {queue.enqueue(value); if(!titleHandled && !titlePending) titlePending=value.items.find(x=>x.type==='user_message')?.text || null;}} catch {} } } } finally {await f.close();}
       if(!registered) await register();
       await queue.flush();
+      for(const [toolUseId,outcome] of requestResults) {const marker=requestMarker(env,toolUseId); try {await stat(marker);} catch(e) {if(e.code==='ENOENT') continue; throw e;} await rpc(resolvePendingRequest,{...context(env),toolUseId,outcome}); await unlink(marker).catch(()=>{}); requestResults.delete(toolUseId);}
       if(titlePending && Date.now()>=titleNext) {
         if(!titleHandled) {if(!await updateLease(lease,{titleHandled:true})) return; titleHandled=true;}
         titleAttempts++;
@@ -173,17 +200,16 @@ export async function hook(input, env=process.env, rpc=createRpc(env), launch=tr
   if(!eligible(env) || (input.source === 'subagent' || input.agent_id || input.agent_type) || !input.transcript_path) return '';
   if(launch) { const size=await stat(input.transcript_path).then(x=>x.size).catch(()=>0); const child=spawn(process.execPath,[fileURLToPath(import.meta.url),'forward',input.transcript_path,String(size)],{detached:true,stdio:'ignore',env,cwd:input.cwd || process.cwd()}); child.unref(); }
   try { const result=await ensure(rpc,env,input.transcript_path,input.cwd || process.cwd());
-    await mkdir(sessionDir(env),{recursive:true}); await writeFile(join(sessionDir(env),'epoch'),result.epoch,{flag:'wx'}).catch(()=>{});
-    if(env.CLAUDE_ENV_FILE) await appendFile(env.CLAUDE_ENV_FILE,`export PASEO_AGENT_ID=${shellQuote(result.agentId)}\nexport PASEO_AGENT_SERVER_ID=${shellQuote(result.serverId)}\n`);
-    return redact(`Paseo agent: ${result.agentId}\n${instructions}\n`, env);
+    await mkdir(sessionDir(env),{recursive:true}); await writeFile(join(sessionDir(env),'epoch'),result.epoch,{flag:'wx'}).catch(()=>{}); await writeFile(join(sessionDir(env),'workspace.json'),JSON.stringify({workspaceId:result.workspaceId,agentId:result.agentId}));
+    if(env.CLAUDE_ENV_FILE) await appendFile(env.CLAUDE_ENV_FILE,`export PASEO_AGENT_ID=${shellQuote(result.agentId)}\nexport PASEO_AGENT_SERVER_ID=${shellQuote(result.serverId)}\nexport PASEO_WORKSPACE_ID=${shellQuote(result.workspaceId)}\n`);
+    return redact(`Paseo agent: ${result.agentId}\n${workspaceInstructions(result.workspaceId)}\n${instructions}\n`, env);
   } catch(error) { return `Mac Mini 接入失败：${safeReason(error,env)}；后台将重试。\n`; }
 }
 export async function install(home, artifact, run = execFileSync) {
   const dir=join(home,'.claude'), path=join(dir,'settings.json'); await mkdir(dir,{recursive:true});
   let settings={}; try {settings=JSON.parse(await readFile(path,'utf8'));} catch(e) {if(e.code!=='ENOENT') throw e;}
-  settings.hooks ||= {}; settings.hooks.SessionStart ||= [];
-  const command=`node ${shellQuote(artifact)} hook-session-start`;
-  if(!settings.hooks.SessionStart.some(x => x.hooks?.some(h=>h.type==='command' && h.command===command))) settings.hooks.SessionStart.push({hooks:[{type:'command',command}]});
+  settings.hooks ||= {};
+  for(const [event,subcommand] of [['SessionStart','hook-session-start'],['PermissionRequest','hook-permission-request']]) { settings.hooks[event] ||= []; const command=`node ${shellQuote(artifact)} ${subcommand}`; if(!settings.hooks[event].some(x=>x.hooks?.some(h=>h.type==='command' && h.command===command))) settings.hooks[event].push({hooks:[{type:'command',command}]}); }
   await writeFile(path,JSON.stringify(settings,null,2)+'\n');
   let exists=false; try {run('claude',['mcp','get','paseo'],{stdio:'ignore'}); exists=true;} catch {}
   if(!exists) run('claude',['mcp','add','--scope','user','paseo','--','node',artifact,'mcp'],{stdio:'ignore'});
@@ -227,7 +253,7 @@ export async function mcp(env=process.env,rpc=createRpc(env), input=process.stdi
   };
   try {for await (const line of readline.createInterface({input,crlfDelay:Infinity})) {
     let m; try {m=JSON.parse(line);} catch {continue;}
-    if(m.method==='initialize') {send({jsonrpc:'2.0',id:m.id,result:{protocolVersion:m.params?.protocolVersion || '2025-03-26',capabilities:{tools:{listChanged:true}},serverInfo:{name:'paseo',version:'0.1.0'},instructions}}); continue;}
+    if(m.method==='initialize') {let workspaceId=env.PASEO_WORKSPACE_ID; if(!workspaceId && env.CLAUDE_CODE_REMOTE_SESSION_ID) {try {workspaceId=JSON.parse(await readFile(join(sessionDir(env),'workspace.json'),'utf8')).workspaceId;} catch {}} send({jsonrpc:'2.0',id:m.id,result:{protocolVersion:m.params?.protocolVersion || '2025-03-26',capabilities:{tools:{listChanged:true}},serverInfo:{name:'paseo',version:'0.1.0'},instructions:workspaceInstructions(workspaceId)+'\n'+instructions}}); continue;}
     if(m.id===undefined) continue;
     try {const response=await callSerial(m); send(response); if(m.method==='tools/list' && response.error) recover();}
     catch(error) {send({jsonrpc:'2.0',id:m.id,error:{code:-32000,message:`Paseo 工具调用失败：${safeReason(error,env)}`}}); if(m.method==='tools/list') recover();}
@@ -236,8 +262,10 @@ export async function mcp(env=process.env,rpc=createRpc(env), input=process.stdi
 async function main() {
   const [cmd,arg]=process.argv.slice(2), env=process.env;
   if(cmd==='install-claude-config') return install(env.HOME,resolve(fileURLToPath(import.meta.url)));
+  if(cmd==='hook-permission-request') {let s=''; for await(const c of process.stdin) s+=c; try {permissionHook(JSON.parse(s),env);} catch {} return;}
   const rpc=createRpc(env);
   try {
+    if(cmd==='permission-notify') {let s=''; for await(const c of process.stdin) s+=c; try {await notifyRequest(JSON.parse(s),env,rpc);} catch {} return;}
     if(cmd==='hook-session-start') {let s=''; for await(const c of process.stdin) s+=c; let input; try {input=JSON.parse(s);} catch {return;} process.stdout.write(await hook(input,env,rpc)); return;}
     if(cmd==='mcp') return await mcp(env,rpc);
     if(cmd==='forward' && eligible(env) && arg) return await forward(arg,env,rpc,process.argv[4] === undefined ? undefined : Number(process.argv[4]));
