@@ -30,7 +30,9 @@
 
 ## 语音提醒
 
-语音沿用原方案的 Glass 提示音、晓晓中文神经语音和三分钟冷却。神经语音失败时回退到系统 Flo 语音。来源主机需要 Python 的 edge_tts 模块；可用 `ASKUSER_PYTHON` 和 `ASKUSER_VOICE` 指定解释器和声音，并沿用来源主机的代理设置。
+语音沿用原方案的 Glass 提示音、晓晓中文神经语音和三分钟冷却。神经语音失败时回退到系统 Flo 语音。来源主机需要 Python 的 edge_tts 模块；可用 `ASKUSER_PYTHON` 和 `ASKUSER_VOICE` 指定解释器和声音，并沿用来源主机的代理设置。未指定解释器时，优先使用可执行的 `~/.claude-guard/speech-venv/bin/python3`，没有可用专用环境时使用 PATH 中的 `python3`。
+
+专用语音环境在来源主机上准备，不安装到系统 Python。选择已核验能通过本机代理访问语音服务的 Python，执行 `python3 -m venv ~/.claude-guard/speech-venv`，再执行 `~/.claude-guard/speech-venv/bin/python3 -m pip install edge-tts==7.3.1`。插件不会自行安装或升级依赖。替换环境后，下一次播放自动使用该环境，无需重启 Paseo 守护进程；重新部署时保留整个 `~/.claude-guard` 目录。
 
 只有语音播放进程成功退出才记录已提醒。提示音成功不算语音成功；失败保留原因，三分钟后可以重试。成功记录保存在来源主机，插件重启后不重复提醒同一道题。播放历史区分神经语音、系统语音、失败和取消。
 

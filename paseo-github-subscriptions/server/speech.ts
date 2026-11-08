@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -57,7 +58,9 @@ export class GuardSpeech {
       const args = ['-m', 'edge_tts', '--voice', voice, '--text', text, '--write-media', media];
       const proxy = process.env.https_proxy || process.env.http_proxy || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
       if (proxy) args.push('--proxy', proxy);
-      const generated = await step('晓晓语音合成', process.env.ASKUSER_PYTHON || 'python3', args, 25_000);
+      const installedPython = join(this.directory, 'speech-venv', 'bin', 'python3');
+      const python = process.env.ASKUSER_PYTHON || await access(installedPython, constants.X_OK).then(() => installedPython, () => 'python3');
+      const generated = await step('晓晓语音合成', python, args, 25_000);
       const usable = generated && await stat(media).then(file => file.size > 0 && file.size < 10 * 1024 * 1024, () => false);
       let played = usable && await step('神经语音播放', '/usr/bin/afplay', ['-v', '3', media], 30_000);
       let engine: 'neural' | 'system' = 'neural';
