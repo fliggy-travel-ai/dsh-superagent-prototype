@@ -7,6 +7,7 @@ import { createHostClient } from '@getpaseo/client/node';
 import { ProviderEventSchema, type ProviderConnection, type ProviderEvent, type ProviderInput, type ProviderRegistration, type ProviderTimelineItem } from '@getpaseo/plugin/server/provider';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import * as rpc from '../../shared/cloud-session.ts';
+import { cloudSessionStatus } from '../../shared/provider-instance.ts';
 import type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult } from '../../shared/web-request.ts';
 import { toWebAnswer } from '../web-request/normalize.ts';
 
@@ -323,7 +324,12 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       return { status: response.status, messages: parts.map(part => clean(JSON.parse(part)) as Record<string, unknown>) };
     } catch { throw new Error(controller.signal.aborted ? 'Paseo MCP request timed out' : 'Paseo MCP request failed'); } finally { clearTimeout(timer); }
   };
-  return { provider, ensure, push, poll, ack, mcp, notify, resolve, epoch, dispose() { sessions.clear(); requests.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
+  const status = () => {
+    let unackedMessages = 0;
+    for (const q of queues.values()) unackedMessages += q.items.length;
+    return { enabled: true, onlineSessions: sessions.size, unackedMessages };
+  };
+  return { provider, ensure, push, poll, ack, mcp, notify, resolve, status, epoch, dispose() { sessions.clear(); requests.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
 }
 
 export function registerCloudSession(server: PluginServerContext, create = createCloudSession) {
@@ -336,5 +342,6 @@ export function registerCloudSession(server: PluginServerContext, create = creat
   server.handle(rpc.forwardMcp, input => cloud.mcp(input));
   server.handle(rpc.notifyPendingRequest, input => cloud.notify(input));
   server.handle(rpc.resolvePendingRequest, input => cloud.resolve(input));
+  server.handle(cloudSessionStatus, () => cloud.status());
   return () => cloud.dispose();
 }
