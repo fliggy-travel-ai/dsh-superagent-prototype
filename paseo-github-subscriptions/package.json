@@ -11,6 +11,7 @@
     "client/",
     "server/",
     "shared/",
+    "icons/",
     "browser-extension/",
     "scripts/proximity-away.py"
   ],
