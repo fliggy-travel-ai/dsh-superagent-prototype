@@ -114,3 +114,45 @@ test('启动时端口冲突可读取错误并通过 configure 恢复', async () 
     assert.equal((await bridge.pairing()).url, `http://127.0.0.1:${replacement}/sync`);
   } finally { await bridge.stop(); await new Promise<void>(resolve => occupied.close(() => resolve())); await rm(dir, { recursive: true, force: true }); }
 });
+
+test('answerWebRequest 转调执行器且 freshSessions 只返回 70 秒内的新鲜记录', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-web-request-'));
+  const received: unknown[] = [];
+  const bridge = new BrowserBridge(dir, async () => null, undefined, async request => {
+    received.push(request);
+    return { status: 'submitted' };
+  });
+  try {
+    await bridge.start();
+    await bridge.configure({ enabled: true, port: await port() });
+    const pairing = await bridge.pairing();
+    const post = (instanceId: string, sessions: unknown[]) => fetch(pairing.url, {
+      method: 'POST',
+      headers: { origin, authorization: `Bearer ${pairing.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ instanceId, sessions }),
+    });
+    assert.equal((await post('inst-1', [session('s1')])).status, 200);
+    const t0 = Date.now();
+    assert.equal(bridge.freshSessions(t0).length, 1);
+    assert.equal(bridge.freshSessions(t0)[0]?.sessionId, 's1');
+    assert.equal(bridge.freshSessions(t0 + 69_000).length, 1);
+    assert.equal(bridge.freshSessions(t0 + 70_001).length, 0);
+    assert.equal(bridge.syncStatus(t0 + 80_000).hasStaleInstance, true);
+    assert.equal(bridge.syncStatus(t0 + 80_000).hasFreshInstance, false);
+
+    const request = {
+      webSessionId: 'session_s1',
+      toolUseId: 'toolu_1',
+      expected: { toolName: 'AskUserQuestion', input: { questions: [] } },
+      kind: 'question' as const,
+      answers: { Q1: ['A'] },
+    };
+    const res = await bridge.answerWebRequest(request);
+    assert.deepEqual(res, { status: 'submitted' });
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0], request);
+  } finally {
+    await bridge.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

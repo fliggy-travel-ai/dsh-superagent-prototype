@@ -89,3 +89,81 @@ test('标题支持参数、页面片段和 SPA，准确读取名称并在改名�
   links = [wrong]; document.title = ''; listener({ type: 'read-title' }, null, (value: any) => { result = value; }); assert.equal(result.title, '');
   location.origin = 'https://other.test'; listener({ type: 'read-title' }, null, (value: any) => { result = value; }); assert.equal(result.title, '');
 });
+
+test('cleanQuestion 保留 allowOther、toolUseId、pages，cleanDecision 保留 otherAnswers、source 并拒绝超长文本', async () => {
+  const source = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+  const noop = { addListener() {} };
+  const context: Record<string, any> = {
+    chrome: {
+      storage: { local: { async get() { return {}; }, async set() {} }, onChanged: noop },
+      tabs: { async query() { return []; }, onUpdated: noop, onRemoved: noop },
+      tabGroups: { onUpdated: noop, onRemoved: noop },
+      runtime: { onStartup: noop, onInstalled: noop, onMessage: noop },
+      alarms: { create() {}, onAlarm: noop },
+      scripting: {},
+    },
+    fetch: async () => ({ ok: false }),
+    crypto: { randomUUID },
+    AbortSignal,
+    Map,
+    Object,
+    String,
+    Number,
+    Array,
+    URL,
+  };
+  runInNewContext(`${source}\nglobalThis.__cleanQuestion = cleanQuestion;\nglobalThis.__cleanDecision = cleanDecision;`, context);
+
+  const cleanedQ = JSON.parse(JSON.stringify(context.__cleanQuestion({
+    id: 'bq_test',
+    sessionId: 'abc',
+    fingerprint: 'f'.repeat(32),
+    toolUseId: 'toolu_TEST1',
+    pages: 2,
+    prompts: [{
+      question: '选哪个？',
+      header: '标题',
+      multiSelect: false,
+      allowOther: true,
+      options: [
+        { label: 'A', description: '说明 A', recommended: true },
+        { label: 'B', description: '说明 B', recommended: false },
+      ],
+    }],
+  }, 'abc')));
+  assert.equal(cleanedQ.toolUseId, 'toolu_TEST1');
+  assert.equal(cleanedQ.pages, 2);
+  assert.equal(cleanedQ.prompts[0].allowOther, true);
+
+  const cleanedDecision = JSON.parse(JSON.stringify(context.__cleanDecision({
+    id: 'bq_test',
+    sessionId: 'abc',
+    fingerprint: 'f'.repeat(32),
+    answers: { '选哪个？': [] },
+    otherAnswers: { '选哪个？': '  自定义回答  ' },
+    source: 'manual',
+    expiresAt: Date.now() + 4000,
+  })));
+  assert.deepEqual(cleanedDecision.answers, { '选哪个？': [] });
+  assert.deepEqual(cleanedDecision.otherAnswers, { '选哪个？': '自定义回答' });
+  assert.equal(cleanedDecision.source, 'manual');
+
+  assert.equal(context.__cleanDecision({
+    id: 'bq_test',
+    sessionId: 'abc',
+    fingerprint: 'f'.repeat(32),
+    answers: { '选哪个？': [] },
+    otherAnswers: { '选哪个？': 'x'.repeat(2001) },
+    source: 'manual',
+    expiresAt: Date.now() + 4000,
+  }), null);
+
+  assert.equal(context.__cleanDecision({
+    id: 'bq_test',
+    sessionId: 'abc',
+    fingerprint: 'f'.repeat(32),
+    answers: { '选哪个？': ['A'] },
+    source: 'invalid_source',
+    expiresAt: Date.now() + 4000,
+  }), null);
+});

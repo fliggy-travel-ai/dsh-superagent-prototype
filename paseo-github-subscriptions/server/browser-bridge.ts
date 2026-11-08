@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { BrowserApprovalEventSchema, BrowserBindingInputSchema, BrowserSettingsSchema, BrowserSyncSchema, type BrowserBindingInput, type BrowserPairing, type BrowserSettings, type BrowserSnapshot } from '../shared/browser.ts';
+import { BrowserApprovalEventSchema, BrowserBindingInputSchema, BrowserSettingsSchema, BrowserSyncSchema, type AnswerWebRequest, type BrowserBindingInput, type BrowserPairing, type BrowserSettings, type BrowserSnapshot, type WebRequestAnswer, type WebRequestResult } from '../shared/browser.ts';
 import type { PresenceRuntime } from './presence.ts';
 
 const ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
@@ -25,9 +25,10 @@ export class BrowserBridge {
   private directory: string;
   private resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>;
   private syncQuestions?: PresenceRuntime['browserSync'];
+  private answerWeb?: AnswerWebRequest;
   private usageRoute?: (body: unknown) => void | Promise<void>;
 
-  constructor(directory: string, resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>, syncQuestions?: PresenceRuntime['browserSync']) { this.directory = directory; this.resolveAgent = resolveAgent; this.syncQuestions = syncQuestions; }
+  constructor(directory: string, resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>, syncQuestions?: PresenceRuntime['browserSync'], answerWeb?: AnswerWebRequest) { this.directory = directory; this.resolveAgent = resolveAgent; this.syncQuestions = syncQuestions; this.answerWeb = answerWeb; }
   setUsageRoute(route: (body: unknown) => void | Promise<void>) { this.usageRoute = route; }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -139,4 +140,19 @@ export class BrowserBridge {
     return this.snapshot();
   }); }
   async pairing(): Promise<BrowserPairing> { if (!this.started || !this.server || !this.settings.enabled) throw new Error('浏览器桥接未启用'); return { url: `http://127.0.0.1:${this.settings.port}/sync`, token: this.token }; }
+  freshSessions(now = Date.now()): BrowserSnapshot['sessions'] {
+    return [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < 70_000).map(s => ({ ...s }));
+  }
+  syncStatus(now = Date.now()) {
+    const seenAges = [...this.seen.values()].map(t => now - t).filter(age => age < MAX_AGE);
+    const activeSessions = [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s }));
+    const freshSessions = this.freshSessions(now);
+    const hasFreshInstance = seenAges.some(age => age < 70_000) || freshSessions.length > 0;
+    const hasStaleInstance = seenAges.some(age => age >= 70_000) || activeSessions.some(s => now - Date.parse(s.lastSeenAt) >= 70_000);
+    return { connected: !!this.server && (seenAges.length > 0 || activeSessions.length > 0), hasFreshInstance, hasStaleInstance, freshSessions, activeSessions };
+  }
+  async answerWebRequest(request: WebRequestAnswer): Promise<WebRequestResult> {
+    if (!this.answerWeb) return { status: 'page_not_open' };
+    return this.answerWeb(request);
+  }
 }

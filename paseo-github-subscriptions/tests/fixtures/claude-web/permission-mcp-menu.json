@@ -1,0 +1,18 @@
+{
+ "source": "同上",
+ "note": "点击 More allow options 后出现的菜单（门户挂在 body 下，不在卡片内）",
+ "menu": {
+  "role": "menu",
+  "attrs": {
+   "data-cds": "Menu",
+   "aria-labelledby": "<More allow options 按钮 id>"
+  },
+  "items": [
+   {
+    "role": "menuitem",
+    "text": "Allow once",
+    "aria-keyshortcuts": "Meta+Enter"
+   }
+  ]
+ }
+}
