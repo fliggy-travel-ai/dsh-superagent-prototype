@@ -80,7 +80,7 @@ export function PillPopover(props: PluginButtonContentProps) {
           accessibilityRole="link"
           onPress={() => {
             props.close();
-            openScreen({ screenId: 'main' });
+            openScreen({ screenId: 'main', params: { page: 'github' } });
           }}
         >
           <Text style={{ color: theme.colors.accent, fontSize: 13 }}>在 GitHub 订阅页查看全部 ›</Text>

@@ -77,11 +77,46 @@ export const todoModule: Module = {
       async stalled() {
         return getStalled();
       },
-      async escalationPending() {
-        return new EscalationRecords(join(context.stateDirectory, 'escalation', 'records.json')).pending();
+      async escalation() {
+        const records = new EscalationRecords(join(context.stateDirectory, 'escalation', 'records.json'));
+        return {
+          enabled: true,
+          status: 'running',
+          error: null,
+          delivery: 'live',
+          timezone: 'Asia/Singapore',
+          immediate: [],
+          delayMinutes: 0,
+          webhook: { configured: false, hostname: null, fingerprint: null },
+          pendingEvents: records.pending().map(item => ({
+            id: item.id,
+            agentId: item.agentId,
+            sessionTitle: item.sessionTitle,
+            workspaceId: item.workspaceId,
+            questionText: item.questionText,
+            notifiedAt: item.at,
+            delivery: item.delivery,
+          })),
+          recentDeliveries: records.recent(30).map(item => ({
+            id: item.id,
+            agentId: item.agentId,
+            sessionTitle: item.sessionTitle,
+            summary: item.summary,
+            at: item.at,
+            delivery: item.delivery,
+            status: item.status,
+          })),
+        };
       },
-      async quietHandled() {
-        return new HandledRecords(join(context.stateDirectory, 'quiet-children', 'handled.json')).recent(20);
+      async quiet() {
+        const handled = new HandledRecords(join(context.stateDirectory, 'quiet-children', 'handled.json'));
+        return {
+          enabled: true,
+          forwardEvents: true,
+          status: 'running',
+          error: null,
+          recentHandled: handled.recent(20),
+        };
       },
       async remoteLocal(hostId) {
         await services.readyPresence();
@@ -99,8 +134,8 @@ export const todoModule: Module = {
       async markQuestionRead(input) {
         return (await services.readyPresence()).markRead(input);
       },
-      async acknowledgeEscalation(id) {
-        return new EscalationRecords(join(context.stateDirectory, 'escalation', 'records.json')).acknowledge(id);
+      async ackEscalation({ id }) {
+        return { ok: new EscalationRecords(join(context.stateDirectory, 'escalation', 'records.json')).acknowledge(id) };
       },
     });
 

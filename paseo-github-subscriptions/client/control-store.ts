@@ -6,6 +6,52 @@ import { presenceSnapshot, presenceConfigure, presenceAnswer, presenceRead, type
 import { bluetoothList, bluetoothSelect, type BluetoothTarget } from '../shared/bluetooth.ts';
 import { errorMessage, REFRESH_INTERVAL_MS } from './store.ts';
 import { stalledSnapshot, type StalledSnapshot } from '../shared/stalled.ts';
+import { modulesStatus, type ModulesSnapshot } from '../shared/modules.ts';
+import {
+  machineSettingsSnapshot,
+  machineSettingsToggleModule,
+  machineSettingsPauseAll,
+  machineSettingsExportBackup,
+  type MachineSettingsSnapshot,
+} from '../shared/machine-settings.ts';
+import { todoList, todoAct, type TodoMergedSnapshot, type TodoActionInput, type TodoActionOutput } from '../shared/todo.ts';
+import { defaultsSnapshot, defaultsSave, type DefaultsSnapshot, type AgentDefaultRule } from '../shared/defaults.ts';
+import {
+  providersInstanceStatus,
+  cloudSessionStatus,
+  type ProvidersInstanceStatus,
+  type CloudSessionStatus,
+} from '../shared/provider-instance.ts';
+import {
+  claudeAccountsSnapshot,
+  claudeAccountsConfigure,
+  claudeAccountsRename,
+  claudeAccountsLoginStart,
+  claudeAccountsLoginSubmitCode,
+  claudeAccountsLoginRetry,
+  type ClaudeAccountsSnapshot,
+} from '../shared/claude-accounts.ts';
+import {
+  antigravitySnapshot,
+  antigravityAccountToggle,
+  antigravityAccountAdd,
+  type AntigravitySnapshot,
+} from '../shared/antigravity.ts';
+import { providerQuotasSnapshot, type ProviderQuotasSnapshot } from '../shared/provider-quotas.ts';
+import {
+  escalationSnapshot,
+  escalationConfigure,
+  escalationTestWebhook,
+  escalationWebhookConfigure,
+  escalationAcknowledge,
+  type EscalationSnapshot,
+} from '../shared/escalation.ts';
+import { quietSnapshot, quietConfigure, type QuietSnapshot } from '../shared/quiet.ts';
+
+export type EscalationWebhookStatus = EscalationSnapshot['webhook'];
+export type EscalationWindow = { days: 'daily' | 'weekdays' | 'weekends'; from: string; to: string };
+
+export type OptionalFeatureStatus = 'loading' | 'ready' | 'disabled' | 'error';
 
 export interface ControlState {
   automation: AutomationSnapshot | null;
@@ -16,12 +62,73 @@ export interface ControlState {
   automationError: string | null;
   browserError: string | null;
   presenceError: string | null;
+  modules: ModulesSnapshot | null;
+  machineSettings: MachineSettingsSnapshot | null;
+  todo: TodoMergedSnapshot | null;
+  todoError: string | null;
+  defaults: DefaultsSnapshot | null;
+  providerInstance: ProvidersInstanceStatus | null;
+  cloudSession: CloudSessionStatus | null;
+  claudeAccounts: ClaudeAccountsSnapshot | null;
+  claudeAccountsStatus: OptionalFeatureStatus;
+  claudeAccountsError: string | null;
+  antigravity: AntigravitySnapshot | null;
+  antigravityStatus: OptionalFeatureStatus;
+  antigravityError: string | null;
+  providerQuotas: ProviderQuotasSnapshot | null;
+  providerQuotasStatus: OptionalFeatureStatus;
+  escalation: EscalationSnapshot | null;
+  escalationStatus: OptionalFeatureStatus;
+  escalationError: string | null;
+  quiet: QuietSnapshot | null;
+  quietStatus: OptionalFeatureStatus;
+  quietError: string | null;
+}
+
+export function isRpcDisabledError(error: unknown, moduleId?: string, modules?: ModulesSnapshot | null): boolean {
+  if (moduleId && modules) {
+    const found = modules.modules.find(item => item.id === moduleId);
+    if (!found || found.state === 'off') return true;
+  }
+  const msg = errorMessage(error);
+  return /未知调用|未知接口|unknown|not found|unregistered|no handler|method not found|未注册|未启用|未实现/i.test(msg);
 }
 
 export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list']) {
-  let state: ControlState = { automation: null, browser: null, presence: null, stalled: null, stalledError: null, automationError: null, browserError: null, presenceError: null };
+  let state: ControlState = {
+    automation: null,
+    browser: null,
+    presence: null,
+    stalled: null,
+    stalledError: null,
+    automationError: null,
+    browserError: null,
+    presenceError: null,
+    modules: null,
+    machineSettings: null,
+    todo: null,
+    todoError: null,
+    defaults: null,
+    providerInstance: null,
+    cloudSession: null,
+    claudeAccounts: null,
+    claudeAccountsStatus: 'loading',
+    claudeAccountsError: null,
+    antigravity: null,
+    antigravityStatus: 'loading',
+    antigravityError: null,
+    providerQuotas: null,
+    providerQuotasStatus: 'loading',
+    escalation: null,
+    escalationStatus: 'loading',
+    escalationError: null,
+    quiet: null,
+    quietStatus: 'loading',
+    quietError: null,
+  };
   let stalledInflight: Promise<void> | null = null;
   let liveInflight: Promise<void> | null = null;
+  let unifyInflight: Promise<void> | null = null;
   let liveIds: Set<string> | null = null;
   let liveError: string | null = null;
   let scanError: string | null = null;
@@ -79,6 +186,64 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     })().finally(() => { liveInflight = null; });
     return liveInflight;
   };
+  const refreshUnify = () => {
+    if (disposed) return Promise.resolve();
+    unifyInflight ??= (async () => {
+      let mods = state.modules;
+      await client.rpc(modulesStatus, {}).then(value => { mods = value; emit({ modules: value }); }).catch(() => {});
+      await Promise.allSettled([
+        client.rpc(machineSettingsSnapshot, {}).then(value => emit({ machineSettings: value })).catch(() => {}),
+        client.rpc(todoList, {}).then(value => emit({ todo: value, todoError: null })).catch(error => {
+          if (!isRpcDisabledError(error, 'todo', mods)) emit({ todoError: errorMessage(error) });
+        }),
+        client.rpc(defaultsSnapshot, {}).then(value => emit({ defaults: value })).catch(() => {}),
+        client.rpc(providersInstanceStatus, {}).then(value => emit({ providerInstance: value })).catch(() => {}),
+        client.rpc(cloudSessionStatus, {}).then(value => emit({ cloudSession: value })).catch(() => {}),
+        client.rpc(claudeAccountsSnapshot, {}).then(value => {
+          emit({ claudeAccounts: value, claudeAccountsStatus: 'ready', claudeAccountsError: null });
+        }).catch(error => {
+          if (isRpcDisabledError(error, 'usage.claudeAccounts', mods)) {
+            emit({ claudeAccountsStatus: 'disabled', claudeAccountsError: null });
+          } else {
+            emit({ claudeAccountsStatus: 'error', claudeAccountsError: errorMessage(error) });
+          }
+        }),
+        client.rpc(antigravitySnapshot, {}).then(value => {
+          emit({ antigravity: value, antigravityStatus: 'ready', antigravityError: null });
+        }).catch(error => {
+          if (isRpcDisabledError(error, 'providers.antigravity', mods)) {
+            emit({ antigravityStatus: 'disabled', antigravityError: null });
+          } else {
+            emit({ antigravityStatus: 'error', antigravityError: errorMessage(error) });
+          }
+        }),
+        client.rpc(providerQuotasSnapshot, {}).then(value => {
+          emit({ providerQuotas: value, providerQuotasStatus: 'ready' });
+        }).catch(error => {
+          emit({ providerQuotasStatus: isRpcDisabledError(error, 'usage.providerQuotas', mods) ? 'disabled' : 'error' });
+        }),
+        client.rpc(escalationSnapshot, {}).then(value => {
+          emit({ escalation: value, escalationStatus: 'ready', escalationError: null });
+        }).catch(error => {
+          if (isRpcDisabledError(error, 'answer.escalation', mods)) {
+            emit({ escalationStatus: 'disabled', escalationError: null });
+          } else {
+            emit({ escalationStatus: 'error', escalationError: errorMessage(error) });
+          }
+        }),
+        client.rpc(quietSnapshot, {}).then(value => {
+          emit({ quiet: value, quietStatus: 'ready', quietError: null });
+        }).catch(error => {
+          if (isRpcDisabledError(error, 'answer.quietChildren', mods)) {
+            emit({ quietStatus: 'disabled', quietError: null });
+          } else {
+            emit({ quietStatus: 'error', quietError: errorMessage(error) });
+          }
+        }),
+      ]);
+    })().finally(() => { unifyInflight = null; });
+    return unifyInflight;
+  };
   const refresh = () => {
     if (disposed) return Promise.resolve();
     const live = refreshLive();
@@ -100,6 +265,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     getState: () => state,
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     refresh,
+    refreshUnify,
     pause: (paused: boolean) => write(() => native(() => client.rpc(automationPause, { paused }))),
     policy: (policy: SessionPolicy) => write(() => native(() => client.rpc(automationPolicy, policy))),
     configureBrowser: (settings: BrowserSettings) => write(() => browsing(() => client.rpc(browserConfigure, settings))),
@@ -117,7 +283,104 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       await asking(() => client.rpc(presenceSnapshot, {})).catch(() => {});
       return result;
     }),
-    start() { if (!disposed && !timer) { void refresh(); timer = setInterval(() => void refresh(), REFRESH_INTERVAL_MS); } },
+    actTodo: (input: TodoActionInput): Promise<TodoActionOutput> => write(async () => {
+      const result = await client.rpc(todoAct, input);
+      await Promise.allSettled([refreshUnify(), asking(() => client.rpc(presenceSnapshot, {}))]);
+      return result;
+    }),
+    saveDefaults: (input: { enabled?: boolean; rules?: AgentDefaultRule[] }) => write(async () => {
+      const result = await client.rpc(defaultsSave, input);
+      emit({ defaults: result });
+      return result;
+    }),
+    toggleModule: (id: string, enabled: boolean) => write(async () => {
+      const result = await client.rpc(machineSettingsToggleModule, { id, enabled });
+      emit({ machineSettings: result });
+      return result;
+    }),
+    pauseAll: (paused: boolean) => write(async () => {
+      const result = await client.rpc(machineSettingsPauseAll, { paused });
+      if (state.machineSettings) emit({ machineSettings: { ...state.machineSettings, pausedAll: result.paused } });
+      await Promise.allSettled([refresh(), refreshUnify()]);
+      return result;
+    }),
+    exportBackup: () => write(() => client.rpc(machineSettingsExportBackup, {})),
+    configureClaudeAccounts: (input: { labelWithQuota?: boolean; autoResumeDefault?: boolean }) => write(async () => {
+      const result = await client.rpc(claudeAccountsConfigure, input);
+      emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
+      return result;
+    }),
+    renameClaudeAccount: (input: { providerId: string; label?: string; realEmail?: string }) => write(async () => {
+      const result = await client.rpc(claudeAccountsRename, input);
+      emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
+      return result;
+    }),
+    startClaudeLogin: (input: { providerId?: string; browserProfile?: string } = {}): Promise<ClaudeAccountsSnapshot> =>
+      write(async () => {
+        const result = await client.rpc(claudeAccountsLoginStart, input);
+        emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
+        return result;
+      }),
+    submitClaudeLoginCode: (input: { providerId: string; code: string; realEmail?: string }): Promise<ClaudeAccountsSnapshot> =>
+      write(async () => {
+        const result = await client.rpc(claudeAccountsLoginSubmitCode, input);
+        emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
+        return result;
+      }),
+    retryClaudeLogin: (input: { providerId: string }): Promise<ClaudeAccountsSnapshot> =>
+      write(async () => {
+        const result = await client.rpc(claudeAccountsLoginRetry, input);
+        emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
+        return result;
+      }),
+    toggleAntigravityAccount: (input: { providerId: string; enabled: boolean }) => write(async () => {
+      const result = await client.rpc(antigravityAccountToggle, input);
+      emit({ antigravity: result, antigravityStatus: 'ready', antigravityError: null });
+      return result;
+    }),
+    addAntigravityAccount: (input: { providerId: string; label: string; homeDir?: string; proxy?: string }) => write(async () => {
+      const result = await client.rpc(antigravityAccountAdd, input);
+      emit({ antigravity: result, antigravityStatus: 'ready', antigravityError: null });
+      return result;
+    }),
+    configureEscalation: (input: {
+      enabled?: boolean;
+      delivery?: 'shadow' | 'live';
+      timezone?: string;
+      immediate?: EscalationWindow[];
+      delayMinutes?: number;
+    }) => write(async () => {
+      const result = await client.rpc(escalationConfigure, input);
+      emit({ escalation: result, escalationStatus: 'ready', escalationError: null });
+      return result;
+    }),
+    testEscalationWebhook: () => write(() => client.rpc(escalationTestWebhook, {})),
+    configureEscalationWebhook: (input: { url: string; auth?: string }): Promise<EscalationWebhookStatus> =>
+      write(async () => {
+        const result = await client.rpc(escalationWebhookConfigure, input);
+        if (state.escalation) emit({ escalation: { ...state.escalation, webhook: result } });
+        return result;
+      }),
+    acknowledgeEscalation: (input: { id: string; agentId?: string }) => write(async () => {
+      const result = await client.rpc(escalationAcknowledge, input);
+      await refreshUnify();
+      return result;
+    }),
+    configureQuiet: (input: { enabled?: boolean; forwardEvents?: boolean }) => write(async () => {
+      const result = await client.rpc(quietConfigure, input);
+      emit({ quiet: result, quietStatus: 'ready', quietError: null });
+      return result;
+    }),
+    start() {
+      if (!disposed && !timer) {
+        void refresh();
+        void refreshUnify();
+        timer = setInterval(() => {
+          void refresh();
+          void refreshUnify();
+        }, REFRESH_INTERVAL_MS);
+      }
+    },
     dispose() { disposed = true; if (timer) clearInterval(timer); timer = null; listeners.clear(); },
   };
 }
