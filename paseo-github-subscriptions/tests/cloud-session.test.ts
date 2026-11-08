@@ -6,11 +6,17 @@ import type { PaseoApi } from '@getpaseo/client';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { forwardMcp } from '../shared/cloud-session.ts';
 import { ProviderEventSchema, type ProviderEvent, type ProviderInput } from '@getpaseo/plugin/server/provider';
-import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS } from '../server/cloud-session/index.ts';
+import { createCloudSession, importRequest, registerCloudSession, connectWithTimeout, LOCAL_CONNECT_TIMEOUT_MS, redactError } from '../server/cloud-session/index.ts';
 
 const cloudId = 'cse_abcdefgh1234';
 const token = 'fake-secret-token-1707';
 const input = (value: unknown) => value as ProviderInput;
+test('error redaction removes websocket addresses', () => {
+  for (const scheme of ['ws', 'wss']) {
+    const result = redactError(new Error(`connection failed: ${scheme}://example.invalid/path?token=fake-secret`));
+    assert.equal(result, 'connection failed: [redacted URL]');
+  }
+});
 async function fixture(url?: string) {
   const agents: { id: string; cloud: string; archived: boolean; title?: string }[] = [];
   let imports = 0; let failure: string | undefined; let closeFailure = false; let reloads = 0; let session = 0;

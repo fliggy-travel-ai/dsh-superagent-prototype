@@ -33,7 +33,7 @@ function redact(text: string, secrets: string[]): string {
 export function redactError(error: unknown, secrets: string[] = []): string {
   const message = error instanceof Error ? error.message : String(error);
   return redact(message, secrets)
-    .replace(/https?:\/\/[^\s"'<>]+/gi, '[redacted URL]')
+    .replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, '[redacted URL]')
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
     .replace(/([?&][^=\s&#]+)=([^&#\s]+)/g, '$1=[redacted]')
     .replace(/((?:token|authorization|password)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
