@@ -1,9 +1,11 @@
 import type { StalledSnapshot } from '../shared/stalled.ts';
+import { isMainSession, type WorkspaceRoles } from './core/session-roles.ts';
 
 export interface StalledAgent {
   id: string;
   hostId: string;
   title: string | null;
+  workspaceId?: string | null;
   status: string;
   updatedAt: string;
   attentionTimestamp?: string | null;
@@ -14,7 +16,7 @@ export interface StalledAgent {
   labels?: Record<string, string>;
 }
 export interface StalledPort {
-  collect(): Promise<{ hostId: string; agents: StalledAgent[]; listeners: Set<string> }>;
+  collect(): Promise<{ hostId: string; agents: StalledAgent[]; listeners: Set<string>; roles: WorkspaceRoles }>;
   subagents(agent: StalledAgent): Promise<boolean>;
   message(agent: StalledAgent): Promise<string | null>;
   current(agent: StalledAgent): Promise<StalledAgent | null>;
@@ -22,7 +24,8 @@ export interface StalledPort {
 }
 const key = (agent: StalledAgent) => `${agent.hostId}:${agent.id}`;
 const working = (agent: StalledAgent) => ['running', 'initializing'].includes(agent.status) || !!agent.activeTurn || !!agent.pendingPermissions?.length;
-const candidate = (agent: StalledAgent) => !agent.archivedAt && !agent.internal && !agent.labels?.['paseo.parent-agent-id'] && ['idle', 'error'].includes(agent.status) && !working(agent);
+/** 主会话 = 置顶工作区中的会话（见 core/session-roles.ts）。父会话标签不再决定是否检查。 */
+const candidate = (agent: StalledAgent, roles: WorkspaceRoles) => !agent.archivedAt && !agent.internal && isMainSession(agent, roles) && ['idle', 'error'].includes(agent.status) && !working(agent);
 
 export function descendants(parent: StalledAgent, agents: StalledAgent[]) {
   const found = new Set([key(parent)]);
@@ -53,7 +56,7 @@ export class StalledRuntime {
     const errors = new Set<string>();
     try {
       const fleet = await this.port.collect();
-      const candidates = fleet.agents.filter(agent => agent.hostId === fleet.hostId && candidate(agent));
+      const candidates = fleet.agents.filter(agent => agent.hostId === fleet.hostId && candidate(agent, fleet.roles));
       const live = new Set(candidates.map(key));
       for (const identity of this.messages.keys()) if (!live.has(identity)) this.messages.delete(identity);
       let cursor = 0;
@@ -73,7 +76,7 @@ export class StalledRuntime {
               catch { message = undefined; messageError = '最后消息读取失败，请打开会话查看。'; }
             }
             const current = await this.port.current(agent);
-            if (!current || !candidate(current) || current.updatedAt !== agent.updatedAt) continue;
+            if (!current || !candidate(current, fleet.roles) || current.updatedAt !== agent.updatedAt) continue;
             sessions.push({ agentId: agent.id, title: agent.title || '未命名会话', since: agent.attentionTimestamp || agent.updatedAt, lastMessage: message?.text ?? null, messageError });
           } catch { errors.add('部分会话的子代理状态无法确认，暂未列为停滞。'); }
         }

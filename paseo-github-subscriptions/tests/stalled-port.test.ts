@@ -4,10 +4,11 @@ import type { DaemonClient } from '@getpaseo/client/internal/daemon-client';
 import { PresenceHosts } from '../server/presence-port.ts';
 import { stalledPort } from '../server/stalled-port.ts';
 import type { StalledAgent } from '../server/stalled.ts';
+import { parseWorkspaceRoles } from '../server/core/session-roles.ts';
 
 const parent: StalledAgent = { id: 'parent', hostId: 'mini', title: null, status: 'idle', updatedAt: '2026-11-07T00:00:00Z' };
 function fixture() {
-  const state = { shadow: false, failed: false, timeline: [] as Record<string, unknown>[], calls: [] as unknown[], schedules: [] as unknown[] };
+  const state = { rolesFailed: false, shadow: false, failed: false, timeline: [] as Record<string, unknown>[], calls: [] as unknown[], schedules: [] as unknown[] };
   const subscription = { id: 'subscription', agentId: 'child', workspaceId: null, agentTitle: null, parentAgentId: null, key: 'test', scope: 'repo', owner: 'test', repo: 'test', number: null, isPr: null, title: null, events: ['comment'], note: null, createdAt: '', updatedAt: '', expiresAt: null, lastEventAt: null, lastEventId: null, delivered: 0, lastDelivery: null };
   const remote = {
     fetchAgents: async () => ({ entries: [{ agent: { ...parent, id: 'child' } }], pageInfo: { hasMore: false } }),
@@ -25,7 +26,8 @@ function fixture() {
     fetchAgentTimeline: async (_id: string, options: unknown) => { state.calls.push(options); return state.timeline.shift(); },
   } as unknown as DaemonClient;
   const hosts = { withHost: async (_id: string, operation: (client: unknown) => Promise<unknown>) => operation(remote) } as unknown as PresenceHosts;
-  return { state, port: stalledPort(origin, hosts, () => ['local-listener']) };
+  const roles = { read: async () => { if (state.rolesFailed) throw new Error('工作区状态无法读取'); return parseWorkspaceRoles([{ workspaceId: 'wks_main', pinnedAt: 'x' }]); } };
+  return { state, port: stalledPort(origin, hosts, () => ['local-listener'], roles) };
 }
 
 test('远端有效 GitHub 订阅与 heartbeat 纳入监听，暂停和过期任务不算，读取失败必须报错', async () => {
@@ -37,6 +39,12 @@ test('远端有效 GitHub 订阅与 heartbeat 纳入监听，暂停和过期任�
   assert.equal(collected.agents[1].hostId, 'book');
   state.shadow = true; assert.equal((await port.collect()).listeners.has('book:child'), false);
   state.failed = true; await assert.rejects(port.collect(), /远端订阅不可用/);
+});
+
+test('置顶状态随采集返回；读取失败必须报错，不能当作没有主会话', async () => {
+  const { state, port } = fixture();
+  assert.deepEqual([...(await port.collect()).roles.pinned], ['wks_main']);
+  state.rolesFailed = true; await assert.rejects(port.collect(), /工作区状态无法读取/);
 });
 
 test('助手消息位于工具记录之前时继续分页，游标异常明确报错', async () => {
