@@ -797,7 +797,7 @@ test('同一张卡片 still-visible 按间隔重试，即使文字随流式输�
   assert.ok(storageState.approvalAudit.every((entry: any) => entry.button === 'Allow once' && entry.status === 'still-visible'));
 });
 
-test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visible）时不点击不计数，切回前台（visibilitychange）立即点击并重新计算重试时长', async () => {
+test('首次出现等待 800 毫秒再点击；后台（visibilityState !== visible）时不点击不计数，切回前台（visibilitychange）同样先等 800 毫秒再点击并重新计算重试时长', async () => {
   const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
   const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
 
@@ -816,7 +816,6 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   );
 
   const approvalConfig = {
-    initialDelayMs: 300,
     observeDelayMs: 1500,
     retryIntervalMs: 5000,
     maxRetryDurationMs: 180000,
@@ -959,7 +958,7 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   assert.equal(storageState.approvalAudit.length, 0);
 
   // 2. 切回前台（visibilityState = 'visible'）：
-  //    先验证非可信事件（isTrusted: false）被忽略；可信事件（isTrusted: true）触发 300ms 延迟后执行第 1 次点击
+  //    先验证非可信事件（isTrusted: false）被忽略；可信事件（isTrusted: true）触发 800ms 延迟后执行第 1 次点击
   docObj.visibilityState = 'visible';
   for (const fn of visibilityListeners) fn({ isTrusted: false });
   await runTimersUpTo(5000);
@@ -970,7 +969,7 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   await runTimersUpTo(200, false);
   assert.equal(allowOnceButton.clicks, 0);
   assert.equal(storageState.approvalAudit.length, 0);
-  assert.ok(timers.some(t => t.delay === 300));
+  assert.ok(timers.some(t => t.delay === 800));
 
   await runTimersUpTo(1500);
   assert.equal(allowOnceButton.clicks, 1);
@@ -986,13 +985,17 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   assert.equal(allowOnceButton.clicks, 1);
   assert.equal(storageState.approvalAudit.length, 1);
 
-  // 4. 再次切回前台：非可信事件不会重置重试时长；可信事件立即扫描并点击（第 2 次点击），且重试时长重新计算，5 秒后第 3、4 次重试正常进行
+  // 4. 再次切回前台：非可信事件不会重置重试时长；可信事件同样先等 800ms 初始延迟（未满 800ms 前不点击），延迟结束后执行第 2 次点击，且重试时长重新计算，5 秒后第 3、4 次重试正常进行
   docObj.visibilityState = 'visible';
   for (const fn of visibilityListeners) fn({ isTrusted: false });
   await runTimersUpTo(1500);
   assert.equal(allowOnceButton.clicks, 1);
 
   for (const fn of visibilityListeners) fn({ isTrusted: true });
+  await runTimersUpTo(200, false);
+  assert.equal(allowOnceButton.clicks, 1);
+  assert.ok(timers.some(t => t.delay === 800));
+
   await runTimersUpTo(1500);
   assert.equal(allowOnceButton.clicks, 2);
 
@@ -1802,7 +1805,7 @@ test('跨标签页同 label 去重、同会话每分钟总次数限制、reserve
   assert.equal(res13th.allowed, false);
 });
 
-test('直接点击路径：300ms 等待期间换卡并把按钮节点改成 Always allow，所有按钮点击次数为 0', async () => {
+test('直接点击路径：800ms 等待期间换卡并把按钮节点改成 Always allow，所有按钮点击次数为 0', async () => {
   const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
 
   async function runDirectWaitSwap(changeCardAriaLabel: boolean) {
@@ -1861,22 +1864,22 @@ test('直接点击路径：300ms 等待期间换卡并把按钮节点改成 Alwa
     };
 
     runInNewContext(source, context);
-    // 先执行 150ms scan 定时器，进入 clickOnce 并挂起在 300ms 等待定时器上
+    // 先执行 150ms scan 定时器，进入 clickOnce 并挂起在 800ms 等待定时器上
     for (let step = 0; step < 10; step++) {
       await Promise.resolve();
-      const idx = timers.findIndex(t => t.delay < 300);
+      const idx = timers.findIndex(t => t.delay < 800);
       if (idx !== -1) timers.splice(idx, 1)[0]!.fn();
     }
-    assert.ok(timers.some(t => t.delay === 300));
+    assert.ok(timers.some(t => t.delay === 800));
 
-    // 在 300ms 等待期间：卡片 A 换为卡片 B，且 React 复用原本的 Allow once 按钮节点改成 Always allow
+    // 在 800ms 等待期间：卡片 A 换为卡片 B，且 React 复用原本的 Allow once 按钮节点改成 Always allow
     if (changeCardAriaLabel) {
       cardRoot.setAttribute('aria-label', 'Permission request: use list providers (paseo)');
     }
     titleRegion.setText('Allow Claude to use list providers (paseo)?');
     allowOnceButton.setText('Always allow ⌘ Command ⏎ Enter');
 
-    // 触发 300ms 及后续所有定时器
+    // 触发 800ms 及后续所有定时器
     for (let step = 0; step < 20; step++) {
       while (timers.length) timers.shift()!.fn();
       await Promise.resolve();
@@ -1892,7 +1895,7 @@ test('直接点击路径：300ms 等待期间换卡并把按钮节点改成 Alwa
   await runDirectWaitSwap(false);
 });
 
-test('菜单点击路径：300ms 等待期间换卡并把按钮节点改成 Always allow，所有按钮点击次数为 0', async () => {
+test('菜单点击路径：800ms 等待期间换卡并把按钮节点改成 Always allow，所有按钮点击次数为 0', async () => {
   const mcpCardFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
 
   async function runMenuWaitSwap(changeCardAriaLabel: boolean, keepMoreAriaLabel: boolean) {
@@ -1951,15 +1954,15 @@ test('菜单点击路径：300ms 等待期间换卡并把按钮节点改成 Alwa
     };
 
     runInNewContext(source, context);
-    // 先执行 150ms scan 定时器，进入 clickMenuOnce 并挂起在 300ms 等待定时器上
+    // 先执行 150ms scan 定时器，进入 clickMenuOnce 并挂起在 800ms 等待定时器上
     for (let step = 0; step < 10; step++) {
       await Promise.resolve();
-      const idx = timers.findIndex(t => t.delay < 300);
+      const idx = timers.findIndex(t => t.delay < 800);
       if (idx !== -1) timers.splice(idx, 1)[0]!.fn();
     }
-    assert.ok(timers.some(t => t.delay === 300));
+    assert.ok(timers.some(t => t.delay === 800));
 
-    // 在 300ms 等待期间：卡片 A 换为卡片 B，且 React 复用原本的 More allow options 按钮节点改成 Always allow
+    // 在 800ms 等待期间：卡片 A 换为卡片 B，且 React 复用原本的 More allow options 按钮节点改成 Always allow
     if (changeCardAriaLabel) {
       cardRoot.setAttribute('aria-label', 'Permission request: use list providers (paseo)');
     }
@@ -1969,7 +1972,7 @@ test('菜单点击路径：300ms 等待期间换卡并把按钮节点改成 Alwa
       moreButton.removeAttribute('aria-label');
     }
 
-    // 触发 300ms 及后续所有定时器
+    // 触发 800ms 及后续所有定时器
     for (let step = 0; step < 20; step++) {
       while (timers.length) timers.shift()!.fn();
       await Promise.resolve();
