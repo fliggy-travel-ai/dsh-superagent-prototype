@@ -108,15 +108,30 @@
     if (!cardId) return true;
     const state = cardHistory.get(cardId);
     if (!state) return true;
+    const now = Date.now();
+    if (state.rejectedUntil && now < state.rejectedUntil) return false;
     if (state.status === 'dismissed' || state.status === 'reserved') return false;
     if (state.clicks >= maxClicksPerCard()) return false;
     if (state.status === 'still-visible' || state.status === 'skipped') {
       if (!once.test(buttonLabel)) return false;
-      const now = Date.now();
       if (now - state.lastObservedAt < retryIntervalMs()) return false;
       if (now - state.firstAttemptAt > maxRetryDurationMs()) return false;
     }
     return true;
+  }
+  function recordCardRejected(cardId) {
+    if (!cardId) return;
+    const now = Date.now();
+    pruneCardHistory(now);
+    const prev = cardHistory.get(cardId);
+    cardHistory.set(cardId, {
+      clicks: prev?.clicks || 0,
+      firstAttemptAt: prev?.firstAttemptAt ?? now,
+      lastObservedAt: prev?.lastObservedAt ?? now,
+      pendingVisibilityReset: prev?.pendingVisibilityReset || false,
+      status: prev?.status || 'rejected',
+      rejectedUntil: now + retryIntervalMs(),
+    });
   }
   function recordCardAttempt(cardId) {
     if (!cardId) return;
@@ -129,6 +144,7 @@
       lastObservedAt: prev?.lastObservedAt ?? now,
       pendingVisibilityReset: false,
       status: 'reserved',
+      rejectedUntil: 0,
     });
   }
   function recordCardResult(cardId, status) {
@@ -149,8 +165,21 @@
   }
   function eligible(button, scope, text) {
     if (button.disabled || button.getAttribute('aria-disabled') === 'true' || !visible(button) || !cardSafe(scope, text)) return false;
+    const peers = [...(scope.querySelectorAll?.('button,[role="button"]') || [])].filter(visible);
+    if (!peers.some(peer => deny.test(label(peer)))) return false;
     const heading = scope.querySelector?.('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
     return once.test(label(button)) || (allow.test(label(button)) && permission.test(heading) && !permanent.test(text));
+  }
+  function menuCardEligible(moreButton, card, text) {
+    if (!card || !card.isConnected || !visible(card) || card.getAttribute?.('role') !== 'group') return false;
+    if (!/^Permission request:/i.test((card.getAttribute?.('aria-label') || '').trim())) return false;
+    if (text.length > 16000 || !cardSafe(card, text)) return false;
+    if (!moreButton || !moreButton.isConnected || moreButton.disabled || moreButton.getAttribute?.('aria-disabled') === 'true' || !visible(moreButton)) return false;
+    if ((moreButton.getAttribute?.('aria-label') || '').trim() !== 'More allow options') return false;
+    if (permanent.test(label(moreButton)) || deny.test(label(moreButton))) return false;
+    const peers = [...(card.querySelectorAll?.('button,[role="button"]') || [])].filter(visible);
+    if (peers.some(peer => once.test(label(peer))) || !peers.some(peer => deny.test(label(peer)))) return false;
+    return true;
   }
   function hasVisibleMenu(moreButton) {
     const buttonId = (moreButton?.getAttribute?.('id') || '').trim();
@@ -187,9 +216,10 @@
         const delay = initialDelayMs();
         if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
         if (!enabled || !pageVisible() || currentPath !== location.pathname || scope.isConnected === false || !button.isConnected || !visible(button)) return;
-        initializedCards.set(root, true);
+        if (ensureCardId(scope) !== cardId) return;
         text = scope.innerText || scope.textContent || '';
-        if (!eligible(button, scope, text)) return;
+        if (label(button) !== buttonLabel || !eligible(button, scope, text)) return;
+        initializedCards.set(root, true);
       }
       if (!canAttemptCard(cardId, buttonLabel)) return;
       const { digest, labelDigest } = await buildCardFingerprint(currentPath, scope, text);
@@ -202,9 +232,15 @@
         ...(resetRetryWindow ? { resetRetryWindow: true } : {}),
         button: buttonLabel,
       });
-      if (!reservation?.allowed) return;
+      if (!reservation?.allowed) {
+        if (cardId) {
+          recordCardRejected(cardId);
+          schedule();
+        }
+        return;
+      }
       const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
-      if (!enabled || !pageVisible() || currentPath !== location.pathname || !button.isConnected || (scope.innerText || scope.textContent || '') !== text || !eligible(button, scope, text)) {
+      if (!enabled || !pageVisible() || currentPath !== location.pathname || scope.isConnected === false || !button.isConnected || ensureCardId(scope) !== cardId || label(button) !== buttonLabel || (scope.innerText || scope.textContent || '') !== text || !eligible(button, scope, text)) {
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
         await report('skipped');
@@ -232,9 +268,10 @@
         const delay = initialDelayMs();
         if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
         if (!enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected || !moreButton.isConnected || !visible(moreButton)) return;
-        initializedCards.set(card, true);
+        if (ensureCardId(card) !== cardId) return;
         text = card.innerText || card.textContent || '';
-        if (!cardSafe(card, text)) return;
+        if (!menuCardEligible(moreButton, card, text)) return;
+        initializedCards.set(card, true);
       }
       if (!canAttemptCard(cardId, 'Allow once')) return;
       const { digest, labelDigest } = await buildCardFingerprint(currentPath, card, text);
@@ -247,9 +284,15 @@
         ...(resetRetryWindow ? { resetRetryWindow: true } : {}),
         button: 'Allow once',
       });
-      if (!reservation?.allowed) return;
+      if (!reservation?.allowed) {
+        if (cardId) {
+          recordCardRejected(cardId);
+          schedule();
+        }
+        return;
+      }
       const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
-      if (!enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected || !moreButton.isConnected || moreButton.disabled || moreButton.getAttribute?.('aria-disabled') === 'true' || !visible(moreButton) || (card.innerText || card.textContent || '') !== text || !cardSafe(card, text)) {
+      if (!enabled || !pageVisible() || currentPath !== location.pathname || ensureCardId(card) !== cardId || (card.innerText || card.textContent || '') !== text || !menuCardEligible(moreButton, card, text)) {
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
         await report('skipped');
@@ -261,7 +304,7 @@
         await new Promise(resolve => setTimeout(resolve, 50));
         item = findAllowOnceMenuItem(moreButton);
       }
-      if (!item || !enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected) {
+      if (!item || label(item) !== 'Allow once' || !enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected || ensureCardId(card) !== cardId) {
         closeMenu(moreButton);
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
@@ -318,7 +361,7 @@
       const peers = [...card.querySelectorAll('button,[role="button"]')].filter(visible);
       if (peers.some(peer => once.test(label(peer))) || !peers.some(peer => deny.test(label(peer)))) continue;
       const moreButton = peers.find(peer => (peer.getAttribute?.('aria-label') || '').trim() === 'More allow options' && !peer.disabled && peer.getAttribute?.('aria-disabled') !== 'true');
-      if (!moreButton) continue;
+      if (!moreButton || !menuCardEligible(moreButton, card, text)) continue;
       const cardId = ensureCardId(card);
       if (!canAttemptCard(cardId, 'Allow once')) continue;
       void clickMenuOnce(moreButton, card, text);
@@ -334,13 +377,14 @@
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.approvalEnabled) { enabled = changes.approvalEnabled.newValue !== false; schedule(); }
   });
-  document.addEventListener?.('visibilitychange', () => {
-    if (!pageVisible()) return;
+  document.addEventListener?.('visibilitychange', event => {
+    if (!event?.isTrusted || !pageVisible()) return;
     const now = Date.now();
     for (const state of cardHistory.values()) {
       if (state.status === 'still-visible' || state.status === 'skipped') {
         state.firstAttemptAt = now;
         state.lastObservedAt = 0;
+        state.rejectedUntil = 0;
         state.pendingVisibilityReset = true;
       }
     }

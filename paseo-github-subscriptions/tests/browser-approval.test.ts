@@ -890,7 +890,7 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   html.appendChild(body);
 
   const allowOnceButton = card.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
-  const visibilityListeners: Array<() => void> = [];
+  const visibilityListeners: Array<(event?: any) => void> = [];
   const timers: Array<{ fn: () => void; delay: number }> = [];
   let scanTrigger: () => void = () => {};
 
@@ -901,7 +901,7 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
     activeElement: body,
     querySelectorAll: (sel: string) => html.querySelectorAll(sel),
     querySelector: (sel: string) => html.querySelector(sel),
-    addEventListener: (event: string, listener: () => void) => {
+    addEventListener: (event: string, listener: (ev?: any) => void) => {
       if (event === 'visibilitychange') visibilityListeners.push(listener);
     },
   };
@@ -958,10 +958,15 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
   assert.equal(allowOnceButton.clicks, 0);
   assert.equal(storageState.approvalAudit.length, 0);
 
-  // 2. 切回前台（visibilityState = 'visible' 并触发 visibilitychange）：
-  //    先验证 300ms 延迟——在 300ms 定时器触发前不会点击；触发 300ms 定时器后才执行第 1 次点击
+  // 2. 切回前台（visibilityState = 'visible'）：
+  //    先验证非可信事件（isTrusted: false）被忽略；可信事件（isTrusted: true）触发 300ms 延迟后执行第 1 次点击
   docObj.visibilityState = 'visible';
-  for (const fn of visibilityListeners) fn();
+  for (const fn of visibilityListeners) fn({ isTrusted: false });
+  await runTimersUpTo(5000);
+  assert.equal(allowOnceButton.clicks, 0);
+  assert.equal(storageState.approvalAudit.length, 0);
+
+  for (const fn of visibilityListeners) fn({ isTrusted: true });
   await runTimersUpTo(200, false);
   assert.equal(allowOnceButton.clicks, 0);
   assert.equal(storageState.approvalAudit.length, 0);
@@ -974,16 +979,20 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
 
   // 3. 切回后台 10 分钟（超过 3 分钟最长重试时长）：后台期间不点击、不计数
   docObj.visibilityState = 'hidden';
-  for (const fn of visibilityListeners) fn();
+  for (const fn of visibilityListeners) fn({ isTrusted: true });
   nowMs += 600_000;
   scanTrigger();
   await runTimersUpTo(5000);
   assert.equal(allowOnceButton.clicks, 1);
   assert.equal(storageState.approvalAudit.length, 1);
 
-  // 4. 再次切回前台：立即扫描并点击（第 2 次点击），且重试时长从切回前台时刻重新计算，5 秒后第 3、4 次重试均可正常进行
+  // 4. 再次切回前台：非可信事件不会重置重试时长；可信事件立即扫描并点击（第 2 次点击），且重试时长重新计算，5 秒后第 3、4 次重试正常进行
   docObj.visibilityState = 'visible';
-  for (const fn of visibilityListeners) fn();
+  for (const fn of visibilityListeners) fn({ isTrusted: false });
+  await runTimersUpTo(1500);
+  assert.equal(allowOnceButton.clicks, 1);
+
+  for (const fn of visibilityListeners) fn({ isTrusted: true });
   await runTimersUpTo(1500);
   assert.equal(allowOnceButton.clicks, 2);
 
@@ -999,10 +1008,10 @@ test('首次出现等待 300 毫秒再点击；后台（visibilityState !== visi
 
   // 5. 达到单卡总点击上限（4 次）后，即使再次切后台再切回前台，也不会突破点击总次数上限
   docObj.visibilityState = 'hidden';
-  for (const fn of visibilityListeners) fn();
+  for (const fn of visibilityListeners) fn({ isTrusted: true });
   nowMs += 60_000;
   docObj.visibilityState = 'visible';
-  for (const fn of visibilityListeners) fn();
+  for (const fn of visibilityListeners) fn({ isTrusted: true });
   await runTimersUpTo(5000);
   assert.equal(allowOnceButton.clicks, 4);
   assert.equal(storageState.approvalAudit.length, 4);
@@ -1792,6 +1801,283 @@ test('跨标签页同 label 去重、同会话每分钟总次数限制、reserve
   }, 1);
   assert.equal(res13th.allowed, false);
 });
+
+test('直接点击路径：300ms 等待期间换卡并把按钮节点改成 Always allow，所有按钮点击次数为 0', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+
+  async function runDirectWaitSwap(changeCardAriaLabel: boolean) {
+    const cardTree = DomNode.fromTuple(directFixture.tree);
+    const body = new DomNode('body', {}, []);
+    body.appendChild(cardTree);
+    const html = new DomNode('html', {}, []);
+    html.appendChild(body);
+
+    const cardRoot = html.querySelector('[data-approval-card-root]')!;
+    const allButtons = html.querySelectorAll('button');
+    const denyButton = allButtons.find(b => b.innerText.includes('Deny'))!;
+    const allowOnceButton = allButtons.find(b => b.innerText.includes('Allow once'))!;
+    const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
+    const titleRegion = cardRoot.querySelector('[data-testid="approval-title-region"]')!;
+
+    const timers: Array<{ fn: () => void; delay: number }> = [];
+    const reserves: any[] = [];
+    let uuidCounter = 0;
+
+    const context = {
+      document: {
+        documentElement: html,
+        body,
+        activeElement: body,
+        querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+        querySelector: (sel: string) => html.querySelector(sel),
+      },
+      location: { origin: 'https://claude.ai', pathname: '/code/session_directswap' },
+      chrome: {
+        storage: {
+          local: { get: async () => ({ approvalEnabled: true }) },
+          onChanged: { addListener: () => {} },
+        },
+        runtime: {
+          sendMessage: async (message: any) => {
+            if (message.type === 'approval-reserve') {
+              reserves.push(message);
+              return { allowed: true, reservationId: 'res-swap-1' };
+            }
+          },
+        },
+      },
+      crypto: {
+        randomUUID: () => `swap-direct-${++uuidCounter}`,
+        subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+      },
+      TextEncoder,
+      Uint8Array,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+      MutationObserver: class { observe() {} },
+      setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+      setInterval: () => {},
+      Date,
+      WeakMap,
+    };
+
+    runInNewContext(source, context);
+    // 先执行 150ms scan 定时器，进入 clickOnce 并挂起在 300ms 等待定时器上
+    for (let step = 0; step < 10; step++) {
+      await Promise.resolve();
+      const idx = timers.findIndex(t => t.delay < 300);
+      if (idx !== -1) timers.splice(idx, 1)[0]!.fn();
+    }
+    assert.ok(timers.some(t => t.delay === 300));
+
+    // 在 300ms 等待期间：卡片 A 换为卡片 B，且 React 复用原本的 Allow once 按钮节点改成 Always allow
+    if (changeCardAriaLabel) {
+      cardRoot.setAttribute('aria-label', 'Permission request: use list providers (paseo)');
+    }
+    titleRegion.setText('Allow Claude to use list providers (paseo)?');
+    allowOnceButton.setText('Always allow ⌘ Command ⏎ Enter');
+
+    // 触发 300ms 及后续所有定时器
+    for (let step = 0; step < 20; step++) {
+      while (timers.length) timers.shift()!.fn();
+      await Promise.resolve();
+    }
+
+    assert.equal(allowOnceButton.clicks, 0);
+    assert.equal(denyButton.clicks, 0);
+    assert.equal(moreButton.clicks, 0);
+    assert.equal(reserves.length, 0);
+  }
+
+  await runDirectWaitSwap(true);
+  await runDirectWaitSwap(false);
+});
+
+test('菜单点击路径：300ms 等待期间换卡并把按钮节点改成 Always allow，所有按钮点击次数为 0', async () => {
+  const mcpCardFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp.json', import.meta.url), 'utf8'));
+
+  async function runMenuWaitSwap(changeCardAriaLabel: boolean, keepMoreAriaLabel: boolean) {
+    const cardTree = DomNode.fromTuple(mcpCardFixture.tree);
+    const body = new DomNode('body', {}, []);
+    body.appendChild(cardTree);
+    const html = new DomNode('html', {}, []);
+    html.appendChild(body);
+
+    const cardRoot = html.querySelector('[data-approval-card-root]')!;
+    const allButtons = html.querySelectorAll('button');
+    const denyButton = allButtons.find(b => b.innerText.includes('Deny'))!;
+    const alwaysAllowButton = allButtons.find(b => b.innerText.includes('Always allow'))!;
+    const moreButton = allButtons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
+    const titleRegion = cardRoot.querySelector('[data-testid="approval-title-region"]')!;
+
+    const timers: Array<{ fn: () => void; delay: number }> = [];
+    const reserves: any[] = [];
+    let uuidCounter = 0;
+
+    const context = {
+      document: {
+        documentElement: html,
+        body,
+        activeElement: body,
+        querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+        querySelector: (sel: string) => html.querySelector(sel),
+      },
+      location: { origin: 'https://claude.ai', pathname: '/code/session_menuswap' },
+      chrome: {
+        storage: {
+          local: { get: async () => ({ approvalEnabled: true }) },
+          onChanged: { addListener: () => {} },
+        },
+        runtime: {
+          sendMessage: async (message: any) => {
+            if (message.type === 'approval-reserve') {
+              reserves.push(message);
+              return { allowed: true, reservationId: 'res-menuswap-1' };
+            }
+          },
+        },
+      },
+      crypto: {
+        randomUUID: () => `swap-menu-${++uuidCounter}`,
+        subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+      },
+      TextEncoder,
+      Uint8Array,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+      MutationObserver: class { observe() {} },
+      setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+      setInterval: () => {},
+      Date,
+      WeakMap,
+    };
+
+    runInNewContext(source, context);
+    // 先执行 150ms scan 定时器，进入 clickMenuOnce 并挂起在 300ms 等待定时器上
+    for (let step = 0; step < 10; step++) {
+      await Promise.resolve();
+      const idx = timers.findIndex(t => t.delay < 300);
+      if (idx !== -1) timers.splice(idx, 1)[0]!.fn();
+    }
+    assert.ok(timers.some(t => t.delay === 300));
+
+    // 在 300ms 等待期间：卡片 A 换为卡片 B，且 React 复用原本的 More allow options 按钮节点改成 Always allow
+    if (changeCardAriaLabel) {
+      cardRoot.setAttribute('aria-label', 'Permission request: use list providers (paseo)');
+    }
+    titleRegion.setText('Allow Claude to use list providers (paseo)?');
+    moreButton.setText('Always allow');
+    if (!keepMoreAriaLabel) {
+      moreButton.removeAttribute('aria-label');
+    }
+
+    // 触发 300ms 及后续所有定时器
+    for (let step = 0; step < 20; step++) {
+      while (timers.length) timers.shift()!.fn();
+      await Promise.resolve();
+    }
+
+    assert.equal(alwaysAllowButton.clicks, 0);
+    assert.equal(denyButton.clicks, 0);
+    assert.equal(moreButton.clicks, 0);
+    assert.equal(reserves.length, 0);
+  }
+
+  await runMenuWaitSwap(true, true);
+  await runMenuWaitSwap(false, false);
+  await runMenuWaitSwap(false, true);
+});
+
+test('approval-reserve 被后台拒绝时，内容脚本在本地给该卡片记短暂退避，scan 跳过它继续处理后面的卡片', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+
+  const card1 = DomNode.fromTuple(directFixture.tree);
+  const providersFixture = JSON.parse(
+    JSON.stringify(directFixture.tree).replaceAll('list hosts', 'list providers').replaceAll('list_hosts', 'list_providers'),
+  );
+  const card2 = DomNode.fromTuple(providersFixture);
+
+  const body = new DomNode('body', {}, []);
+  body.appendChild(card1);
+  body.appendChild(card2);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const allow1 = card1.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  const allow2 = card2.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  allow2.onClick = () => { card2.parentElement = null; };
+
+  let nowMs = 1_700_000_000_000;
+  const FakeDate = Object.assign(
+    function (value?: any) {
+      return value !== undefined ? new Date(value) : new Date(nowMs);
+    } as unknown as DateConstructor,
+    {
+      now: () => nowMs,
+      parse: Date.parse,
+      UTC: Date.UTC,
+    },
+  );
+
+  const timers: Array<{ fn: () => void; delay: number }> = [];
+  const reservedCardIds: string[] = [];
+  let uuidCounter = 0;
+
+  const context = {
+    document: {
+      documentElement: html,
+      body,
+      activeElement: body,
+      querySelectorAll: (sel: string) => html.querySelectorAll(sel),
+      querySelector: (sel: string) => html.querySelector(sel),
+    },
+    location: { origin: 'https://claude.ai', pathname: '/code/session_rejectbackoff' },
+    chrome: {
+      storage: {
+        local: { get: async () => ({ approvalEnabled: true }) },
+        onChanged: { addListener: () => {} },
+      },
+      runtime: {
+        sendMessage: async (message: any) => {
+          if (message.type === 'approval-reserve') {
+            reservedCardIds.push(message.cardId);
+            // 后台拒绝第 1 张卡片，放行第 2 张卡片
+            if (message.cardId === 'backoff-card-1') {
+              return { allowed: false };
+            }
+            return { allowed: true, reservationId: 'res-backoff-2' };
+          }
+          return { allowed: true };
+        },
+      },
+    },
+    crypto: {
+      randomUUID: () => `backoff-card-${++uuidCounter}`,
+      subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() },
+    },
+    TextEncoder,
+    Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void, delay = 0) => { timers.push({ fn, delay }); },
+    setInterval: () => {},
+    Date: FakeDate,
+    WeakMap,
+  };
+
+  runInNewContext(source, context);
+  for (let step = 0; step < 35; step++) {
+    await new Promise(resolve => setImmediate(resolve));
+    if (timers.length) {
+      const item = timers.shift()!;
+      item.fn();
+    }
+  }
+
+  // 第 1 张卡片被后台拒绝后记录 5 秒本地退避，不点击；随后自动重扫跳过第 1 张，成功点击第 2 张卡片
+  assert.equal(allow1.clicks, 0);
+  assert.equal(allow2.clicks, 1);
+  assert.deepEqual(reservedCardIds, ['backoff-card-1', 'backoff-card-2']);
+});
+
 
 
 
