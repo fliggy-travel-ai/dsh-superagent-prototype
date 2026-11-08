@@ -290,13 +290,19 @@ test('provider mirrors requests and forwards human answers once until cloud reso
     assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request: question }), { shown: true });
     const event = f.events.at(-1); assert.equal(event?.type, 'session.permission');
     if (event?.type === 'session.permission') { assert.equal(event.request.id, question.toolUseId); assert.equal(event.request.kind, 'question'); assert.deepEqual(event.request.input, question.input); }
+    if (event?.type === 'session.permission') assert.deepEqual(event.request.metadata, { cloudSessionManual: true, webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId });
     assert.deepEqual(f.cloud.notify({ cloudSessionId: cloudId, request: question }), { shown: false });
-    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': 'A' } } } }));
+    assert.throws(() => f.cloud.notify({ cloudSessionId: cloudId, request: { ...question, input: { questions: [] } } }), /请求内容已变化/);
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } } } }));
     await new Promise<void>(resolve => setImmediate(resolve));
-    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId, kind: 'question', answers: { 'Which?': 'A' } });
+    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: question.toolUseId, expected: { toolName: question.toolName, input: question.input }, kind: 'question', answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } });
     assert.equal(f.events.at(-1)?.type, 'session.permission');
-    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow' } }));
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': '其他' }, otherAnswers: { 'Which?': '自定义答案' } } } }));
+    await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1); assert.equal(f.events.at(-1)?.type, 'session.permission');
+    await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: question.toolUseId, response: { behavior: 'allow', updatedInput: { answers: { 'Which?': 'A' } } } }));
     await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.length, 1);
+    const changed = f.events.at(-1); assert.equal(changed?.type, 'timeline.item');
+    if (changed?.type === 'timeline.item' && changed.item.type === 'assistant_message') assert.equal(changed.item.text, '结果不确定，请在 claude.ai 核对');
     assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: question.toolUseId, outcome: 'answered' }), { closed: true });
     assert.equal(f.events.at(-1)?.type, 'session.permission_resolved');
     assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: question.toolUseId, outcome: 'answered' }), { closed: false });
@@ -309,7 +315,7 @@ test('provider mirrors requests and forwards human answers once until cloud reso
       await new Promise<void>(resolve => setImmediate(resolve));
       const last = f.events.at(-1); assert.equal(last?.type, 'timeline.item');
       if (last?.type === 'timeline.item' && last.item.type === 'assistant_message') assert.equal(last.item.text, next === 'page_not_open' ? '请在 claude.ai 作答' : '结果不确定，请在 claude.ai 核对');
-      assert.equal(received.at(-1)?.decision, 'deny');
+      assert.equal(received.at(-1)?.kind, 'tool'); if (received.at(-1)?.kind === 'tool') assert.equal((received.at(-1) as Extract<(typeof received)[number], { kind: 'tool' }>).decision, 'deny');
       await connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: toolUseId, response: { behavior: 'allow' } }));
       await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(received.filter(item => item.toolUseId === toolUseId).length, 1);
       assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId, outcome: 'denied' }), { closed: true });
@@ -329,5 +335,20 @@ test('pending requests reappear after reopen and can resolve while closed', asyn
     await f.connection.send(input({ type: 'session.close', sessionId: f.current(), requestId: 'close-again' }));
     assert.deepEqual(f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: request.toolUseId, outcome: 'answered' }), { closed: true });
     await f.open(); assert.equal(f.events.at(-1)?.type, 'session.ready');
+  } finally { f.cloud.dispose(); }
+});
+
+test('handoff uses a snapshot of the original notification input', async () => {
+  const received: Parameters<AnswerWebRequest>[0][] = [];
+  const f = await fixture(undefined, async value => { received.push(value); return { status: 'submitted' }; });
+  try {
+    await f.cloud.ensure(ensureInput, f.paseo);
+    const request = { toolUseId: 'original-input', toolName: 'Bash', kind: 'tool' as const, input: { command: 'first' } };
+    f.cloud.notify({ cloudSessionId: cloudId, request });
+    request.input.command = 'changed';
+    assert.throws(() => f.cloud.notify({ cloudSessionId: cloudId, request }), /请求内容已变化/);
+    await f.connection.send(input({ type: 'session.permission', sessionId: f.current(), permissionId: request.toolUseId, response: { behavior: 'allow' } }));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(received[0], { webSessionId: 'session_abcdefgh1234', toolUseId: request.toolUseId, expected: { toolName: 'Bash', input: { command: 'first' } }, kind: 'tool', decision: 'allow' });
   } finally { f.cloud.dispose(); }
 });

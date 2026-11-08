@@ -6,7 +6,7 @@ import { EventTypeSchema } from './shared/model.ts';
 import * as rpc from './shared/contracts.ts';
 import { Runtime } from './server/runtime.ts';
 import { connectDaemon } from './server/daemon.ts';
-import { registerCloudSession, redactError } from './server/cloud-session/index.ts';
+import { registerCloudSession, createCloudSession, redactError, type AnswerWebRequest } from './server/cloud-session/index.ts';
 import { AutomationRuntime } from './server/automation.ts';
 import { automationPort } from './server/automation-port.ts';
 import { BrowserBridge } from './server/browser-bridge.ts';
@@ -23,8 +23,10 @@ import { StalledRuntime } from './server/stalled.ts';
 import { stalledPort } from './server/stalled-port.ts';
 
 export default function contribute(server: PluginServerContext) {
+  // Replace this handoff with the BrowserBridge instance method after #1704 delivers it.
+  const answerWebRequest: AnswerWebRequest = async () => ({ status: 'page_not_open' });
   let disposeCloud: (() => void) | undefined;
-  try { disposeCloud = registerCloudSession(server); } catch (error) { console.error('云端会话模块注册失败：', redactError(error).replace(/[\r\n]+/g, ' ')); }
+  try { disposeCloud = registerCloudSession(server, () => createCloudSession(undefined, answerWebRequest)); } catch (error) { console.error('云端会话模块注册失败：', redactError(error).replace(/[\r\n]+/g, ' ')); }
   let runtime: Runtime | null = null;
   let connection: Awaited<ReturnType<typeof connectDaemon>> | null = null;
   let stopped = false;

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { z } from 'zod';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
@@ -14,9 +16,13 @@ type Item = { seq: number; messageId: string; delivery: 'auto' | 'steer'; text: 
 type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
 const caps = ['prompt.message', 'prompt.steer', 'session.persistence', 'permission'] as const;
 type PendingRequest = { toolUseId: string; toolName: string; kind: 'question' | 'tool'; input: Record<string, unknown> };
-export type WebAnswer = { webSessionId: string; toolUseId: string; kind: 'question' | 'tool'; answers?: Record<string, string | string[]>; decision?: 'allow' | 'deny' };
-export type WebAnswerResult = { status: 'submitted' } | { status: 'page_not_open' } | { status: 'unknown'; detail: string };
-export type AnswerWebRequest = (request: WebAnswer) => Promise<WebAnswerResult>;
+export const CLOUD_MANUAL_REQUEST_MARKER = 'cloudSessionManual';
+type WebRequestContext = { webSessionId: string; toolUseId: string; expected: { toolName: string; input: Record<string, unknown> } };
+export type WebRequestAnswer = WebRequestContext & ({ kind: 'question'; answers: Record<string, string | string[]>; otherAnswers?: Record<string, string> } | { kind: 'tool'; decision: 'allow' | 'deny' });
+export type WebRequestResult = { status: 'submitted' } | { status: 'page_not_open' } | { status: 'unknown'; detail: string };
+export type AnswerWebRequest = (request: WebRequestAnswer) => Promise<WebRequestResult>;
+const AnswersSchema = z.record(z.string(), z.union([z.string(), z.array(z.string())]));
+const OtherAnswersSchema = z.record(z.string(), z.string());
 
 
 function endpointSecrets(endpoint: Endpoint): string[] {
@@ -118,17 +124,19 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const queues = new Map<string, { seq: number; items: Item[]; waiters: Set<() => void> }>();
   const locks = new Map<string, Promise<unknown>>();
   const workspaceReservations = new Map<string, { id: string; path: string }>();
-  const requests = new Map<string, Map<string, { request: PendingRequest; closed: boolean; delivered: boolean }>>();
+  const requests = new Map<string, Map<string, { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response'] }>>();
   const pending = (cloud: string) => { let entries = requests.get(cloud); if (!entries) { entries = new Map(); requests.set(cloud, entries); } return entries; };
   const permissionEvent = (s: Session, request: PendingRequest) => {
-    const event = ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input } });
+    const event = ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input, metadata: { [CLOUD_MANUAL_REQUEST_MARKER]: true, webSessionId: `session_${s.cloud.slice(4)}`, toolUseId: request.toolUseId } } });
     s.emit(event);
   };
   const notify = ({ cloudSessionId, request }: { cloudSessionId: string; request: PendingRequest }) => {
     const s = find(cloudSessionId); const entries = pending(cloudSessionId);
-    if (entries.has(request.toolUseId)) return { shown: false };
+    const existing = entries.get(request.toolUseId);
+    if (existing) { if (!isDeepStrictEqual(existing.request, request)) throw new Error('云端请求内容已变化'); return { shown: false }; }
     ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input } });
-    entries.set(request.toolUseId, { request, closed: false, delivered: false }); permissionEvent(s, request); return { shown: true };
+    const original = structuredClone(request);
+    entries.set(request.toolUseId, { request: original, closed: false, delivered: false }); permissionEvent(s, original); return { shown: true };
   };
   const resolve = ({ cloudSessionId, toolUseId }: { cloudSessionId: string; toolUseId: string; outcome: 'answered' | 'denied' | 'canceled' }) => {
     const entry = requests.get(cloudSessionId)?.get(toolUseId); if (!entry || entry.closed) return { closed: false };
@@ -136,13 +144,22 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   };
   const answer = async (s: Session, permissionId: string, response: Extract<ProviderInput, { type: 'session.permission' }>['response']) => {
     const entry = requests.get(s.cloud)?.get(permissionId);
-    if (!entry || entry.closed || entry.delivered) return;
-    entry.delivered = true;
-    let result: WebAnswerResult;
+    if (!entry || entry.closed) return;
+    if (entry.delivered) {
+      if (!isDeepStrictEqual(entry.response, response)) s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text: '结果不确定，请在 claude.ai 核对' } });
+      return;
+    }
+    entry.delivered = true; entry.response = structuredClone(response);
+    let result: WebRequestResult;
     try {
-      const updated = response.behavior === 'allow' ? response.updatedInput?.answers : undefined;
-      const answers = updated && typeof updated === 'object' && !Array.isArray(updated) ? updated as Record<string, string | string[]> : undefined;
-      result = await answerWebRequest({ webSessionId: `session_${s.cloud.slice(4)}`, toolUseId: permissionId, kind: entry.request.kind, ...(entry.request.kind === 'question' ? { answers } : { decision: response.behavior }) });
+      const context = { webSessionId: `session_${s.cloud.slice(4)}`, toolUseId: permissionId, expected: { toolName: entry.request.toolName, input: structuredClone(entry.request.input) } };
+      if (entry.request.kind === 'question') {
+        const updated = response.behavior === 'allow' ? response.updatedInput : undefined;
+        const answers = AnswersSchema.safeParse(updated?.answers);
+        const otherAnswers = updated?.otherAnswers === undefined ? undefined : OtherAnswersSchema.parse(updated.otherAnswers);
+        if (!answers.success) throw new Error('invalid answers');
+        result = await answerWebRequest({ ...context, kind: 'question', answers: answers.data, ...(otherAnswers ? { otherAnswers } : {}) });
+      } else result = await answerWebRequest({ ...context, kind: 'tool', decision: response.behavior });
     } catch { result = { status: 'unknown', detail: '' }; }
     if (entry.closed || sessions.get(s.cloud) !== s) return;
     const text = result.status === 'page_not_open' ? '请在 claude.ai 作答' : result.status === 'unknown' ? '结果不确定，请在 claude.ai 核对' : null;

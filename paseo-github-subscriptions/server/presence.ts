@@ -6,6 +6,7 @@ import type { AgentPermissionRequest, AgentPermissionResponse } from '@getpaseo/
 import { PresenceSettingsSchema, QuestionSchema, type PresenceSettings, type PresenceObservation, type PresenceSnapshot, type Question, type QuestionAnswer, type QuestionRead, type BrowserQuestion, type BrowserDecision } from '../shared/presence.ts';
 import { atomicWrite } from './storage.ts';
 import { CLOUD_SESSION_PROVIDER_ID } from '../shared/cloud-session.ts';
+import { CLOUD_MANUAL_REQUEST_MARKER } from './cloud-session/index.ts';
 import { SPEECH_COOLDOWN_MS, SpeechEventSchema, type SpeechResult } from '../shared/speech.ts';
 import { automaticAnswerBlockReason, nativePrompts, nativeResponse, questionFingerprint, recommendedAnswers, validateAnswers } from './questions.ts';
 
@@ -164,7 +165,7 @@ export class PresenceRuntime {
   private async process(question: Question, generation: number) {
     if (this.stopped || this.configuring || this.state.settings.paused || generation !== this.generation || this.decisions.has(question.id) || this.activeAnswers.has(question.id)) return;
     if (question.source === 'browser' && Date.now() - (this.browser.get(question.id)?.seen ?? 0) > 60_000) return;
-    const manualCloud = question.source === 'native' && this.native.get(question.id)?.provider === CLOUD_SESSION_PROVIDER_ID;
+    const manualCloud = question.source === 'native' && (this.native.get(question.id)?.provider === CLOUD_SESSION_PROVIDER_ID || this.native.get(question.id)?.metadata?.[CLOUD_MANUAL_REQUEST_MARKER] === true);
     const answers = recommendedAnswers(question.prompts);
     if (!manualCloud && this.observation.mode === 'offline' && answers) { await this.answer({ id: question.id, answers }, true); return; }
     const reason = (manualCloud ? '云端会话等待用户回答' : automaticAnswerBlockReason(question.prompts)) ?? (this.observation.mode === 'offline' ? '没有唯一明确的推荐项，请人工选择' : this.observation.mode === 'unknown' ? '在场状态未知，等待用户回答' : '在线：等待用户回答');
@@ -264,7 +265,7 @@ export class PresenceRuntime {
       const agent = await this.port.refresh(question.sessionId);
       request = agent && !agent.archivedAt ? agent.pendingPermissions.find(item => item.id === this.native.get(question.id)?.id) : undefined;
       if (!request || questionFingerprint(request) !== question.fingerprint) throw new Error('原会话的问题已经变化');
-      if (automatic && request.provider === CLOUD_SESSION_PROVIDER_ID) return this.snapshot();
+      if (automatic && (request.provider === CLOUD_SESSION_PROVIDER_ID || request.metadata?.[CLOUD_MANUAL_REQUEST_MARKER] === true)) return this.snapshot();
       nativeResponse(request, input.answers);
     } else {
       const original = this.browser.get(question.id);

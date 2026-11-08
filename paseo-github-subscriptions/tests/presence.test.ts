@@ -452,3 +452,18 @@ test('云端会话的原生提问在离线模式仍由用户作答', async () =>
     assert.equal(setup.responses.length, 1);
   } finally { await setup.close(); }
 });
+
+test('云端人工请求标记在在线和离线模式都不会自动作答', async () => {
+  for (const mode of ['online', 'offline'] as const) {
+    const setup = await fixture();
+    try {
+      const marked = { ...request(), metadata: { cloudSessionManual: true } };
+      setup.agents.push({ ...agent(), pendingPermissions: [marked] });
+      await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode, speechEnabled: false });
+      const question = setup.runtime.snapshot().questions[0];
+      assert.equal(question.state, 'pending'); assert.equal(setup.responses.length, 0);
+      await setup.runtime.answer({ id: question.id, answers: answer });
+      assert.equal(setup.responses.length, 1);
+    } finally { await setup.close(); }
+  }
+});
