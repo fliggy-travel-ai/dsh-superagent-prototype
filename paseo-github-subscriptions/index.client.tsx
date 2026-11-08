@@ -7,8 +7,12 @@ import { SidebarItem } from './client/sidebar-item.tsx';
 import { createSnapshotStore } from './client/store.ts';
 import { createControlStore } from './client/control-store.ts';
 import { bind, type Env } from './client/ui.tsx';
+import { INSTANCE_ROLE } from './shared/instance.ts';
+import { resolveInstance } from './shared/instances.ts';
 
 export default function contribute(client: PluginClientContext) {
+  // Provider 实例不注册任何界面，避免侧栏和页面出现两份。
+  if (!resolveInstance(INSTANCE_ROLE).hostsUi) return () => {};
   const store = createSnapshotStore(client);
   const control = createControlStore(client, client.paseo.agents.list);
   const env: Env = { store, control, openScreen: (input) => client.openScreen(input) };
