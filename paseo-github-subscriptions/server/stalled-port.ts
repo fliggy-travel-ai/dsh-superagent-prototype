@@ -20,6 +20,9 @@ export function stalledPort(origin: DaemonClient, hosts: PresenceHosts, githubLi
   const hostId = () => origin.getLastServerInfoMessage()!.serverId;
   const onHost = <T>(id: string, operation: (client: DaemonClient) => Promise<T>): Promise<T> => id === hostId() ? operation(origin) : hosts.withHost(id, operation);
   return {
+    async liveIds() {
+      return new Set((await list(origin, hostId())).filter(agent => !agent.archivedAt && ['idle', 'error'].includes(agent.status)).map(agent => agent.id));
+    },
     async collect() {
       const directory = await origin.listHosts();
       const enabled = directory.hosts.filter(host => host.enabled && host.serverId);

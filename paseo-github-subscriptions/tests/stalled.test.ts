@@ -12,6 +12,7 @@ function fixture() {
     subagents: async current => { if (state.subagentFailure) throw new Error('子代理读取失败'); return state.busy.has(current.id); },
     message: async () => { state.messageCalls++; if (state.messageFailure) throw new Error('时间线读取失败'); return '已完成接口，等待下一步。'; },
     current: async current => state.agents.find(item => item.id === current.id && item.hostId === current.hostId) ?? null,
+    liveIds: async () => new Set(state.agents.filter(item => item.hostId === 'mini' && !item.archivedAt && ['idle', 'error'].includes(item.status)).map(item => item.id)),
   };
   return { state, port, runtime: new StalledRuntime(port) };
 }
@@ -64,4 +65,28 @@ test('读取消息期间主会话重新工作，不能发布旧的停滞卡片',
   const { state, port, runtime } = fixture();
   port.message = async () => { state.agents[0].activeTurn = {}; return '旧消息'; };
   assert.deepEqual((await runtime.snapshot()).sessions, []);
+});
+
+test('已展示会话归档后移除，其他候选慢读期间归档也不能发布', async () => {
+  const { state, port, runtime } = fixture();
+  assert.equal((await runtime.snapshot()).sessions.length, 1);
+  state.agents[0] = { ...state.agents[0], archivedAt: '2026-11-08T06:03:14Z', status: 'closed' };
+  assert.deepEqual((await runtime.snapshot()).sessions, []);
+  state.agents = [agent('fast'), agent('slow')];
+  let finishSlow!: (message: string) => void;
+  const waiting = new Promise<string>(resolve => { finishSlow = resolve; });
+  port.message = async current => current.id === 'slow' ? waiting : '快速会话的旧消息';
+  const scan = runtime.snapshot();
+  await new Promise(resolve => setImmediate(resolve));
+  state.agents[0] = { ...state.agents[0], archivedAt: '2026-11-08T06:04:00Z', status: 'closed' };
+  finishSlow('较慢会话的消息');
+  assert.deepEqual((await scan).sessions.map(session => session.agentId), ['slow']);
+});
+
+test('发布前无法核对本机会话状态时不返回旧卡片', async () => {
+  const { port, runtime } = fixture();
+  port.liveIds = async () => { throw new Error('本机断开'); };
+  const result = await runtime.snapshot();
+  assert.deepEqual(result.sessions, []);
+  assert.match(result.error!, /无法核对会话是否已归档/);
 });

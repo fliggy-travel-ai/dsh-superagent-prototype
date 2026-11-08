@@ -10,7 +10,7 @@ import { bind, type Env } from './client/ui.tsx';
 
 export default function contribute(client: PluginClientContext) {
   const store = createSnapshotStore(client);
-  const control = createControlStore(client);
+  const control = createControlStore(client, client.paseo.agents.list);
   const env: Env = { store, control, openScreen: (input) => client.openScreen(input) };
 
   const removers = [

@@ -18,9 +18,13 @@ export interface ControlState {
   presenceError: string | null;
 }
 
-export function createControlStore(client: Pick<PluginClientContext, 'rpc'>) {
+export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list']) {
   let state: ControlState = { automation: null, browser: null, presence: null, stalled: null, stalledError: null, automationError: null, browserError: null, presenceError: null };
   let stalledInflight: Promise<void> | null = null;
+  let liveInflight: Promise<void> | null = null;
+  let liveIds: Set<string> | null = null;
+  let liveError: string | null = null;
+  let scanError: string | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let inflight: Promise<void> | null = null;
   let disposed = false;
@@ -49,13 +53,44 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>) {
     try { const value = await operation(); if (version === sequence.presence) emit({ presence: value, presenceError: null }); }
     catch (error) { if (version === sequence.presence) emit({ presenceError: errorMessage(error) }); throw error; }
   };
+  const visibleStalled = (value: StalledSnapshot | null) => {
+    if (!value) return null;
+    const sessions = value.sessions.filter(session => liveIds?.has(session.agentId));
+    return sessions.length === value.sessions.length ? value : { ...value, sessions };
+  };
+  const refreshLive = () => {
+    liveInflight ??= (async () => {
+      try {
+        const ids = new Set<string>();
+        let cursor: string | undefined;
+        for (let page = 0; ; page++) {
+          if (page >= 100) throw new Error('会话清单未完整返回');
+          const result = await listAgents({ filter: { includeArchived: false, statuses: ['idle', 'error'] }, page: { limit: 100, cursor }, timeout: 5000 });
+          for (const { agent } of result.entries) if (!agent.archivedAt && ['idle', 'error'].includes(agent.status)) ids.add(agent.id);
+          if (!result.pageInfo.hasMore) break;
+          if (!result.pageInfo.nextCursor || result.pageInfo.nextCursor === cursor) throw new Error('会话清单未完整返回');
+          cursor = result.pageInfo.nextCursor;
+        }
+        liveIds = ids; liveError = null;
+      } catch (error) {
+        liveIds = null; liveError = `无法核对会话是否已归档，暂不显示停滞会话：${errorMessage(error)}`;
+      }
+      emit({ stalled: visibleStalled(state.stalled), stalledError: liveError || scanError });
+    })().finally(() => { liveInflight = null; });
+    return liveInflight;
+  };
   const refresh = () => {
-    if (disposed || mutating) return Promise.resolve();
+    if (disposed) return Promise.resolve();
+    const live = refreshLive();
+    if (mutating) return live;
     inflight ??= Promise.allSettled([native(() => client.rpc(automationSnapshot, {})), browsing(() => client.rpc(browserSnapshot, {})), asking(() => client.rpc(presenceSnapshot, {}))])
       .then(() => {}).finally(() => { inflight = null; });
-    stalledInflight ??= client.rpc(stalledSnapshot, {}).then(value => { emit({ stalled: value, stalledError: null }); })
-      .catch(error => { emit({ stalledError: errorMessage(error) }); }).finally(() => { stalledInflight = null; });
-    return Promise.allSettled([inflight, stalledInflight]).then(() => {});
+    stalledInflight ??= client.rpc(stalledSnapshot, {}).then(async value => {
+      if (disposed) return;
+      await refreshLive(); scanError = null;
+      emit({ stalled: visibleStalled(value), stalledError: liveError });
+    }).catch(error => { scanError = errorMessage(error); emit({ stalledError: liveError || scanError }); }).finally(() => { stalledInflight = null; });
+    return Promise.allSettled([inflight, stalledInflight, live]).then(() => {});
   };
   const write = async <Result>(operation: () => Promise<Result>): Promise<Result> => {
     mutating += 1;

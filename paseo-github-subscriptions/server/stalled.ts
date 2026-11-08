@@ -18,6 +18,7 @@ export interface StalledPort {
   subagents(agent: StalledAgent): Promise<boolean>;
   message(agent: StalledAgent): Promise<string | null>;
   current(agent: StalledAgent): Promise<StalledAgent | null>;
+  liveIds(): Promise<Set<string>>;
 }
 const key = (agent: StalledAgent) => `${agent.hostId}:${agent.id}`;
 const working = (agent: StalledAgent) => ['running', 'initializing'].includes(agent.status) || !!agent.activeTurn || !!agent.pendingPermissions?.length;
@@ -78,6 +79,15 @@ export class StalledRuntime {
         }
       };
       await Promise.all(Array.from({ length: Math.min(candidates.length, 4) }, inspect));
+      if (sessions.length) {
+        try {
+          const liveIds = await this.port.liveIds();
+          for (let index = sessions.length - 1; index >= 0; index--) if (!liveIds.has(sessions[index].agentId)) sessions.splice(index, 1);
+        } catch {
+          sessions.length = 0;
+          errors.add('无法核对会话是否已归档，暂不显示停滞会话。');
+        }
+      }
     } catch (error) { errors.add(error instanceof Error ? error.message : '主机状态无法确认，暂不判定停滞。'); }
     sessions.sort((left, right) => right.since.localeCompare(left.since));
     return { sessions, error: [...errors].join(' ') || null };

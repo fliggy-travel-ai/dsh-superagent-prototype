@@ -12,9 +12,13 @@ test('设备已保存后问答快照刷新失败，仍返回保存结果', async
   } finally { store.dispose(); }
 });
 import assert from 'node:assert/strict';
-import { createControlStore } from '../client/control-store.ts';
+import { createControlStore as createStore } from '../client/control-store.ts';
 import { makeAutomation, makeBrowser } from './ui/control-fixtures.ts';
 import type { PresenceSnapshot } from '../shared/presence.ts';
+import type { StalledSnapshot } from '../shared/stalled.ts';
+
+const emptyAgents = (async () => ({ entries: [], pageInfo: { hasMore: false } })) as unknown as Parameters<typeof createStore>[1];
+const createControlStore = (client: Parameters<typeof createStore>[0], listAgents = emptyAgents) => createStore(client, listAgents);
 
 const makePresence = (): PresenceSnapshot => ({
   settings: { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null },
@@ -134,6 +138,66 @@ test('停滞扫描缓慢时仍可刷新问答，扫描失败保留旧停滞结�
     const previous = store.getState().stalled;
     slow = false; await store.refresh();
     assert.equal(store.getState().stalled, previous); assert.match(store.getState().stalledError!, /主机断开/);
+  } finally { store.dispose(); }
+});
+
+test('完整扫描挂起时归档检查仍能清理卡片，迟到的扫描不会复活卡片', async () => {
+  const stale: StalledSnapshot = { sessions: ['archived', 'live'].map(agentId => ({ agentId, title: agentId, since: '2026-11-08T06:00:00Z', lastMessage: '等待下一步', messageError: null })), error: null };
+  const waiting = deferred<StalledSnapshot>();
+  let reads = 0;
+  let archived = false;
+  const listAgents = (async () => ({ entries: ['archived', 'live'].map(id => ({ agent: { id, status: 'idle', archivedAt: id === 'archived' && archived ? '2026-11-08T06:03:14Z' : null } })), pageInfo: { hasMore: false } })) as unknown as Parameters<typeof createStore>[1];
+  const store = createControlStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todos.stalled') {
+      reads++;
+      if (reads === 1) return stale;
+      if (reads === 2) return waiting.promise;
+      throw new Error('远端主机断开');
+    }
+    if (contract.name === 'presence.snapshot') return makePresence();
+    return makeBrowser();
+  }) as Parameters<typeof createStore>[0]['rpc'] }, listAgents);
+  try {
+    await store.refresh();
+    assert.equal(store.getState().stalled?.sessions.length, 2);
+    const scanning = store.refresh();
+    await new Promise(done => setImmediate(done));
+    archived = true;
+    const refreshing = store.refresh();
+    await new Promise(done => setImmediate(done));
+    assert.deepEqual(store.getState().stalled?.sessions.map(session => session.agentId), ['live']);
+    assert.equal(reads, 2);
+    waiting.resolve(stale);
+    await Promise.all([scanning, refreshing]);
+    assert.deepEqual(store.getState().stalled?.sessions.map(session => session.agentId), ['live']);
+    await store.refresh();
+    assert.deepEqual(store.getState().stalled?.sessions.map(session => session.agentId), ['live']);
+    assert.match(store.getState().stalledError!, /远端主机断开/);
+  } finally { store.dispose(); }
+});
+
+test('归档检查读取所有分页，失败时隐藏无法确认的旧卡片', async () => {
+  let fail = false;
+  const cursors: Array<string | undefined> = [];
+  const listAgents = (async (options: { filter: { includeArchived: boolean }; page: { cursor?: string } }) => {
+    assert.equal(options.filter.includeArchived, false);
+    cursors.push(options.page.cursor);
+    if (fail) throw new Error('本机列表不可用');
+    return { entries: [{ agent: { id: options.page.cursor ? 'second' : 'first', status: 'idle' } }], pageInfo: { hasMore: !options.page.cursor, nextCursor: options.page.cursor ? undefined : 'next' } };
+  }) as unknown as Parameters<typeof createStore>[1];
+  const store = createControlStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todos.stalled') return { sessions: ['first', 'second'].map(agentId => ({ agentId, title: agentId, since: '2026-11-08T06:00:00Z', lastMessage: null, messageError: null })), error: null };
+    if (contract.name === 'presence.snapshot') return makePresence();
+    return makeBrowser();
+  }) as Parameters<typeof createStore>[0]['rpc'] }, listAgents);
+  try {
+    await store.refresh();
+    assert.deepEqual(store.getState().stalled?.sessions.map(session => session.agentId), ['first', 'second']);
+    assert.ok(cursors.includes('next'));
+    fail = true;
+    await store.refresh();
+    assert.deepEqual(store.getState().stalled?.sessions, []);
+    assert.match(store.getState().stalledError!, /本机列表不可用/);
   } finally { store.dispose(); }
 });
 
