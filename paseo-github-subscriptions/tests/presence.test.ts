@@ -438,3 +438,17 @@ test('并发网页同步只下发一次答案，停止后不再同步', async ()
     assert.equal(setup.runtime.snapshot().questions.length, 1);
   } finally { await setup.close(); }
 });
+
+test('云端会话的原生提问在离线模式仍由用户作答', async () => {
+  const setup = await fixture();
+  try {
+    const cloudRequest = { ...request(), provider: 'cloud-session' };
+    setup.agents.push({ ...agent(), pendingPermissions: [cloudRequest] });
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    const question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'pending'); assert.equal(question.reason, '云端会话等待用户回答');
+    assert.equal(setup.responses.length, 0);
+    await setup.runtime.answer({ id: question.id, answers: answer });
+    assert.equal(setup.responses.length, 1);
+  } finally { await setup.close(); }
+});
