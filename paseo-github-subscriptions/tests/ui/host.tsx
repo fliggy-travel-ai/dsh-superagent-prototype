@@ -38,7 +38,8 @@ function parseRoute(text: string): Route {
     }
   }
   if (kind === 'agent' && id) return { kind: 'agent', agentId: id };
-  if (kind === 'settings' && id) return { kind: 'settings', settingsId: id };
+  if (kind === 'settings') return { kind: 'settings', settingsId: id || 'dev-automation' };
+  if (kind === 'screen' && id === 'settings') return { kind: 'settings', settingsId: params.id || 'dev-automation' };
   return { kind: 'screen', screenId: id || 'main', params };
 }
 
@@ -144,6 +145,23 @@ export function createPreview(options: PreviewOptions) {
             />
           );
         })}
+        {[...registry.settingsScreens.values()].map((entry) => (
+          <Pressable
+            key={entry.id}
+            accessibilityRole="button"
+            accessibilityLabel={`设置 → ${entry.title}`}
+            onPress={() => route.set({ kind: 'settings', settingsId: entry.id })}
+            style={{
+              paddingVertical: 8,
+              paddingHorizontal: 20,
+              backgroundColor: current.kind === 'settings' && current.settingsId === entry.id ? c.surface2 : 'transparent',
+              marginHorizontal: 8,
+              borderRadius: 10,
+            }}
+          >
+            <Text style={text(13)}>设置 → {entry.title}</Text>
+          </Pressable>
+        ))}
         <View style={{ height: 1, backgroundColor: c.border, marginVertical: 8, marginHorizontal: 12 }} />
         <Text style={[text(12, true), { paddingHorizontal: 20, paddingBottom: 4 }]}>已置顶</Text>
         {agents.map((agent) => (

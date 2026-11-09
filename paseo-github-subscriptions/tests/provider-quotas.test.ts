@@ -17,7 +17,6 @@ import {
   builtinPluginIdsFor,
   normalizeHideBuiltinId,
   normalizeUsagePins,
-  suppressBuiltinUsagePlugins,
 } from '../server/modules/usage-provider-quotas/hide-builtin.ts';
 import { sanitizeUsageReport } from '../server/modules/usage-provider-quotas/server/usage-display.ts';
 import { parseTokenHubCredits } from '../server/modules/usage-provider-quotas/server/token-hub-quota.ts';
@@ -221,7 +220,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
     enabled: false,
     enabledSources: [],
     hideBuiltin: [],
-    hideBuiltinApplied: true,
+    hideBuiltinApplied: false,
     skippedConflicts: [],
     reloadRequired: false,
     error: null,
@@ -237,7 +236,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
     enabled: true,
     enabledSources: ['antigravity', 'codex-multi', 'grok-multi'],
     hideBuiltin: ['codex', 'grok'],
-    hideBuiltinApplied: true,
+    hideBuiltinApplied: false,
     skippedConflicts: [],
     reloadRequired: true,
     error: null,
@@ -259,31 +258,6 @@ test('usage.providerQuotas：隐藏内置额度来源配置项与侧栏固定项
     'codex-usage-source',
     'grok-usage-source',
   ]);
-
-  const patchedPayloads: Array<Record<string, unknown>> = [];
-  const disabledIds: string[] = [];
-  const { root } = createFakeEnv({
-    paseoConfigJson: {
-      plugins: {
-        'github-subscriptions': { source: 'directory', path: '/tmp/ghsub', enabled: true },
-      },
-    },
-  });
-
-  const suppressRes = await suppressBuiltinUsagePlugins(['codex', 'zai'], {
-    paseoHome: root,
-    patchPlugins: async plugins => {
-      patchedPayloads.push(plugins);
-    },
-    disablePlugin: async id => {
-      disabledIds.push(id);
-    },
-  });
-  assert.deepEqual(suppressRes.disabledPluginIds, ['codex-usage-source', 'zai-usage-source']);
-  assert.deepEqual(disabledIds, ['codex-usage-source', 'zai-usage-source']);
-  assert.equal(patchedPayloads.length, 2);
-  assert.equal('codex-usage-source' in patchedPayloads[0]!, true);
-  assert.equal('codex-usage-source' in patchedPayloads[1]!, false);
 
   const normalizedPins = normalizeUsagePins(
     [
@@ -353,61 +327,60 @@ test('provider-quotas.configure：machine.json 损坏时报错，不覆盖；写
   assert.match(snapshot.error, /machine\.json 无法解析/);
 });
 
-import { syncHideBuiltinUsage } from '../client/hide-builtin.ts';
+import { syncHideBuiltinUsage } from '../client/paseo-internal.ts';
 
-test('provider-quotas.snapshot：隐藏内置额度来源已在客户端生效，快照标为 hideBuiltinApplied: true 并过滤显示与侧栏固定项', async () => {
+test('client/paseo-internal：只在显示计算层过滤，不改写持久化存储；清空 hideBuiltin 后原固定项可恢复，模块未命中时返回 applied: false', async () => {
   const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, providerQuotas: { sources: [], hideBuiltin: ['codex', 'grok-usage-source'] } } });
   registerProviderQuotasRpcs({ server, machinePath, services });
   const snapshot = await handlers.get('provider-quotas.snapshot')!({});
   assert.deepEqual(snapshot.hideBuiltin, ['codex', 'grok']);
-  assert.equal(snapshot.hideBuiltinApplied, true);
+  // 服务端不伪造客户端生效状态
+  assert.equal(snapshot.hideBuiltinApplied, false);
 
-  let storedRaw = JSON.stringify({
-    usage: {
-      pins: [
-        { sourceId: 'codex', windowId: '5h' },
-        { sourceId: 'grok', windowId: 'daily' },
-        { sourceId: 'codex-multi', windowId: 'weekly' },
-        { sourceId: 'codex-multi', windowId: 'effective' },
-        { sourceId: 'claude-browser', windowId: '5h' },
-      ],
-    },
-  });
-  let persistedState: any = JSON.parse(storedRaw);
-  const mod3353 = {
+  // 无宿主内部模块时如实返回 applied: false
+  const notApplied = syncHideBuiltinUsage(snapshot.hideBuiltin, {});
+  assert.equal(notApplied.applied, false);
+
+  const originalPins = [
+    { sourceId: 'codex', windowId: '5h' },
+    { sourceId: 'grok', windowId: 'daily' },
+    { sourceId: 'codex-multi', windowId: 'weekly' },
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ];
+  let storageWritten = false;
+  const viewMod = {
     settleReports: (_cur: any, next: any) => next,
     upsertReport: (cur: any, item: any) => [...(cur ?? []), item],
     resolveUsageView: (input: any) => ({ kind: 'ready', reports: input.reports }),
   };
-  const mod3273 = {
+  const pinsMod = {
     effectiveUsagePins: (prefs: any, reports: any) =>
       prefs?.pins ?? reports.map((r: any) => ({ sourceId: r.sourceId, windowId: 'effective' })),
   };
-  const mod996 = {
-    persistAppSettings: async (updater: (prev: any) => any) => {
-      const patch = updater(persistedState);
-      persistedState = { ...persistedState, ...patch };
-    },
-  };
 
-  syncHideBuiltinUsage(snapshot.hideBuiltin, {
+  // 使用任意非固定模块编号（如 7001 / 7002）验证按导出特征发现模块
+  const metroRequire = Object.assign(
+    (id: number) => (id === 7001 ? viewMod : id === 7002 ? pinsMod : null),
+    {
+      getModules: () => ({
+        7001: { isInitialized: true, publicModule: { exports: viewMod } },
+        7002: { isInitialized: true, publicModule: { exports: pinsMod } },
+      }),
+    },
+  );
+
+  const appliedRes = syncHideBuiltinUsage(snapshot.hideBuiltin, {
     localStorage: {
-      getItem: () => storedRaw,
-      setItem: (_k: string, val: string) => {
-        storedRaw = val;
+      getItem: () => JSON.stringify({ usage: { pins: originalPins } }),
+      setItem: () => {
+        storageWritten = true;
       },
     },
-    __r: (id: number) => (id === 996 ? mod996 : id === 3273 ? mod3273 : id === 3353 ? mod3353 : null),
+    __r: metroRequire,
   });
-
-  assert.deepEqual(JSON.parse(storedRaw).usage.pins, [
-    { sourceId: 'codex-multi', windowId: 'effective' },
-    { sourceId: 'claude-browser', windowId: '5h' },
-  ]);
-  assert.deepEqual(persistedState.usage.pins, [
-    { sourceId: 'codex-multi', windowId: 'effective' },
-    { sourceId: 'claude-browser', windowId: '5h' },
-  ]);
+  assert.equal(appliedRes.applied, true);
+  assert.equal(storageWritten, false, '不应改写 localStorage 中的 @paseo:app-settings');
 
   const rawReports = [
     { id: 'r1', sourceId: 'codex' },
@@ -415,17 +388,26 @@ test('provider-quotas.snapshot：隐藏内置额度来源已在客户端生效�
     { id: 'r3', sourceId: 'codex-multi' },
     { id: 'r4', sourceId: 'zai' },
   ];
-  assert.deepEqual(mod3353.settleReports([], rawReports), [
+  assert.deepEqual(viewMod.settleReports([], rawReports), [
     { id: 'r3', sourceId: 'codex-multi' },
     { id: 'r4', sourceId: 'zai' },
   ]);
-  assert.deepEqual(mod3353.resolveUsageView({ reports: rawReports }).reports, [
+  assert.deepEqual(viewMod.resolveUsageView({ reports: rawReports }).reports, [
     { id: 'r3', sourceId: 'codex-multi' },
     { id: 'r4', sourceId: 'zai' },
   ]);
-  assert.deepEqual(mod3273.effectiveUsagePins({ pins: null }, rawReports), [
+  assert.deepEqual(pinsMod.effectiveUsagePins({ pins: originalPins }, rawReports), [
     { sourceId: 'codex-multi', windowId: 'effective' },
-    { sourceId: 'zai', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ]);
+
+  // 清空 hideBuiltin 后，原本固定的 codex 和 grok 立即恢复
+  syncHideBuiltinUsage([], { __r: metroRequire });
+  assert.deepEqual(pinsMod.effectiveUsagePins({ pins: originalPins }, rawReports), [
+    { sourceId: 'codex', windowId: '5h' },
+    { sourceId: 'grok', windowId: 'daily' },
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
   ]);
 });
 

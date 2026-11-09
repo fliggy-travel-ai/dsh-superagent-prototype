@@ -7,6 +7,8 @@ import { PresenceHosts, presencePort } from '../presence-port.ts';
 import { WebRequestLedger } from '../web-request/ledger.ts';
 import { WebRequestExecutor } from '../web-request/executor.ts';
 import type { SharedDaemon } from './daemon.ts';
+import type { EscalationRuntime } from '../modules/answer-escalation/runtime.ts';
+import type { QuietRuntime } from '../modules/answer-quiet-children/runtime.ts';
 
 /**
  * 主实例模块共用的运行时。每个运行时第一次使用时才初始化，失败后下次调用重试。
@@ -20,12 +22,15 @@ export class MainServices {
   browser: BrowserBridge | null = null;
   presence: PresenceRuntime | null = null;
   presenceHosts: PresenceHosts | null = null;
+  escalation: EscalationRuntime | null = null;
+  quiet: QuietRuntime | null = null;
   private readonly directory: string;
   private readonly daemon: SharedDaemon;
   private stopped = false;
   private initializing: Promise<Runtime> | null = null;
   private automationInitializing: Promise<AutomationRuntime> | null = null;
   private presenceInitializing: Promise<PresenceRuntime> | null = null;
+  private hostsInitializing: Promise<PresenceHosts> | null = null;
   private browserInitializing: Promise<BrowserBridge> | null = null;
 
   constructor(directory: string, daemon: SharedDaemon) {
@@ -77,16 +82,31 @@ export class MainServices {
     return this.automationInitializing;
   }
 
+  readyHosts(): Promise<PresenceHosts> {
+    const stopped = this.guard(); if (stopped) return stopped;
+    this.hostsInitializing ??= (async () => {
+      const connection = await this.daemon.ready();
+      this.presenceHosts = new PresenceHosts(connection.client);
+      if (this.stopped) await this.presenceHosts.stop();
+      return this.presenceHosts;
+    })().catch(async error => {
+      await this.presenceHosts?.stop();
+      this.presenceHosts = null;
+      this.hostsInitializing = null;
+      throw error;
+    });
+    return this.hostsInitializing;
+  }
+
   readyPresence(): Promise<PresenceRuntime> {
     const stopped = this.guard(); if (stopped) return stopped;
     this.presenceInitializing ??= (async () => {
-      const connection = await this.daemon.ready();
-      this.presenceHosts = new PresenceHosts(connection.client);
-      this.presence = new PresenceRuntime(this.directory, presencePort(connection, this.presenceHosts), Date.now, this.webLedger);
+      const [connection, hosts] = await Promise.all([this.daemon.ready(), this.readyHosts()]);
+      this.presence = new PresenceRuntime(this.directory, presencePort(connection, hosts), Date.now, this.webLedger);
       await this.presence.start();
       if (this.stopped) await this.presence.stop();
       return this.presence;
-    })().catch(async error => { await this.presence?.stop(); await this.presenceHosts?.stop(); this.presenceInitializing = null; throw error; });
+    })().catch(async error => { await this.presence?.stop(); this.presenceInitializing = null; throw error; });
     return this.presenceInitializing;
   }
 
@@ -112,7 +132,7 @@ export class MainServices {
   async stop(): Promise<void> {
     this.stopped = true;
     try { await this.initializing; } catch {}
-    await Promise.allSettled([this.automationInitializing, this.browserInitializing, this.presenceInitializing]);
+    await Promise.allSettled([this.automationInitializing, this.browserInitializing, this.presenceInitializing, this.hostsInitializing]);
     await Promise.allSettled([this.automation?.stop(), this.browser?.stop(), this.presence?.stop()]);
     await this.presenceHosts?.stop();
     await this.runtime?.stop();

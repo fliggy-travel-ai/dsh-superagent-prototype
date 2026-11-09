@@ -17,6 +17,7 @@ export const cloudGatewayModule: Module = {
   id: 'providers.cloudGateway',
   label: '云端会话转发',
   defaultEnabled: true,
+  alwaysEnabled: true,
   appliesTo: instance => instance.role === 'main' && !instance.legacy,
   register(context) {
     const { server, services } = context;

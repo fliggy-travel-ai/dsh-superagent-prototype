@@ -15,6 +15,7 @@ export const cloudSessionModule: Module = {
   id: 'providers.cloudSession',
   label: '云端会话',
   defaultEnabled: true,
+  alwaysEnabled: true,
   appliesTo: instance => instance.hostsProviders,
   redact: error => redactError(error).replace(/[\r\n]+/g, ' '),
   register(context) {

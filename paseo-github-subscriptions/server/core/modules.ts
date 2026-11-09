@@ -37,6 +37,8 @@ export interface ModuleDefinition<Config, Services> {
   readonly id: string;
   readonly label: string;
   readonly defaultEnabled: boolean;
+  /** 始终开启的内置功能（如云端会话），即使旧配置写 false 也按开启处理。 */
+  readonly alwaysEnabled?: boolean;
   appliesTo(instance: ResolvedInstance): boolean;
   readonly config?: { readonly section: string; readonly spec: SectionSpec<Config> };
   /** 自定义脱敏；默认用 summarizeError。 */
@@ -121,8 +123,10 @@ export function startModules<Services>(definitions: readonly ModuleDefinition<an
     entries.push(entry);
     byId.set(entry.id, entry);
     const switched = options.machine.modules[definition.id];
-    if (switched === false) { entry.reason = 'machine.json 中已关闭'; continue; }
-    if (switched === undefined && !definition.defaultEnabled) { entry.reason = '默认关闭，在 machine.json 的 modules 中打开'; continue; }
+    if (!definition.alwaysEnabled) {
+      if (switched === false) { entry.reason = 'machine.json 中已关闭'; continue; }
+      if (switched === undefined && !definition.defaultEnabled) { entry.reason = '默认关闭，在 machine.json 的 modules 中打开'; continue; }
+    }
     let config: unknown;
     if (definition.config) {
       const section = options.machine.section(definition.config.section);

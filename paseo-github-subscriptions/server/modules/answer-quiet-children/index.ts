@@ -54,10 +54,14 @@ export const quietChildrenModule: Module<QuietSection> = {
       ...(forwarder.enabled ? { forwardBlocked: `${forwarder.problem ?? `旧插件 ${config.legacyForwarderId} 仍启用`}，事件转发已关闭。先停用旧插件，再打开事件转发。` } : {}),
     });
     runtime.start();
+    if (services.main) services.main.quiet = runtime;
     server.handle(rpc.quietSnapshot, async () => runtime.snapshot());
     server.handle(rpc.quietConfigure, async input => runtime.configure(input));
     // 对方主机转发子会话事件时，用这个接口重新确认“现任主会话”。
     server.handle(rpc.quietResolveMain, async input => resolveLocal({ parentId: input.parentAgentId, parentWorkspaceId: input.parentWorkspaceId ?? null }));
-    return () => runtime.stop();
+    return () => {
+      if (services.main?.quiet === runtime) services.main.quiet = null;
+      return runtime.stop();
+    };
   },
 };

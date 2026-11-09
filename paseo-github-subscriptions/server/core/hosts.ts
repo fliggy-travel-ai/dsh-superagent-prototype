@@ -37,6 +37,8 @@ export interface HostEntry {
 export class HostRouter {
   protected origin: Awaited<ReturnType<typeof connectDaemon>>['client'];
   private remote = new Map<string, Promise<DaemonClient>>();
+  private pendingCancel = new Map<string, () => void>();
+  private cachedSelf: HostEntry | null = null;
   protected stopped = false;
 
   constructor(origin: Awaited<ReturnType<typeof connectDaemon>>['client']) {
@@ -44,15 +46,39 @@ export class HostRouter {
   }
 
   selfId(): string {
-    return this.origin.getLastServerInfoMessage()?.serverId ?? 'local';
+    return this.cachedSelf?.id ?? this.origin.getLastServerInfoMessage()?.serverId ?? 'local';
+  }
+
+  async selfHost(fallbackName = '本机'): Promise<HostEntry> {
+    if (this.cachedSelf) return this.cachedSelf;
+    try {
+      const list = await this.hosts();
+      if (this.cachedSelf) return this.cachedSelf;
+      if (list[0]) return list[0];
+    } catch {
+      // listHosts 失败时回退到连接握手信息中的固定 serverId
+    }
+    const serverId = this.origin.getLastServerInfoMessage()?.serverId;
+    if (serverId) {
+      const entry: HostEntry = { id: serverId, name: fallbackName || serverId, online: true };
+      this.cachedSelf = entry;
+      return entry;
+    }
+    return { id: 'local', name: fallbackName, online: true };
   }
 
   async hosts(): Promise<HostEntry[]> {
     const result = await this.origin.listHosts();
+    const selfEntry: HostEntry = {
+      id: result.self.serverId,
+      name: result.self.label || result.self.serverId,
+      online: true,
+    };
+    this.cachedSelf = selfEntry;
     return [
-      { id: result.self.serverId, name: result.self.label || result.self.serverId, online: true },
+      selfEntry,
       ...result.hosts
-        .filter(host => host.serverId)
+        .filter(host => host.serverId && host.serverId !== selfEntry.id)
         .map(host => ({
           id: host.serverId!,
           name: host.label || host.serverId!,
@@ -65,30 +91,52 @@ export class HostRouter {
     if (this.stopped) throw new Error('插件已停止');
     let connection = this.remote.get(hostId);
     if (!connection) {
-      connection = (async () => {
+      const created = (async () => {
         const scope = randomUUID();
-        const route = await deadline(this.origin.openHostRoute(hostId, scope), 20_000, () => this.origin.cancelHostRoute(scope));
-        const client = new DaemonClient({
-          url: 'ws://routed-host/ws',
-          clientId: scope,
-          transportFactory: createHostChannelTransport(this.origin, hostId, scope, route),
-          reconnect: { enabled: false },
+        let rejectRoute: ((err: Error) => void) | undefined;
+        const routeAbort = new Promise<never>((_resolve, reject) => {
+          rejectRoute = reject;
+        });
+        this.pendingCancel.set(hostId, () => {
+          this.origin.cancelHostRoute(scope);
+          rejectRoute?.(new DeadlineError('来源主机响应超时'));
         });
         try {
-          await deadline(client.connect(), 10_000);
-          if (this.stopped) throw new Error('插件已停止');
-          return client;
-        } catch (error) {
-          await client.close();
-          throw error;
+          const route = await deadline(
+            Promise.race([this.origin.openHostRoute(hostId, scope), routeAbort]),
+            20_000,
+            () => this.origin.cancelHostRoute(scope),
+          );
+          const client = new DaemonClient({
+            url: 'ws://routed-host/ws',
+            clientId: scope,
+            transportFactory: createHostChannelTransport(this.origin, hostId, scope, route),
+            reconnect: { enabled: false },
+          });
+          try {
+            await deadline(Promise.race([client.connect(), routeAbort]), 10_000);
+            if (this.stopped) throw new Error('插件已停止');
+            return client;
+          } catch (error) {
+            await client.close();
+            throw error;
+          }
+        } finally {
+          this.pendingCancel.delete(hostId);
         }
       })();
-      this.remote.set(hostId, connection);
+      void created.catch(() => {
+        if (this.remote.get(hostId) === created) {
+          this.remote.delete(hostId);
+        }
+      });
+      this.remote.set(hostId, created);
+      connection = created;
     }
     return connection;
   }
 
-  async withHost<T>(hostId: string, operation: (client: DaemonClient) => Promise<T>, keepOnTimeout = false): Promise<T> {
+  async withHost<T>(hostId: string, operation: (client: DaemonClient) => Promise<T>, keepOnTimeout = true): Promise<T> {
     const connection = this.client(hostId);
     let connected = false;
     try {
@@ -97,19 +145,45 @@ export class HostRouter {
       return await operation(client);
     } catch (error) {
       if (connected && keepOnTimeout && error instanceof DeadlineError) throw error;
+      if (!connected && error instanceof DeadlineError) {
+        this.pendingCancel.get(hostId)?.();
+        throw error;
+      }
       const previous = this.remote.get(hostId);
-      this.remote.delete(hostId);
-      await previous?.then(client => client.close(), () => {});
+      if (previous === connection) {
+        this.remote.delete(hostId);
+        await previous.then(client => client.close(), () => {});
+      }
       throw error;
     }
   }
 
-  async invokePlugin(hostId: string, method: string, input: unknown, timeoutMs = 5000, onTimeout?: () => void, keepOnTimeout = false): Promise<unknown> {
-    return this.withHost(
-      hostId,
-      client => deadline(client.invokePluginRpc('github-subscriptions', method, input), timeoutMs, onTimeout),
-      keepOnTimeout,
-    );
+  async invokePlugin(hostId: string, method: string, input: unknown, timeoutMs = 5000, onTimeout?: () => void, keepOnTimeout = true): Promise<unknown> {
+    let connected = false;
+    const connection = this.client(hostId);
+    try {
+      return await deadline(
+        (async () => {
+          const client = await connection;
+          connected = true;
+          return await client.invokePluginRpc('github-subscriptions', method, input);
+        })(),
+        timeoutMs,
+        () => {
+          if (!connected) this.pendingCancel.get(hostId)?.();
+          onTimeout?.();
+        },
+      );
+    } catch (error) {
+      if (connected && keepOnTimeout && error instanceof DeadlineError) throw error;
+      if (!connected && error instanceof DeadlineError) throw error;
+      const previous = this.remote.get(hostId);
+      if (previous === connection) {
+        this.remote.delete(hostId);
+        await previous.then(client => client.close(), () => {});
+      }
+      throw error;
+    }
   }
 
   sameHost(left: string | null, right: string | null): boolean {

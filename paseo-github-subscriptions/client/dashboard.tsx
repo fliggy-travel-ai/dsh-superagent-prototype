@@ -1,15 +1,13 @@
-import type { PluginScreenProps, PluginSurfaceProps } from '@getpaseo/plugin/client';
+import type { PluginScreenProps } from '@getpaseo/plugin/client';
 import { useEffect, useState } from 'react';
 import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { TodoItem, TodoType } from '../shared/todo.ts';
 import { DrawerOverlay, type DrawerId } from './drawers.tsx';
-import { ago, deliveryStatusLabels, eventHeadline, eventTypesText, eventTypeText, sessionTitle, targetLabel } from './format.ts';
-import { AdsPowerKeyCard, SettingsScreen } from './settings/index.tsx';
+import { ago } from './format.ts';
+import { GitHubSubscriptionsViews } from './screen/index.tsx';
 import { computeHasAlert, computeTodoCount, setLastNonTodoPage } from './sidebar-state.ts';
 import { errorMessage } from './store.ts';
 import { Btn, Card, Chip, FeatureCard, Notice, Segmented, useControlState, useStoreState, useUi } from './ui.tsx';
-
-export { AdsPowerKeyCard };
 
 export type PageId = 'providers' | 'answer' | 'github' | 'todo';
 
@@ -20,7 +18,11 @@ const NAV_ITEMS: readonly { id: PageId; num: string; label: string }[] = [
   { id: 'todo', num: '4', label: '待办总览' },
 ];
 
-function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
+function ProvidersPage({
+  onOpenDrawer,
+}: {
+  onOpenDrawer(id: DrawerId, providerId?: string): void;
+}) {
   const { s, control, theme } = useUi();
   const {
     browser,
@@ -35,6 +37,7 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     automation,
     todo,
   } = useControlState();
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const pausedAll = machineSettings?.pausedAll ?? automation?.paused ?? false;
   const accounts = claudeAccounts?.accounts ?? [];
@@ -46,13 +49,15 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const browserEnvCount =
     browser?.instances?.length ??
     new Set((browser?.sessions ?? []).map(sess => sess.instanceId)).size;
-  const rulesCount = defaults?.rules?.length ?? 5;
+  const rulesCount = defaults?.rules?.length ?? 0;
   const instanceRunning = providerInstance
     ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
     : true;
   const runningSessions = providerInstance?.runningSessionsCount ?? 0;
   const cloudOnline = cloudSession?.onlineSessions ?? providerInstance?.cloudSession.onlineSessions ?? 0;
+  const cloudUnacked = cloudSession?.unackedMessages ?? providerInstance?.cloudSession.unackedMessages ?? 0;
   const agCount = antigravity?.accounts.length ?? 0;
+  const agRunningSessions = antigravity?.runningSessionsCount ?? 0;
 
   return (
     <View style={{ gap: 14 }}>
@@ -62,9 +67,17 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           danger={!pausedAll}
           primary={pausedAll}
           label={pausedAll ? '恢复自动化' : '暂停全部自动化'}
-          onPress={() => void control.pauseAll(!pausedAll)}
+          onPress={() =>
+            void control.pauseAll(!pausedAll).catch(e => setActionError(errorMessage(e)))
+          }
         />
       </View>
+
+      {actionError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{actionError}</Text>
+        </Notice>
+      ) : null}
 
       {reloginAccounts.map(acc => (
         <Notice key={acc.providerId} tone="danger">
@@ -72,7 +85,12 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             <Text style={s.text}>
               <Text style={s.strong}>{acc.label}</Text>（{acc.email ?? '本机账号'}）需要重新登录
             </Text>
-            <Btn small primary label="重新登录" onPress={() => onOpenDrawer('add-claude')} />
+            <Btn
+              small
+              primary
+              label="重新登录"
+              onPress={() => onOpenDrawer('add-claude', acc.providerId)}
+            />
           </View>
         </Notice>
       ))}
@@ -125,7 +143,11 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             <Switch
               accessibilityLabel="启用网页版 claude.ai"
               value={browserSettings.enabled}
-              onValueChange={enabled => void control.configureBrowser({ ...browserSettings, enabled })}
+              onValueChange={enabled =>
+                void control
+                  .configureBrowser({ ...browserSettings, enabled })
+                  .catch(e => setActionError(errorMessage(e)))
+              }
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
@@ -151,20 +173,27 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="Claude 名称带额度"
           trailing={
-            <Switch
-              accessibilityLabel="Claude 名称带额度"
-              value={claudeAccounts?.quotaName.enabled ?? true}
-              onValueChange={labelWithQuota =>
-                void control.configureClaudeAccounts({ labelWithQuota }).catch(() => {})
+            <Chip
+              label={
+                claudeAccountsStatus === 'disabled'
+                  ? '未启用'
+                  : lowestClaudePct !== null
+                    ? `当前最低 ${lowestClaudePct}%`
+                    : '已开启'
               }
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
+              tone={
+                claudeAccountsStatus === 'disabled'
+                  ? 'neutral'
+                  : lowestClaudePct !== null && lowestClaudePct < 20
+                    ? 'warning'
+                    : 'success'
+              }
             />
           }
           description="在会话的 Claude 名称后显示 5 小时与 7 天剩余百分比。"
           kv={
             claudeAccountsStatus === 'disabled' ? (
-              <Chip label="未启用" tone="neutral" />
+              <Text style={s.small}>等待模块启用</Text>
             ) : (
               <Text style={s.small}>
                 {lowestClaudePct !== null ? `当前最低 ${lowestClaudePct}%` : '按账号显示 5h / 7d 额度'}
@@ -179,8 +208,10 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="新建会话默认设置"
-              value={defaults?.enabled ?? true}
-              onValueChange={enabled => void control.saveDefaults({ enabled }).catch(() => {})}
+              value={defaults?.enabled ?? false}
+              onValueChange={enabled =>
+                void control.saveDefaults({ enabled }).catch(e => setActionError(errorMessage(e)))
+              }
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
@@ -206,40 +237,42 @@ function ProvidersPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="云端会话"
           trailing={
-            <Switch
-              accessibilityLabel="云端会话"
-              value={cloudSession?.enabled ?? true}
-              onValueChange={() => onOpenDrawer('cloud')}
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
+            <Chip
+              label={`${cloudOnline} 个在线`}
+              tone={cloudOnline > 0 ? 'success' : 'neutral'}
             />
           }
-          description="把飞猪云端开发环境里的会话接入 Paseo。"
-          kv={<Text style={s.small}>{cloudOnline} 个在线</Text>}
+          description="把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。"
+          kv={
+            <>
+              <Text style={s.small}>{cloudOnline} 个在线</Text>
+              {cloudUnacked > 0 ? (
+                <Chip label={`${cloudUnacked} 条未确认`} tone="warning" />
+              ) : null}
+            </>
+          }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
         />
 
-        <FeatureCard
-          title="Antigravity"
-          trailing={
-            <Chip
-              label={antigravityStatus === 'disabled' ? '未启用' : '运行中'}
-              tone={antigravityStatus === 'disabled' ? 'neutral' : 'success'}
-            />
-          }
-          description="多账号轮换与模型剩余额度。"
-          kv={
-            antigravityStatus === 'disabled' ? (
+        {antigravityStatus !== 'disabled' || agCount > 0 ? (
+          <FeatureCard
+            title="Antigravity"
+            trailing={
+              <Chip
+                label={antigravity?.reloadRequired ? '待重载' : '运行中'}
+                tone={antigravity?.reloadRequired ? 'warning' : 'success'}
+              />
+            }
+            description="多账号轮换与模型剩余额度。"
+            kv={
               <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
+                <Text style={s.small}>{agCount} 个账号</Text>
+                <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
               </>
-            ) : (
-              <Text style={s.small}>{agCount} 个账号</Text>
-            )
-          }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
-        />
+            }
+            actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
+          />
+        ) : null}
       </View>
     </View>
   );
@@ -256,12 +289,19 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     quiet,
     quietStatus,
   } = useControlState();
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
   const observedMode = presence?.observation.mode ?? 'online';
   const effectiveOnline = settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline');
   const policiesCount = automation?.policies.filter(p => p.enabled).length ?? 0;
   const pinnedCount = quiet?.pinnedWorkspaceCount ?? 3;
+
+  const escState = !escalation?.enabled || escalation.status === 'stopped'
+    ? { label: '未运行', tone: 'neutral' as const }
+    : escalation.status === 'error'
+      ? { label: '异常', tone: 'danger' as const }
+      : { label: '运行中', tone: 'success' as const };
 
   return (
     <View style={{ gap: 14 }}>
@@ -271,6 +311,12 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           代答和升级是两套独立规则：问答模式决定是否代答，时段规则决定是否通知 Grok。同一道题可能先被代答，之后仍被升级。
         </Text>
       </View>
+
+      {actionError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{actionError}</Text>
+        </Notice>
+      ) : null}
 
       {escalationError || escalation?.error ? (
         <Notice tone="danger">
@@ -292,7 +338,11 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                 { value: 'auto', label: '自动' },
               ]}
               value={settings.mode}
-              onChange={mode => void control.configurePresence({ ...settings, mode })}
+              onChange={mode =>
+                void control
+                  .configurePresence({ ...settings, mode })
+                  .catch(e => setActionError(errorMessage(e)))
+              }
             />
           }
           description="会话向你提问时，等待本人回答或自动选推荐项。"
@@ -313,24 +363,18 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="蓝牙在场判定"
           trailing={
-            <Switch
-              accessibilityLabel="蓝牙在场判定"
-              value={settings.mode === 'auto'}
-              onValueChange={auto =>
-                void control.configurePresence({ ...settings, mode: auto ? 'auto' : 'online' })
-              }
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
+            <Chip
+              label={observedMode === 'offline' ? '离开' : '在线'}
+              tone={observedMode === 'offline' ? 'warning' : 'success'}
             />
           }
           description="按随身蓝牙设备是否在场，自动切换在线或离线。"
           kv={
             <>
               <Text style={s.small}>{presence?.observation.reason || '随身手机'}</Text>
-              <Chip
-                label={observedMode === 'offline' ? '离开' : '在线'}
-                tone={observedMode === 'offline' ? 'warning' : 'success'}
-              />
+              <Text style={s.small}>
+                {settings.mode === 'auto' ? '问答模式正在跟随蓝牙' : '问答模式当前为手动'}
+              </Text>
             </>
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('bluetooth')} />}
@@ -341,13 +385,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="升级通知"
-              value={escalation?.enabled ?? true}
-              onValueChange={enabled => void control.configureEscalation({ enabled }).catch(() => {})}
+              value={escalation?.enabled ?? false}
+              onValueChange={enabled =>
+                void control.configureEscalation({ enabled }).catch(e => setActionError(errorMessage(e)))
+              }
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
           }
-          description="提问超时未答或属于必须本人确认的类别时，通过 Webhook 通知 Grok。"
+          description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
           kv={
             escalationStatus === 'disabled' ? (
               <>
@@ -356,7 +402,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
               </>
             ) : (
               <>
-                <Chip label="运行中" tone="success" />
+                <Chip label={escState.label} tone={escState.tone} />
                 <Text style={s.small}>{escalation?.delivery === 'shadow' ? '影子' : '实际发送'}</Text>
               </>
             )
@@ -370,7 +416,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             <Switch
               accessibilityLabel="子会话免提醒"
               value={quiet?.enabled ?? true}
-              onValueChange={enabled => void control.configureQuiet({ enabled }).catch(() => {})}
+              onValueChange={enabled =>
+                void control.configureQuiet({ enabled }).catch(e => setActionError(errorMessage(e)))
+              }
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
@@ -395,7 +443,11 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             <Switch
               accessibilityLabel="语音提醒"
               value={settings.speechEnabled}
-              onValueChange={speechEnabled => void control.configurePresence({ ...settings, speechEnabled })}
+              onValueChange={speechEnabled =>
+                void control
+                  .configurePresence({ ...settings, speechEnabled })
+                  .catch(e => setActionError(errorMessage(e)))
+              }
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
@@ -418,10 +470,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 }
 
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
-  const { s, store, openSettings, navigation, now, theme } = useUi();
+  const { s, store, openSettings, theme } = useUi();
   const { snapshot, error } = useStoreState();
-  const [showEvents, setShowEvents] = useState(false);
-  const [busySubId, setBusySubId] = useState<string | null>(null);
 
   const prefs = snapshot?.preferences ?? {
     enabled: true,
@@ -431,18 +481,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     extraRepos: [],
     providerPolicies: {},
   };
-  const subscriptions = snapshot?.subscriptions ?? [];
-  const events = snapshot?.events ?? [];
   const repoCount = snapshot?.repositories.length ?? 0;
-
-  const cancelSub = async (id: string) => {
-    setBusySubId(id);
-    try {
-      await store.unsubscribe(id);
-    } finally {
-      setBusySubId(null);
-    }
-  };
 
   return (
     <View style={{ gap: 14 }}>
@@ -477,7 +516,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
               thumbColor={theme.colors.accentForeground}
             />
           }
-          description="每 60 秒轮询订阅的仓库和议题，把新事件直接发到对应会话。"
+          description="轮询已订阅的仓库与 PR，把新事件直接发到对应会话。"
           kv={
             <>
               <Chip
@@ -493,109 +532,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         />
       </View>
 
-      <Card title={`订阅（${subscriptions.length}）`}>
-        {subscriptions.length === 0 ? (
-          <Text style={s.muted}>当前没有活跃的 GitHub 订阅。</Text>
-        ) : (
-          subscriptions.map((sub, idx) => (
-            <View
-              key={sub.id}
-              style={[
-                s.row,
-                {
-                  justifyContent: 'space-between',
-                  paddingVertical: 10,
-                  borderTopWidth: idx === 0 ? 0 : 1,
-                  borderTopColor: theme.colors.border,
-                  flexWrap: 'wrap',
-                },
-              ]}
-            >
-              <View style={{ flex: 1, gap: 2, minWidth: 180 }}>
-                <View style={s.wrap}>
-                  <Text style={s.mono}>{targetLabel(sub)}</Text>
-                  <Text style={s.text}>{sub.title ?? '整个仓库'}</Text>
-                </View>
-                <View style={s.wrap}>
-                  <Pressable
-                    onPress={() => navigation?.openAgent({ agentId: sub.agentId })}
-                  >
-                    <Text style={{ color: theme.colors.accent, fontSize: 12 }}>
-                      {sessionTitle(sub)}
-                    </Text>
-                  </Pressable>
-                  <Text style={s.small}>· {eventTypesText(sub.events).join('、')}</Text>
-                  <Text style={s.small}>· 最近 {ago(sub.lastEventAt, now)}</Text>
-                </View>
-              </View>
-              <Btn
-                small
-                danger
-                label="取消订阅"
-                busy={busySubId === sub.id}
-                onPress={() => void cancelSub(sub.id)}
-              />
-            </View>
-          ))
-        )}
-      </Card>
-
-      <Card
-        title={`最近事件（${Math.min(events.length, 20)}）`}
-        trailing={
-          <Btn
-            small
-            label={showEvents ? '收起' : '展开'}
-            onPress={() => setShowEvents(prev => !prev)}
-          />
-        }
-      >
-        {!showEvents ? (
-          <Text style={s.muted}>点击“展开”查看最近轮询到的 GitHub 事件及投递结果。</Text>
-        ) : events.length === 0 ? (
-          <Text style={s.muted}>暂无最近事件。</Text>
-        ) : (
-          events.slice(0, 20).map((ev, idx) => {
-            const firstDelivery = (snapshot?.deliveries ?? []).find(d => d.eventIds.includes(ev.id));
-            return (
-              <View
-                key={ev.id}
-                style={[
-                  s.row,
-                  {
-                    justifyContent: 'space-between',
-                    paddingVertical: 8,
-                    borderTopWidth: idx === 0 ? 0 : 1,
-                    borderTopColor: theme.colors.border,
-                    flexWrap: 'wrap',
-                  },
-                ]}
-              >
-                <View style={{ flex: 1, gap: 2 }}>
-                  <View style={s.wrap}>
-                    <Text style={s.mono}>{eventHeadline(ev)}</Text>
-                    <Chip label={eventTypeText(ev)} tone="neutral" />
-                    <Text style={s.small}>{ago(ev.at, now)}</Text>
-                  </View>
-                  <Text style={s.small}>{ev.title ?? ev.text}</Text>
-                </View>
-                {firstDelivery ? (
-                  <Chip
-                    label={deliveryStatusLabels[firstDelivery.status]}
-                    tone={
-                      firstDelivery.status === 'delivered'
-                        ? 'success'
-                        : firstDelivery.status === 'failed'
-                          ? 'danger'
-                          : 'neutral'
-                    }
-                  />
-                ) : null}
-              </View>
-            );
-          })
-        )}
-      </Card>
+      <GitHubSubscriptionsViews onEditConfig={() => onOpenDrawer('github-config')} />
     </View>
   );
 }
@@ -609,6 +546,18 @@ function TodoItemCard({ item }: { item: TodoItem }) {
   const [error, setError] = useState<string | null>(null);
 
   const prompts = item.question?.prompts ?? [];
+  const canSubmit =
+    prompts.length > 0 &&
+    prompts.every(
+      p => (selected[p.question]?.length ?? 0) > 0 || Boolean(otherText[p.question]?.trim()),
+    );
+
+  const openItemAgent = (agentId: string) => {
+    navigation?.openAgent({
+      agentId,
+      ...(item.hostId && item.hostId !== 'local' ? { serverId: item.hostId } : {}),
+    });
+  };
 
   const toggleChoice = (question: string, label: string, multi: boolean) => {
     setSelected(prev => {
@@ -622,7 +571,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
   };
 
   const submitAnswer = async () => {
-    if (!item.question) return;
+    if (!item.question || !canSubmit) return;
     setBusy(true);
     setError(null);
     try {
@@ -632,10 +581,9 @@ function TodoItemCard({ item }: { item: TodoItem }) {
         const picks = [...(selected[p.question] ?? [])];
         const custom = (otherText[p.question] ?? '').trim();
         if (custom) otherAnswers[p.question] = custom;
-        if (picks.length === 0 && !custom && p.options[0]) picks.push(p.options[0].label);
         answers[p.question] = picks;
       }
-      await control.actTodo({
+      const res = await control.actTodo({
         hostId: item.hostId,
         action: {
           type: 'answer',
@@ -644,6 +592,10 @@ function TodoItemCard({ item }: { item: TodoItem }) {
           ...(Object.keys(otherAnswers).length > 0 ? { otherAnswers } : {}),
         },
       });
+      if (!res.ok) {
+        setError(res.message || '提交回答未成功');
+        return;
+      }
       setExpanded(false);
     } catch (failure) {
       setError(errorMessage(failure));
@@ -657,7 +609,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
     setBusy(true);
     setError(null);
     try {
-      await control.actTodo({
+      const res = await control.actTodo({
         hostId: item.hostId,
         action: {
           type: 'read',
@@ -665,6 +617,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
           fingerprint: item.readReceipt.fingerprint,
         },
       });
+      if (!res.ok) setError(res.message || '标记已读未成功');
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -677,7 +630,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
     setBusy(true);
     setError(null);
     try {
-      await control.actTodo({
+      const res = await control.actTodo({
         hostId: item.hostId,
         action: {
           type: 'ack-escalation',
@@ -685,6 +638,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
           agentId: item.agentId,
         },
       });
+      if (!res.ok) setError(res.message || '标记已处理未成功');
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -740,7 +694,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
                 <Btn
                   small
                   label="打开会话"
-                  onPress={() => navigation?.openAgent({ agentId: item.agentId! })}
+                  onPress={() => openItemAgent(item.agentId!)}
                 />
               ) : null}
             </>
@@ -759,7 +713,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
               primary
               label="打开会话"
               onPress={() => {
-                if (item.agentId) navigation?.openAgent({ agentId: item.agentId });
+                if (item.agentId) openItemAgent(item.agentId);
               }}
             />
           ) : (
@@ -809,12 +763,19 @@ function TodoItemCard({ item }: { item: TodoItem }) {
               </View>
             );
           })}
-          {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{error}</Text> : null}
           <View style={s.row}>
-            <Btn primary label="提交回答" busy={busy} onPress={() => void submitAnswer()} />
+            <Btn
+              primary
+              label="提交回答"
+              disabled={!canSubmit || busy}
+              busy={busy}
+              onPress={() => void submitAnswer()}
+            />
           </View>
         </View>
       ) : null}
+
+      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{error}</Text> : null}
     </View>
   );
 }
@@ -936,6 +897,7 @@ export function MainScreen(props: PluginScreenProps) {
     paramPage && ['providers', 'answer', 'github', 'todo'].includes(paramPage) ? paramPage : 'providers',
   );
   const [drawer, setDrawer] = useState<DrawerId | null>(() => paramDrawer ?? null);
+  const [targetProviderId, setTargetProviderId] = useState<string | null>(null);
 
   useEffect(() => {
     if (paramPage && ['providers', 'answer', 'github', 'todo'].includes(paramPage)) {
@@ -953,6 +915,11 @@ export function MainScreen(props: PluginScreenProps) {
   const selectPage = (next: PageId) => {
     setPage(next);
     setLastNonTodoPage(next);
+  };
+
+  const openDrawer = (id: DrawerId, providerId?: string) => {
+    setTargetProviderId(providerId ?? null);
+    setDrawer(id);
   };
 
   const hasAlert = computeHasAlert(storeState, controlState);
@@ -1043,17 +1010,21 @@ export function MainScreen(props: PluginScreenProps) {
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={[s.pageContent, { maxWidth: 980 }]}>
-        {page === 'providers' ? <ProvidersPage onOpenDrawer={setDrawer} /> : null}
-        {page === 'answer' ? <AnswerPage onOpenDrawer={setDrawer} /> : null}
-        {page === 'github' ? <GithubPage onOpenDrawer={setDrawer} /> : null}
+        {page === 'providers' ? <ProvidersPage onOpenDrawer={openDrawer} /> : null}
+        {page === 'answer' ? <AnswerPage onOpenDrawer={openDrawer} /> : null}
+        {page === 'github' ? <GithubPage onOpenDrawer={openDrawer} /> : null}
         {page === 'todo' ? <TodoPage /> : null}
       </ScrollView>
 
-      <DrawerOverlay drawerId={drawer} onClose={() => setDrawer(null)} onOpenDrawer={setDrawer} />
+      <DrawerOverlay
+        drawerId={drawer}
+        targetProviderId={targetProviderId}
+        onClose={() => {
+          setDrawer(null);
+          setTargetProviderId(null);
+        }}
+        onOpenDrawer={openDrawer}
+      />
     </View>
   );
-}
-
-export function UsageSettingsScreen(props: PluginSurfaceProps) {
-  return <SettingsScreen {...props} />;
 }

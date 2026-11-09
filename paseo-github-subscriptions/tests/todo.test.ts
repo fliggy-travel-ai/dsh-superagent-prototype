@@ -375,3 +375,341 @@ test('todo.act 本机操作直接执行，跨主机操作经 core/hosts 转发',
   assert.equal(res2.ok, true);
   assert.equal(actions[1]?.target, 'remote:srv-book');
 });
+
+test('todo.list 按主机 ID 与条目 ID 去重，防止本机当远端时待办翻倍；todo.act 拒绝 local 或未知主机', async () => {
+  const { port, actions } = makeFixture();
+  const runtime: TodoRuntime = new TodoRuntime({
+    ...port,
+    hosts: async () => [
+      { id: 'srv-mini', name: 'Mac mini', online: true },
+      { id: 'srv-book', name: 'MacBook', online: true },
+      { id: 'srv-dup', name: 'Mac mini', online: true },
+    ],
+    remoteLocal: async hostId => {
+      if (hostId === 'srv-dup') {
+        // 模拟错把本机当远端返回了相同 hostId 或相同条目 ID
+        return runtime.local();
+      }
+      return port.remoteLocal(hostId);
+    },
+  });
+
+  const merged = await runtime.list();
+  const ids = merged.items.map(i => i.id);
+  assert.equal(new Set(ids).size, ids.length, '待办条目 ID 不应重复');
+  const logIds = merged.logs.map(l => l.id);
+  assert.equal(new Set(logIds).size, logIds.length, '处理记录 ID 不应重复');
+
+  // hostId 为 local、空字符串或未知主机时拒绝执行
+  const badLocal = await runtime.act({
+    hostId: 'local',
+    action: { type: 'read', questionId: 'q-auto-unread', fingerprint: 'fp-auto-1' },
+  });
+  assert.equal(badLocal.ok, false);
+
+  const badUnknown = await runtime.act({
+    hostId: 'srv-unknown',
+    action: { type: 'ack-escalation', escalationId: 'esc-1' },
+  });
+  assert.equal(badUnknown.ok, false);
+  assert.equal(actions.length, 0);
+});
+
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { PluginServerContext } from '@getpaseo/plugin/server';
+import { DeadlineError, HostRouter } from '../server/core/hosts.ts';
+import { loadMachineConfig } from '../server/core/machine-config.ts';
+import { startModules } from '../server/core/modules.ts';
+import { resolveInstance } from '../shared/instances.ts';
+import { todoModule } from '../server/modules/todo/index.ts';
+import { registerMachineSettingsRpcs } from '../server/core/machine-settings-rpc.ts';
+
+test('HostRouter：selfHost 从 listHosts.self 获取固定主机标识；invokePlugin 总超时涵盖建连阶段', async () => {
+  let routeCancelled = false;
+  const fakeOrigin = {
+    getLastServerInfoMessage: () => ({ serverId: 'srv-self-fixed' }),
+    listHosts: async () => ({
+      self: { serverId: 'srv-self-fixed', label: 'MacBook Pro' },
+      hosts: [{ serverId: 'srv-remote', label: 'Mac mini', enabled: true, status: 'online' }],
+    }),
+    openHostRoute: (_hostId: string, _scope: string) =>
+      new Promise<never>(() => {
+        // 模拟建连无限挂起
+      }),
+    cancelHostRoute: () => {
+      routeCancelled = true;
+    },
+  };
+
+  const router = new HostRouter(fakeOrigin as never);
+  const self = await router.selfHost();
+  assert.deepEqual(self, { id: 'srv-self-fixed', name: 'MacBook Pro', online: true });
+
+  const t0 = Date.now();
+  await assert.rejects(
+    () => router.invokePlugin('srv-remote', 'todo.local', {}, 60),
+    DeadlineError,
+  );
+  assert.ok(Date.now() - t0 < 1000, 'invokePlugin 应在给定 timeoutMs 内超时而非等待 20 秒建连');
+  assert.equal(routeCancelled, true);
+  await router.stop();
+});
+
+test('todoModule：已关闭的模块在轮询 todo.local 时不会被唤醒，且升级事件与 services.escalation 共享同一实例', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'todo-mod-test-'));
+  const machinePath = join(dir, 'machine.json');
+  writeFileSync(
+    machinePath,
+    JSON.stringify({
+      version: 1,
+      machine: 'macbook',
+      modules: {
+        'answer.presence': false,
+        'answer.browser': false,
+        github: false,
+        'todo.stalled': false,
+        'answer.escalation': true,
+        todo: true,
+      },
+    }),
+  );
+
+  const handlers = new Map<string, (input: any) => Promise<any>>();
+  const server = {
+    handle(contract: { name: string }, handler: (input: any) => Promise<any>) {
+      handlers.set(contract.name, handler);
+    },
+    addHook() {
+      return () => {};
+    },
+  } as unknown as PluginServerContext;
+
+  let presenceCalled = 0;
+  let browserCalled = 0;
+  let githubCalled = 0;
+  let ackedIds: string[] = [];
+
+  const fakeHosts = {
+    selfHost: async () => ({ id: 'srv-book', name: 'MacBook', online: true }),
+    hosts: async () => [{ id: 'srv-book', name: 'MacBook', online: true }],
+    invoke: async () => ({}),
+  };
+
+  const fakeEscalation = {
+    async snapshot() {
+      return {
+        enabled: true,
+        status: 'error' as const,
+        error: 'Webhook 未配置',
+        delivery: 'shadow' as const,
+        timezone: 'Asia/Singapore',
+        immediate: [],
+        delayMinutes: 0,
+        webhook: { configured: false, hostname: null, fingerprint: null },
+        pendingEvents: ackedIds.includes('esc-mem-1')
+          ? []
+          : [
+              {
+                id: 'esc-mem-1',
+                agentId: 'ag-1',
+                sessionTitle: '主会话 A',
+                workspaceId: 'ws-1',
+                questionText: '请确认发布？',
+                notifiedAt: '2026-11-09T05:00:00Z',
+                delivery: 'shadow' as const,
+              },
+            ],
+        recentDeliveries: [],
+      };
+    },
+    acknowledge(id: string) {
+      ackedIds.push(id);
+      return true;
+    },
+  };
+
+  const main = {
+    escalation: fakeEscalation,
+    quiet: null,
+    readyHosts: async () => fakeHosts,
+    readyPresence: async () => {
+      presenceCalled++;
+      throw new Error('不应唤醒已关闭的 answer.presence');
+    },
+    readyBrowser: async () => {
+      browserCalled++;
+      throw new Error('不应唤醒已关闭的 answer.browser');
+    },
+    github: async () => {
+      githubCalled++;
+      throw new Error('不应唤醒已关闭的 github');
+    },
+  };
+
+  const machine = loadMachineConfig(machinePath, {});
+  startModules([todoModule], {
+    server,
+    instance: resolveInstance('main'),
+    machine,
+    services: { home: dir, daemon: {} as never, main: main as never },
+    stateDirectory: dir,
+    baseDirectory: dir,
+  });
+
+  const snap1 = await handlers.get('todo.local')!({});
+  assert.equal(presenceCalled, 0);
+  assert.equal(browserCalled, 0);
+  assert.equal(githubCalled, 0);
+  assert.equal(snap1.items.length, 1);
+  assert.equal(snap1.items[0].escalationId, 'esc-mem-1');
+
+  const actRes = await handlers.get('todo.act')!({
+    hostId: 'srv-book',
+    action: { type: 'ack-escalation', escalationId: 'esc-mem-1' },
+  });
+  assert.equal(actRes.ok, true);
+  assert.deepEqual(ackedIds, ['esc-mem-1']);
+
+  const snap2 = await handlers.get('todo.local')!({});
+  assert.equal(snap2.items.length, 0);
+});
+
+test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.status 错误，pause-all 持久且恢复时不误开原本关闭的 GitHub 监听', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'machine-settings-test-'));
+  const machinePath = join(dir, 'machine.json');
+  writeFileSync(
+    machinePath,
+    JSON.stringify({
+      version: 1,
+      machine: 'macbook',
+      modules: {
+        todo: false,
+        'answer.automation': true,
+        'answer.presence': true,
+        github: true,
+        'answer.escalation': true,
+        'answer.quietChildren': true,
+      },
+    }),
+  );
+
+  const handlers = new Map<string, (input: any) => Promise<any>>();
+  const server = {
+    handle(contract: { name: string }, handler: (input: any) => Promise<any>) {
+      handlers.set(contract.name, handler);
+    },
+    addHook() {
+      return () => {};
+    },
+  } as unknown as PluginServerContext;
+
+  let autoPaused = false;
+  let presencePaused = false;
+  let githubEnabled = false; // 原本就是关闭的！
+  let escalationEnabled = true;
+  let quietEnabled = true;
+  let shouldFailAutomation = false;
+
+  const main = {
+    escalation: {
+      snapshot: async () => ({ enabled: escalationEnabled }),
+      configure: async (patch: { enabled?: boolean }) => {
+        if (patch.enabled !== undefined) escalationEnabled = patch.enabled;
+      },
+    },
+    quiet: {
+      snapshot: async () => ({ enabled: quietEnabled }),
+      configure: async (patch: { enabled?: boolean }) => {
+        if (patch.enabled !== undefined) quietEnabled = patch.enabled;
+      },
+    },
+    readyAutomation: async () => ({
+      snapshot: () => ({ paused: autoPaused }),
+      pause: async (p: boolean) => {
+        if (shouldFailAutomation) throw new Error('授权模块连接失败');
+        autoPaused = p;
+      },
+    }),
+    readyPresence: async () => ({
+      snapshot: () => ({ settings: { mode: 'auto', paused: presencePaused, speechEnabled: true, sourceHostId: null } }),
+      configure: async (s: { paused: boolean }) => {
+        presencePaused = s.paused;
+      },
+    }),
+    github: async () => ({
+      storage: { state: { preferences: { enabled: githubEnabled, intervalMinutes: 5, shadow: true } } },
+      preferences: async (prefs: { enabled: boolean }) => {
+        githubEnabled = prefs.enabled;
+      },
+    }),
+  };
+
+  const failingMod = {
+    id: 'usage.providerQuotas',
+    label: '其他 Provider 额度',
+    defaultEnabled: true,
+    appliesTo: () => true,
+    register(ctx: any) {
+      ctx.fail(new Error('旧插件仍启用'));
+    },
+  };
+
+  const machine = loadMachineConfig(machinePath, {});
+  const host = startModules([failingMod as never], {
+    server,
+    instance: resolveInstance('main'),
+    machine,
+    services: { home: dir, daemon: {} as never, main: main as never },
+    stateDirectory: dir,
+    baseDirectory: dir,
+  });
+
+  registerMachineSettingsRpcs({
+    server,
+    machine,
+    host,
+    services: { home: dir, daemon: {} as never, main: main as never },
+    stateDirectory: dir,
+    baseDirectory: dir,
+  });
+
+  // 即使 todo: false，machine.settings.snapshot 和 defaults.snapshot 依然可用
+  assert.ok(handlers.has('machine.settings.snapshot'));
+  assert.ok(handlers.has('defaults.snapshot'));
+
+  const snap = await handlers.get('machine.settings.snapshot')!({});
+  const quotaMod = snap.modules.find((m: any) => m.id === 'usage.providerQuotas');
+  assert.equal(quotaMod?.state, 'error');
+  assert.match(quotaMod?.reason ?? '', /旧插件仍启用/);
+  assert.ok(snap.modules.every((m: any) => m.reloadRequired === true));
+
+  // 暂停全部自动化
+  const pauseRes = await handlers.get('machine.settings.pause-all')!({ paused: true });
+  assert.equal(pauseRes.paused, true);
+  assert.equal(autoPaused, true);
+  assert.equal(presencePaused, true);
+  assert.equal(githubEnabled, false);
+  assert.equal(escalationEnabled, false);
+  assert.equal(quietEnabled, false);
+
+  // 持久化验证：重新读取 snapshot 的 pausedAll 为 true
+  const snapPaused = await handlers.get('machine.settings.pause-all') !== undefined
+    ? await handlers.get('machine.settings.snapshot')!({})
+    : null;
+  assert.equal(snapPaused?.pausedAll, true);
+
+  // 恢复全部自动化：原本 githubEnabled=false 不应被强行打开为 true！
+  const resumeRes = await handlers.get('machine.settings.pause-all')!({ paused: false });
+  assert.equal(resumeRes.paused, false);
+  assert.equal(autoPaused, false);
+  assert.equal(presencePaused, false);
+  assert.equal(githubEnabled, false, '原本关闭的 GitHub 监听恢复后仍应保持关闭');
+  assert.equal(escalationEnabled, true);
+  assert.equal(quietEnabled, true);
+
+  // 当某个已启用模块暂停失败时，应抛错而不是返回成功
+  shouldFailAutomation = true;
+  await assert.rejects(() => handlers.get('machine.settings.pause-all')!({ paused: true }), /授权模块连接失败/);
+});

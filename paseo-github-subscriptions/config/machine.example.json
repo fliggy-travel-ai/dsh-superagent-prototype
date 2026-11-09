@@ -88,7 +88,6 @@
   },
   "claudeAccounts": {
     "sourceId": "claude-accounts",
-    "labelWithQuota": true,
     "autoResumeDefault": false,
     "renewal": true,
     "loginWorkspaceName": "账号登录",

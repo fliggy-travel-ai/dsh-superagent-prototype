@@ -2,11 +2,14 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { BluetoothSnapshot } from '../shared/bluetooth.ts';
 import type { AgentDefaultRule } from '../shared/defaults.ts';
+import type { EscalationSnapshot } from '../shared/escalation.ts';
 import type { Preferences } from '../shared/model.ts';
+import { ago } from './format.ts';
 import { errorMessage } from './store.ts';
 import { Btn, Chip, Notice, RuleNote, Segmented, useControlState, useStoreState, useUi } from './ui.tsx';
 
 type BluetoothDevice = BluetoothSnapshot['devices'][number];
+type ImmediateWindow = EscalationSnapshot['immediate'][number];
 
 export type DrawerId =
   | 'claude-accounts'
@@ -116,7 +119,11 @@ function StepRow(props: { num: number; title: string; children?: ReactNode }) {
   );
 }
 
-function ClaudeAccountsDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
+function ClaudeAccountsDrawer({
+  onOpenDrawer,
+}: {
+  onOpenDrawer(id: DrawerId, providerId?: string): void;
+}) {
   const { s, control } = useUi();
   const { claudeAccounts, claudeAccountsStatus, claudeAccountsError } = useControlState();
   const [labels, setLabels] = useState<Record<string, string>>({});
@@ -158,7 +165,7 @@ function ClaudeAccountsDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): vo
         <Text style={s.muted}>本机暂无已登记的 Claude 账号。</Text>
       ) : (
         <View>
-          <TableRow first header cells={['名称', '邮箱', '状态', '剩余额度', '操作']} />
+          <TableRow first header cells={['名称', '邮箱', '状态', '配置目录', '操作']} />
           {accounts.map(acc => (
             <TableRow
               key={acc.providerId}
@@ -178,11 +185,17 @@ function ClaudeAccountsDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): vo
                   label={acc.needsRelogin ? '需要重新登录' : '正常'}
                   tone={acc.needsRelogin ? 'danger' : 'success'}
                 />,
-                <Text key="quota" style={s.mono}>
-                  {acc.remainingPct !== null ? `${acc.remainingPct}%` : '—'}
+                <Text key="dir" style={s.mono}>
+                  {acc.configDir}
                 </Text>,
                 acc.needsRelogin ? (
-                  <Btn key="act" small primary label="重新登录" onPress={() => onOpenDrawer('add-claude')} />
+                  <Btn
+                    key="act"
+                    small
+                    primary
+                    label="重新登录"
+                    onPress={() => onOpenDrawer('add-claude', acc.providerId)}
+                  />
                 ) : (
                   <Btn
                     key="act"
@@ -201,28 +214,62 @@ function ClaudeAccountsDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): vo
       <View style={s.row}>
         <Btn primary label="添加 Claude 账号" onPress={() => onOpenDrawer('add-claude')} />
       </View>
-      <RuleNote>本机只显示本机钥匙串里的账号。另一台主机的账号切换到对应主机查看。</RuleNote>
+      <RuleNote>
+        本机只显示本机钥匙串里的账号。各账号的 5 小时与 7 天额度请直接在 Paseo 原生额度面板查看。
+      </RuleNote>
     </View>
   );
 }
 
-function AddClaudeDrawer() {
+const FLOW_STEP_LABELS: Record<number, string> = {
+  1: '正在写入 Provider 配置…',
+  2: '正在初始化配置目录…',
+  3: '正在启动登录终端…',
+  4: '等待浏览器完成登录…',
+  5: '等待输入授权码…',
+  6: '正在读取账号邮箱并更新显示名称…',
+};
+
+function AddClaudeDrawer({ initialProviderId }: { initialProviderId?: string | null }) {
   const { s, control, theme } = useUi();
   const { claudeAccounts } = useControlState();
-  const [providerId, setProviderId] = useState('claude-4');
+  const activeFlow = claudeAccounts?.activeFlow;
+  const [providerId, setProviderId] = useState(
+    () => initialProviderId ?? activeFlow?.providerId ?? '',
+  );
   const [code, setCode] = useState('');
-  const [busy, setBusy] = useState<'start' | 'submit' | null>(null);
+  const [realEmail, setRealEmail] = useState('');
+  const [busy, setBusy] = useState<'start' | 'submit' | 'retry' | null>(null);
   const [resultMsg, setResultMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const activeFlow = claudeAccounts?.activeFlow;
+  useEffect(() => {
+    if (initialProviderId) setProviderId(initialProviderId);
+    else if (activeFlow?.providerId && !providerId) setProviderId(activeFlow.providerId);
+  }, [initialProviderId, activeFlow?.providerId]);
 
   const start = async () => {
     setBusy('start');
     setError(null);
     setResultMsg(null);
     try {
-      await control.startClaudeLogin({ providerId: providerId.trim() || undefined });
+      const target = providerId.trim() || undefined;
+      await control.startClaudeLogin(target ? { providerId: target } : {});
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const retry = async () => {
+    const target = activeFlow?.providerId ?? providerId.trim();
+    if (!target) return;
+    setBusy('retry');
+    setError(null);
+    setResultMsg(null);
+    try {
+      await control.retryClaudeLogin({ providerId: target });
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -232,16 +279,43 @@ function AddClaudeDrawer() {
 
   const submit = async () => {
     if (!code.trim()) return;
+    const target = activeFlow?.providerId ?? providerId.trim();
+    if (!target) {
+      setError('请先生成登录链接或填写账号标识');
+      return;
+    }
     setBusy('submit');
     setError(null);
     setResultMsg(null);
     try {
-      await control.submitClaudeLoginCode({
-        providerId: activeFlow?.providerId ?? (providerId.trim() || 'claude-4'),
+      const res = await control.submitClaudeLoginCode({
+        providerId: target,
         code: code.trim(),
+        ...(realEmail.trim() ? { realEmail: realEmail.trim() } : {}),
       });
       setCode('');
-      setResultMsg('已完成添加，并自动开启“名称带额度”和“自动继续默认值”。');
+      if (res.activeFlow?.error) {
+        setError(res.activeFlow.error);
+      } else if (res.activeFlow?.requiresRealEmailConfirmation) {
+        setResultMsg('检测到 Apple 隐藏邮箱登录，请补充真实邮箱以完成命名。');
+      } else {
+        setResultMsg('授权码已提交，登录状态已刷新。');
+      }
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmAppleEmail = async () => {
+    const target = activeFlow?.providerId ?? providerId.trim();
+    if (!target || !realEmail.trim()) return;
+    setBusy('submit');
+    setError(null);
+    try {
+      await control.renameClaudeAccount({ providerId: target, realEmail: realEmail.trim() });
+      setResultMsg('已保存真实邮箱并更新账号名称。');
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -251,50 +325,89 @@ function AddClaudeDrawer() {
 
   return (
     <View style={{ gap: 8 }}>
-      <StepRow num={1} title="填写账号标识">
+      <StepRow num={1} title="账号标识（留空则自动分配新编号，重新登录时自动带入原标识）">
         <TextInput
           accessibilityLabel="新账号标识"
           style={s.input}
           value={providerId}
           onChangeText={setProviderId}
-          placeholder="例如 claude-4"
+          placeholder="留空自动分配（如 claude-2）"
           placeholderTextColor={theme.colors.foregroundMuted}
           autoCapitalize="none"
         />
       </StepRow>
-      <StepRow num={2} title="打开授权页面">
+      <StepRow num={2} title="启动登录流程并打开授权页面">
         <View style={s.wrap}>
           <Btn primary label="生成登录链接" busy={busy === 'start'} onPress={() => void start()} />
+          {activeFlow ? (
+            <Btn label="重试" busy={busy === 'retry'} onPress={() => void retry()} />
+          ) : null}
           {activeFlow?.loginUrl ? (
             <Btn label="打开浏览器" onPress={() => void Linking.openURL(activeFlow.loginUrl!)} />
           ) : null}
         </View>
+        {activeFlow ? (
+          <Text style={s.small}>
+            当前进度（步骤 {activeFlow.step}/6）：{FLOW_STEP_LABELS[activeFlow.step] ?? `步骤 ${activeFlow.step}`}
+            {activeFlow.configDir ? ` · 目录 ${activeFlow.configDir}` : ''}
+          </Text>
+        ) : null}
         {activeFlow?.loginUrl ? <Text style={s.mono}>{activeFlow.loginUrl}</Text> : null}
+        {activeFlow?.error ? (
+          <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{activeFlow.error}</Text>
+        ) : null}
       </StepRow>
-      <StepRow num={3} title="浏览器登录目标 Claude 账号并点 Authorize" />
-      <StepRow num={4} title="粘贴页面显示的 code#state">
-        <View style={s.row}>
-          <TextInput
-            accessibilityLabel="授权码 code#state"
-            style={s.input}
-            value={code}
-            onChangeText={setCode}
-            placeholder="code#state"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <Btn
-            primary
-            label="完成添加"
-            disabled={!code.trim()}
-            busy={busy === 'submit'}
-            onPress={() => void submit()}
-          />
+      <StepRow num={3} title="在浏览器登录目标 Claude 账号并点击 Authorize" />
+      <StepRow num={4} title="粘贴页面显示的授权码 code#state">
+        <View style={{ gap: 8 }}>
+          {activeFlow?.requiresRealEmailConfirmation ? (
+            <View style={{ gap: 6 }}>
+              <Text style={s.small}>
+                检测到 Apple 隐藏邮箱（{activeFlow.detectedEmail ?? '已隐藏'}），请填写对应的真实邮箱：
+              </Text>
+              <View style={s.row}>
+                <TextInput
+                  accessibilityLabel="真实邮箱"
+                  style={s.input}
+                  value={realEmail}
+                  onChangeText={setRealEmail}
+                  placeholder="真实邮箱（如 user@example.com）"
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  autoCapitalize="none"
+                />
+                <Btn
+                  small
+                  label="确认真实邮箱"
+                  disabled={!realEmail.trim()}
+                  busy={busy === 'submit'}
+                  onPress={() => void confirmAppleEmail()}
+                />
+              </View>
+            </View>
+          ) : null}
+          <View style={s.row}>
+            <TextInput
+              accessibilityLabel="授权码 code#state"
+              style={s.input}
+              value={code}
+              onChangeText={setCode}
+              placeholder="code#state"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Btn
+              primary
+              label="完成添加"
+              disabled={!code.trim()}
+              busy={busy === 'submit'}
+              onPress={() => void submit()}
+            />
+          </View>
         </View>
       </StepRow>
-      <StepRow num={5} title="插件向 Anthropic 换取令牌，写入本机钥匙串并记入账号表" />
-      <StepRow num={6} title="自动开启“名称带额度”和“自动继续默认值”，刷新列表" />
+      <StepRow num={5} title="插件在登录终端完成授权校验并写入本机配置目录" />
+      <StepRow num={6} title="读取登录邮箱更新 Provider 显示名称并刷新账号列表" />
       {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
       {resultMsg ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{resultMsg}</Text> : null}
     </View>
@@ -415,7 +528,7 @@ function AddBrowserDrawer() {
   const { browser } = useControlState();
   const [pairingInfo, setPairingInfo] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
-  const extPath = browser?.extensionPath ?? '~/.paseo/plugins/github-subscriptions/extension';
+  const extPath = browser?.extensionPath ?? '正在读取扩展目录…';
 
   const getPairing = async () => {
     try {
@@ -463,11 +576,17 @@ function AddBrowserDrawer() {
 function ClaudeQuotaDrawer() {
   const { s, control, theme } = useUi();
   const { claudeAccounts, claudeAccountsStatus } = useControlState();
-  const showQuota = claudeAccounts?.quotaName.enabled ?? true;
-  const autoCont = claudeAccounts?.quotaName.autoResumeDefault ?? true;
+  const autoCont = claudeAccounts?.quotaName.autoResumeDefault ?? false;
+  const lowestPct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
+  const [err, setErr] = useState<string | null>(null);
 
-  const update = (patch: { labelWithQuota?: boolean; autoResumeDefault?: boolean }) => {
-    void control.configureClaudeAccounts(patch).catch(() => {});
+  const update = async (patch: { autoResumeDefault?: boolean }) => {
+    setErr(null);
+    try {
+      await control.configureClaudeAccounts(patch);
+    } catch (failure) {
+      setErr(errorMessage(failure));
+    }
   };
 
   return (
@@ -477,40 +596,34 @@ function ClaudeQuotaDrawer() {
           <Text style={s.text}>Claude 额度模块未启用（等待对应服务端模块合并或开启）。</Text>
         </Notice>
       ) : null}
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>在名称后显示剩余额度</Text>
-        <Switch
-          accessibilityLabel="在名称后显示剩余额度"
-          value={showQuota}
-          onValueChange={val => update({ labelWithQuota: val })}
-          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-          thumbColor={theme.colors.accentForeground}
-        />
-      </View>
+      <TableRow
+        first
+        cells={[
+          '名称显示额度',
+          <Chip
+            key="st"
+            label={lowestPct !== null ? `已开启 · 当前最低 ${lowestPct}%` : '已开启'}
+            tone="success"
+          />,
+        ]}
+      />
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
         <Switch
           accessibilityLabel="新建 Claude 会话默认开启自动继续"
           value={autoCont}
-          onValueChange={val => update({ autoResumeDefault: val })}
+          onValueChange={val => void update({ autoResumeDefault: val })}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
       </View>
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
       <RuleNote>
-        开启后隐藏 Paseo 内置的单账号 Claude 额度来源，改按账号分别显示 5 小时和 7 天剩余百分比。
+        在会话的 Claude 名称后始终显示 5 小时与 7 天剩余百分比，并隐藏 Paseo 内置的单账号 Claude 额度来源。
       </RuleNote>
     </View>
   );
 }
-
-const DEFAULT_RULES_PREVIEW: AgentDefaultRule[] = [
-  { provider: 'claude*', apply: 'missing', modeId: 'bypassPermissions', features: { effort: 'xhigh' }, enabled: true },
-  { provider: 'codex', apply: 'always', modeId: 'auto', features: { serviceTier: 'fast' }, enabled: true },
-  { provider: 'opencode', apply: 'missing', features: { autoApprove: true }, enabled: true },
-  { provider: 'glm', apply: 'missing', features: { autoApprove: true }, enabled: true },
-  { provider: 'qoder', apply: 'missing', modeId: 'yolo', features: { autoApprove: true }, enabled: true },
-];
 
 function SessionDefaultsDrawer() {
   const { s, control, theme } = useUi();
@@ -519,13 +632,18 @@ function SessionDefaultsDrawer() {
   const [newMode, setNewMode] = useState('');
   const [newAutoApprove, setNewAutoApprove] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  const rules = defaults?.rules && defaults.rules.length > 0 ? defaults.rules : DEFAULT_RULES_PREVIEW;
+  const rules = defaults?.rules ?? [];
+  const enabled = defaults?.enabled ?? false;
 
-  const saveRules = async (next: AgentDefaultRule[]) => {
+  const saveRules = async (next: AgentDefaultRule[], nextEnabled = enabled) => {
     setBusy(true);
+    setErr(null);
     try {
-      await control.saveDefaults({ enabled: defaults?.enabled ?? true, rules: next });
+      await control.saveDefaults({ enabled: nextEnabled, rules: next });
+    } catch (failure) {
+      setErr(errorMessage(failure));
     } finally {
       setBusy(false);
     }
@@ -543,50 +661,66 @@ function SessionDefaultsDrawer() {
     };
     setNewProvider('');
     setNewMode('');
-    await saveRules([...rules, rule]);
+    await saveRules([...rules, rule], true);
   };
 
   return (
     <View style={{ gap: 12 }}>
-      <SectionTitle>本机规则（保存在 machine.json）</SectionTitle>
-      <View>
-        <TableRow first header cells={['Provider', '模式', '自动授权', '额外设置', '启用']} />
-        {rules.map((rule, idx) => {
-          const providerText = Array.isArray(rule.provider) ? rule.provider.join(', ') : rule.provider;
-          const features = rule.features ?? {};
-          const extraEntries = Object.entries(features)
-            .filter(([k]) => k !== 'autoApprove')
-            .map(([k, v]) => `${k}: ${String(v)}`)
-            .join(', ');
-          return (
-            <TableRow
-              key={`${providerText}-${idx}`}
-              cells={[
-                <Text key="p" style={s.mono}>
-                  {providerText}
-                </Text>,
-                <Text key="m" style={s.mono}>
-                  {rule.modeId ?? '—'}
-                </Text>,
-                features.autoApprove ? '开启' : '—',
-                extraEntries || '—',
-                <Switch
-                  key="sw"
-                  accessibilityLabel={`规则 ${providerText}`}
-                  value={rule.enabled !== false}
-                  disabled={busy}
-                  onValueChange={val => {
-                    const next = rules.map((item, i) => (i === idx ? { ...item, enabled: val } : item));
-                    void saveRules(next);
-                  }}
-                  trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-                  thumbColor={theme.colors.accentForeground}
-                />,
-              ]}
-            />
-          );
-        })}
+      <View style={[s.row, { justifyContent: 'space-between' }]}>
+        <Text style={s.text}>启用新建会话默认设置</Text>
+        <Switch
+          accessibilityLabel="启用新建会话默认设置"
+          value={enabled}
+          disabled={busy}
+          onValueChange={val => void saveRules(rules, val)}
+          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+          thumbColor={theme.colors.accentForeground}
+        />
       </View>
+
+      <SectionTitle>本机规则（保存在 machine.json）</SectionTitle>
+      {rules.length === 0 ? (
+        <Text style={s.muted}>没有规则。可在下方添加本机新建会话默认规则。</Text>
+      ) : (
+        <View>
+          <TableRow first header cells={['Provider', '模式', '自动授权', '额外设置', '启用']} />
+          {rules.map((rule, idx) => {
+            const providerText = Array.isArray(rule.provider) ? rule.provider.join(', ') : rule.provider;
+            const features = rule.features ?? {};
+            const extraEntries = Object.entries(features)
+              .filter(([k]) => k !== 'autoApprove')
+              .map(([k, v]) => `${k}: ${String(v)}`)
+              .join(', ');
+            return (
+              <TableRow
+                key={`${providerText}-${idx}`}
+                cells={[
+                  <Text key="p" style={s.mono}>
+                    {providerText}
+                  </Text>,
+                  <Text key="m" style={s.mono}>
+                    {rule.modeId ?? '—'}
+                  </Text>,
+                  features.autoApprove ? '开启' : '—',
+                  extraEntries || '—',
+                  <Switch
+                    key="sw"
+                    accessibilityLabel={`规则 ${providerText}`}
+                    value={rule.enabled !== false}
+                    disabled={busy}
+                    onValueChange={val => {
+                      const next = rules.map((item, i) => (i === idx ? { ...item, enabled: val } : item));
+                      void saveRules(next);
+                    }}
+                    trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+                    thumbColor={theme.colors.accentForeground}
+                  />,
+                ]}
+              />
+            );
+          })}
+        </View>
+      )}
 
       <SectionTitle>添加规则</SectionTitle>
       <View style={s.wrap}>
@@ -615,6 +749,7 @@ function SessionDefaultsDrawer() {
         />
         <Btn primary label="添加规则" disabled={!newProvider.trim() || busy} onPress={() => void addRule()} />
       </View>
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
       <RuleNote>
         网页没有传值时按此表填入；网页显式传了值时以网页为准。Provider 结尾加 * 表示前缀匹配（如 claude* 匹配所有
@@ -655,27 +790,31 @@ function CloudSessionDrawer() {
   return (
     <View style={{ gap: 12 }}>
       <SectionTitle>云端会话状态</SectionTitle>
-      <TableRow first cells={['状态', <Chip key="st" label={status?.enabled !== false ? '已启用' : '未启用'} tone="success" />]} />
+      <TableRow first cells={['状态', <Chip key="st" label="始终开启" tone="success" />]} />
       <TableRow cells={['在线云端会话', `${onlineSessions} 个`]} />
       <TableRow cells={['未确认消息', `${unacked} 条`]} />
-      <RuleNote>由本机 Provider 实例承载；主实例通过跨实例转发收发消息和提问。</RuleNote>
+      <RuleNote>
+        把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。由本机 Provider 实例承载；主实例通过跨实例转发收发消息和提问。
+      </RuleNote>
     </View>
   );
 }
 
 function AntigravityDrawer() {
   const { s, control, theme } = useUi();
-  const { antigravity, antigravityStatus } = useControlState();
+  const { antigravity, antigravityStatus, antigravityError } = useControlState();
   const [providerId, setProviderId] = useState('');
   const [label, setLabel] = useState('');
   const [homeDir, setHomeDir] = useState('');
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const accounts = antigravity?.accounts ?? [];
 
   const addAccount = async () => {
     if (!providerId.trim() || !label.trim()) return;
     setBusy(true);
+    setErr(null);
     try {
       await control.addAntigravityAccount({
         providerId: providerId.trim(),
@@ -685,6 +824,8 @@ function AntigravityDrawer() {
       setProviderId('');
       setLabel('');
       setHomeDir('');
+    } catch (failure) {
+      setErr(errorMessage(failure));
     } finally {
       setBusy(false);
     }
@@ -697,7 +838,21 @@ function AntigravityDrawer() {
           <Text style={s.text}>Antigravity 多账号模块未启用（等待对应服务端模块合并或开启）。</Text>
         </Notice>
       ) : null}
-      <SectionTitle>本机 Antigravity 账号</SectionTitle>
+      {antigravity?.reloadRequired ? (
+        <Notice tone="warning">
+          <Text style={s.text}>Antigravity 账号配置已变更，需在无运行中会话时重载 Provider 实例后生效。</Text>
+        </Notice>
+      ) : null}
+      {antigravityError || antigravity?.error || err ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{err ?? antigravityError ?? antigravity?.error}</Text>
+        </Notice>
+      ) : null}
+
+      <View style={[s.row, { justifyContent: 'space-between' }]}>
+        <SectionTitle>本机 Antigravity 账号</SectionTitle>
+        <Text style={s.small}>运行中会话：{antigravity?.runningSessionsCount ?? 0} 个</Text>
+      </View>
       {accounts.length === 0 ? (
         <Text style={s.muted}>暂无已登记的 Antigravity 账号。</Text>
       ) : (
@@ -718,7 +873,11 @@ function AntigravityDrawer() {
                   key="sw"
                   accessibilityLabel={`启用 ${acc.label}`}
                   value={acc.enabled}
-                  onValueChange={val => void control.toggleAntigravityAccount({ providerId: acc.providerId, enabled: val })}
+                  onValueChange={val =>
+                    void control
+                      .toggleAntigravityAccount({ providerId: acc.providerId, enabled: val })
+                      .catch(e => setErr(errorMessage(e)))
+                  }
                   trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
                   thumbColor={theme.colors.accentForeground}
                 />,
@@ -761,6 +920,7 @@ function QaModeDrawer() {
   const { s, control, theme } = useUi();
   const { presence } = useControlState();
   const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
+  const [err, setErr] = useState<string | null>(null);
 
   return (
     <View style={{ gap: 12 }}>
@@ -771,18 +931,23 @@ function QaModeDrawer() {
           { value: 'auto', label: '自动' },
         ]}
         value={settings.mode}
-        onChange={mode => void control.configurePresence({ ...settings, mode })}
+        onChange={mode =>
+          void control.configurePresence({ ...settings, mode }).catch(e => setErr(errorMessage(e)))
+        }
       />
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>暂停问答代答与转发</Text>
         <Switch
           accessibilityLabel="暂停问答代答与转发"
           value={settings.paused}
-          onValueChange={paused => void control.configurePresence({ ...settings, paused })}
+          onValueChange={paused =>
+            void control.configurePresence({ ...settings, paused }).catch(e => setErr(errorMessage(e)))
+          }
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
       </View>
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
       <SectionTitle>三种模式怎么工作</SectionTitle>
       <View style={{ gap: 6 }}>
         <Text style={s.small}>
@@ -880,15 +1045,57 @@ function BluetoothDrawer() {
   );
 }
 
+const DEFAULT_ESCALATION_WINDOWS: ImmediateWindow[] = [
+  { days: 'daily', from: '01:00', to: '09:30' },
+  { days: 'weekdays', from: '12:00', to: '14:00' },
+];
+
 function EscalationDrawer() {
-  const { s, control, openSettings } = useUi();
+  const { s, control, openSettings, now, theme } = useUi();
   const { escalation, escalationStatus } = useControlState();
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  const [newDays, setNewDays] = useState<'daily' | 'weekdays'>('daily');
+  const [newFrom, setNewFrom] = useState('01:00');
+  const [newTo, setNewTo] = useState('09:30');
+  const [delayInput, setDelayInput] = useState(() => String(escalation?.delayMinutes ?? 0));
+  const [err, setErr] = useState<string | null>(null);
 
-  const delivery = escalation?.delivery ?? 'live';
-  const delayMinutes = escalation?.delayMinutes ?? 15;
-  const windows = escalation?.immediate ?? [{ days: 'daily' as const, from: '00:00', to: '09:00' }];
+  const delivery = escalation?.delivery ?? 'shadow';
+  const delayMinutes = escalation?.delayMinutes ?? 0;
+  const windows = escalation?.immediate ?? DEFAULT_ESCALATION_WINDOWS;
+  const recentDeliveries = escalation?.recentDeliveries ?? [];
+
+  const saveSchedule = async (nextWindows: ImmediateWindow[], nextDelay = delayMinutes) => {
+    setErr(null);
+    try {
+      const normalized = nextWindows.map(w => ({
+        days: Array.isArray(w.days) ? ('weekdays' as const) : w.days,
+        from: w.from,
+        to: w.to,
+      }));
+      await control.configureEscalation({ immediate: normalized, delayMinutes: nextDelay });
+    } catch (failure) {
+      setErr(errorMessage(failure));
+    }
+  };
+
+  const addWindow = async () => {
+    const from = newFrom.trim();
+    const to = newTo.trim();
+    if (!from || !to) return;
+    await saveSchedule([...windows, { days: newDays, from, to }]);
+  };
+
+  const removeWindow = async (idx: number) => {
+    await saveSchedule(windows.filter((_, i) => i !== idx));
+  };
+
+  const applyDelay = async () => {
+    const parsed = Number.parseInt(delayInput, 10);
+    if (Number.isNaN(parsed) || parsed < 0) return;
+    await saveSchedule(windows, parsed);
+  };
 
   const runTest = async () => {
     setTesting(true);
@@ -912,7 +1119,7 @@ function EscalationDrawer() {
       ) : null}
       <SectionTitle>时段规则（{escalation?.timezone ?? 'Asia/Singapore'}）</SectionTitle>
       <View>
-        <TableRow first header cells={['规则', '时间范围', '等待策略']} />
+        <TableRow first header cells={['规则', '时间范围', '等待策略', '操作']} />
         {windows.map((win, idx) => (
           <TableRow
             key={idx}
@@ -928,10 +1135,52 @@ function EscalationDrawer() {
                 {win.from} – {win.to}
               </Text>,
               '立即升级通知',
+              <Btn key="del" small danger label="删除" onPress={() => void removeWindow(idx)} />,
             ]}
           />
         ))}
-        <TableRow cells={['其余时段', '默认等待', `满 ${delayMinutes} 分钟未答后通知`]} />
+        <TableRow
+          cells={[
+            '其余时段',
+            '默认等待',
+            delayMinutes === 0 ? '立即通知（0 分钟）' : `满 ${delayMinutes} 分钟未答后通知`,
+            <View key="delay" style={s.row}>
+              <TextInput
+                accessibilityLabel="其余时段等待分钟数"
+                style={[s.input, { width: 56, paddingVertical: 4 }]}
+                value={delayInput}
+                onChangeText={setDelayInput}
+                onSubmitEditing={() => void applyDelay()}
+              />
+              <Btn small label="保存分钟" onPress={() => void applyDelay()} />
+            </View>,
+          ]}
+        />
+      </View>
+
+      <View style={s.wrap}>
+        <Btn
+          small
+          label={newDays === 'daily' ? '范围：每天' : '范围：工作日'}
+          onPress={() => setNewDays(d => (d === 'daily' ? 'weekdays' : 'daily'))}
+        />
+        <TextInput
+          accessibilityLabel="免等开始时间"
+          style={[s.input, { width: 80 }]}
+          value={newFrom}
+          onChangeText={setNewFrom}
+          placeholder="01:00"
+          placeholderTextColor={theme.colors.foregroundMuted}
+        />
+        <TextInput
+          accessibilityLabel="免等结束时间"
+          style={[s.input, { width: 80 }]}
+          value={newTo}
+          onChangeText={setNewTo}
+          placeholder="09:30"
+          placeholderTextColor={theme.colors.foregroundMuted}
+        />
+        <Btn small primary label="添加免等时段" onPress={() => void addWindow()} />
       </View>
 
       <View style={[s.row, { justifyContent: 'space-between' }]}>
@@ -942,13 +1191,15 @@ function EscalationDrawer() {
             { value: 'shadow', label: '影子（只记日志）' },
           ]}
           value={delivery}
-          onChange={val => void control.configureEscalation({ delivery: val }).catch(() => {})}
+          onChange={val =>
+            void control.configureEscalation({ delivery: val }).catch(e => setErr(errorMessage(e)))
+          }
         />
       </View>
 
       <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
         <Text style={s.text}>
-          Webhook 状态：<Text style={s.mono}>{escalation?.webhook.fingerprint ?? 'hooks.example.net/…9f2a'}</Text>
+          Webhook 状态：<Text style={s.mono}>{escalation?.webhook.fingerprint ?? '未配置'}</Text>
         </Text>
         <View style={s.wrap}>
           <Btn small label="发测试通知" busy={testing} onPress={() => void runTest()} />
@@ -958,10 +1209,48 @@ function EscalationDrawer() {
         </View>
       </View>
       {testResult ? <Text style={s.small}>{testResult}</Text> : null}
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
+
+      <SectionTitle>最近投递记录</SectionTitle>
+      {recentDeliveries.length === 0 ? (
+        <Text style={s.muted}>暂无升级投递记录。</Text>
+      ) : (
+        <View>
+          <TableRow first header cells={['会话', '升级原因', '结果', '时间']} />
+          {recentDeliveries.map(rec => (
+            <TableRow
+              key={rec.id}
+              cells={[
+                rec.sessionTitle,
+                rec.summary,
+                <Chip
+                  key="out"
+                  label={
+                    rec.status === 'delivered'
+                      ? '已发送'
+                      : rec.status === 'recorded-shadow'
+                        ? '影子记录'
+                        : '失败'
+                  }
+                  tone={
+                    rec.status === 'delivered'
+                      ? 'success'
+                      : rec.status === 'recorded-shadow'
+                        ? 'neutral'
+                        : 'danger'
+                  }
+                />,
+                <Text key="at" style={s.small}>
+                  {ago(rec.at, now)}
+                </Text>,
+              ]}
+            />
+          ))}
+        </View>
+      )}
 
       <RuleNote>
-        与代答独立计时：即使离线模式已在第 5 秒代答，只要本人一直未在 Paseo
-        确认且到达时段等待时长，或者题目属于“必须本人确认”，仍会向 Grok 发送升级通知。同一问题只通知一次。
+        主会话有提问未回答时，按时段规则通知 Grok（不代答）。同一问题只通知一次。
       </RuleNote>
     </View>
   );
@@ -972,6 +1261,7 @@ function QuietChildrenDrawer() {
   const { quiet, quietStatus } = useControlState();
   const forwardEvents = quiet?.forwardEvents ?? true;
   const recent = quiet?.recentHandled ?? [];
+  const [err, setErr] = useState<string | null>(null);
 
   return (
     <View style={{ gap: 12 }}>
@@ -989,11 +1279,14 @@ function QuietChildrenDrawer() {
         <Switch
           accessibilityLabel="将子会话异常与提问归并到主会话"
           value={forwardEvents}
-          onValueChange={val => void control.configureQuiet({ forwardEvents: val }).catch(() => {})}
+          onValueChange={val =>
+            void control.configureQuiet({ forwardEvents: val }).catch(e => setErr(errorMessage(e)))
+          }
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
       </View>
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
       <SectionTitle>最近处理的子会话</SectionTitle>
       {recent.length === 0 ? (
@@ -1025,6 +1318,7 @@ function SpeechDrawer() {
   const { s, control, theme } = useUi();
   const { presence } = useControlState();
   const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
+  const [err, setErr] = useState<string | null>(null);
 
   return (
     <View style={{ gap: 12 }}>
@@ -1033,7 +1327,9 @@ function SpeechDrawer() {
         <Switch
           accessibilityLabel="开启语音提醒"
           value={settings.speechEnabled}
-          onValueChange={speechEnabled => void control.configurePresence({ ...settings, speechEnabled })}
+          onValueChange={speechEnabled =>
+            void control.configurePresence({ ...settings, speechEnabled }).catch(e => setErr(errorMessage(e)))
+          }
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
@@ -1042,6 +1338,7 @@ function SpeechDrawer() {
         <Text style={s.text}>播报主机</Text>
         <Chip label={presence?.hostName || '跟随在场主机'} tone="neutral" />
       </View>
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
       <RuleNote>
         只在判定在线且有新提问或停滞会话时播报；优先使用专用晓晓语音环境，不可用时回退系统语音；你在任一端回答后立即停止播报。
       </RuleNote>
@@ -1255,11 +1552,12 @@ function GithubConfigDrawer() {
 
 export function DrawerOverlay(props: {
   drawerId: DrawerId | null;
+  targetProviderId?: string | null;
   onClose(): void;
-  onOpenDrawer(id: DrawerId): void;
+  onOpenDrawer(id: DrawerId, providerId?: string): void;
 }) {
   const { s, theme, compact } = useUi();
-  const { drawerId, onClose, onOpenDrawer } = props;
+  const { drawerId, targetProviderId, onClose, onOpenDrawer } = props;
   if (!drawerId) return null;
 
   const renderContent = () => {
@@ -1267,7 +1565,7 @@ export function DrawerOverlay(props: {
       case 'claude-accounts':
         return <ClaudeAccountsDrawer onOpenDrawer={onOpenDrawer} />;
       case 'add-claude':
-        return <AddClaudeDrawer />;
+        return <AddClaudeDrawer initialProviderId={targetProviderId} />;
       case 'browser':
         return <BrowserDrawer onOpenDrawer={onOpenDrawer} />;
       case 'add-browser':

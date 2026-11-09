@@ -60,6 +60,11 @@ export const escalationModule: Module<EscalationSection> = {
     server.handle(rpc.escalationTestWebhook, async () => runtime.testWebhook());
     server.handle(rpc.escalationWebhookConfigure, async input => runtime.configureWebhook(input));
     server.handle(rpc.escalationAcknowledge, async ({ id }) => ({ ok: runtime.acknowledge(id) }));
-    return async () => { lifetime.abort(); await runtime.stop(); };
+    if (services.main) services.main.escalation = runtime;
+    return async () => {
+      if (services.main?.escalation === runtime) services.main.escalation = null;
+      lifetime.abort();
+      await runtime.stop();
+    };
   },
 };

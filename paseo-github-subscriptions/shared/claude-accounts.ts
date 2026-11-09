@@ -42,7 +42,7 @@ export type ClaudeAccountsSnapshot = z.infer<typeof ClaudeAccountsSnapshotSchema
 export const claudeAccountsSnapshot = defineRpc({ name: 'claude-accounts.snapshot', input: z.object({}), output: ClaudeAccountsSnapshotSchema });
 export const claudeAccountsConfigure = defineRpc({
   name: 'claude-accounts.configure',
-  input: z.strictObject({ labelWithQuota: z.boolean().optional(), autoResumeDefault: z.boolean().optional() }),
+  input: z.strictObject({ autoResumeDefault: z.boolean().optional() }),
   output: ClaudeAccountsSnapshotSchema,
 });
 export const claudeAccountsRename = defineRpc({

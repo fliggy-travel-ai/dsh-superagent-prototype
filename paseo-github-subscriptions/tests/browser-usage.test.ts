@@ -1475,7 +1475,7 @@ test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置
   installTsxAndReactNativeHooks();
   const React = (await import('react')).default;
   const { isValidElement } = await import('react');
-  const { AdsPowerKeyCard } = await import('../client/dashboard.tsx');
+  const { AdsPowerKeyCard } = await import('../client/settings/index.tsx');
   const { bind } = await import('../client/ui.tsx');
 
   const mockTheme = {
@@ -1515,6 +1515,11 @@ test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置
     if (!isValidElement(element)) return '';
     const el = element as { type: unknown; props: Record<string, unknown> };
     if (typeof el.type === 'function') {
+      const proto = (el.type as { prototype?: { isReactComponent?: boolean } }).prototype;
+      if (proto && proto.isReactComponent) {
+        const Ctor = el.type as unknown as new (props: Record<string, unknown>) => { render(): unknown };
+        return renderTree(new Ctor(el.props).render());
+      }
       return renderTree((el.type as (props: Record<string, unknown>) => unknown)(el.props));
     }
     if (typeof el.type === 'object' && el.type !== null && 'value' in el.props) {

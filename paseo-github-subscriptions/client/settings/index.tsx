@@ -467,7 +467,7 @@ function WebhookCredentialCard() {
             ) : null}
           </View>
           <Text style={s.small}>
-            Webhook 完整地址和密钥只保存在本机 0600 凭据文件中，界面与日志只显示域名和哈希后四位指纹。
+            Webhook 完整地址和密钥只保存在本机 0600 凭据文件中，界面与日志只显示域名和 8 位指纹。
           </Text>
         </>
       )}

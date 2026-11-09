@@ -1,5 +1,6 @@
 import type { PluginHostProps, PluginSurfaceProps } from '@getpaseo/plugin/client';
 import {
+  Component,
   createContext,
   useContext,
   useEffect,
@@ -133,7 +134,31 @@ export function toneColor(theme: Theme, tone: Tone): string {
   }
 }
 
-/** 给每个注册进宿主的组件加上 store、主题与 30 秒时钟。 */
+export class PluginErrorBoundary extends Component<
+  { children: ReactNode; fallbackColor?: string },
+  { error: Error | null }
+> {
+  override state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error : new Error(String(error ?? '未知界面错误')) };
+  }
+
+  override render() {
+    if (this.state.error) {
+      return (
+        <View style={{ padding: 16 }}>
+          <Text style={{ color: this.props.fallbackColor ?? '#ff6b66', fontSize: 13 }}>
+            界面渲染出错：{this.state.error.message}
+          </Text>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/** 给每个注册进宿主的组件加上 store、主题、错误边界与 30 秒时钟。 */
 export function bind<P extends PluginHostProps>(env: Env, Inner: ComponentType<P>): ComponentType<P> {
   return function Bound(props: P) {
     const [now, setNow] = useState(() => Date.now());
@@ -150,7 +175,9 @@ export function bind<P extends PluginHostProps>(env: Env, Inner: ComponentType<P
     );
     return (
       <UiContext.Provider value={value}>
-        <Inner {...props} />
+        <PluginErrorBoundary fallbackColor={theme.colors.statusDanger}>
+          <Inner {...props} />
+        </PluginErrorBoundary>
       </UiContext.Provider>
     );
   };

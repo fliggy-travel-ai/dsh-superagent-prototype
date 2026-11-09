@@ -267,6 +267,9 @@ export class TodoRuntime {
 
     const items: TodoItem[] = [...local.items];
     const logs: TodoLogItem[] = [...local.logs];
+    const seenItemIds = new Set<string>(local.items.map(i => i.id));
+    const seenLogIds = new Set<string>(local.logs.map(l => l.id));
+    const seenHostIds = new Set<string>([local.hostId]);
     const hostStatuses: TodoMergedSnapshot['hosts'] = [
       {
         hostId: local.hostId,
@@ -282,6 +285,8 @@ export class TodoRuntime {
     const remoteHosts = allHosts.filter(h => h.id !== local.hostId);
     await Promise.all(
       remoteHosts.map(async host => {
+        if (seenHostIds.has(host.id)) return;
+        seenHostIds.add(host.id);
         if (!host.online) {
           failedHostNames.push(host.name);
           hostStatuses.push({
@@ -296,8 +301,17 @@ export class TodoRuntime {
         }
         try {
           const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(host.id));
-          items.push(...remote.items);
-          logs.push(...remote.logs);
+          if (remote.hostId === local.hostId) return;
+          for (const item of remote.items) {
+            if (seenItemIds.has(item.id)) continue;
+            seenItemIds.add(item.id);
+            items.push(item);
+          }
+          for (const log of remote.logs) {
+            if (seenLogIds.has(log.id)) continue;
+            seenLogIds.add(log.id);
+            logs.push(log);
+          }
           hostStatuses.push({
             hostId: host.id,
             hostName: remote.hostName || host.name,
@@ -336,32 +350,54 @@ export class TodoRuntime {
   }
 
   async act(input: TodoActionInput): Promise<TodoActionOutput> {
+    if (!input.hostId || input.hostId.trim() === '' || input.hostId === 'local') {
+      return { ok: false, message: '缺少有效主机标识，已拒绝执行' };
+    }
     const self = await this.port.selfHost();
-    if (input.hostId && input.hostId !== self.id && input.hostId !== 'local') {
-      return this.port.remoteAct(input.hostId, input);
+    if (!self.id || self.id === 'local') {
+      return { ok: false, message: '本机主机标识未就绪，已拒绝执行' };
     }
-    const { action } = input;
-    if (action.type === 'answer') {
-      await this.port.answerQuestion({
-        id: action.questionId,
-        answers: action.answers,
-        ...(action.otherAnswers ? { otherAnswers: action.otherAnswers } : {}),
-      });
-      return { ok: true, message: '已提交，等待网页确认' };
-    }
-    if (action.type === 'read') {
-      await this.port.markQuestionRead({
-        id: action.questionId,
-        fingerprint: action.fingerprint,
-      });
-      return { ok: true, message: '已读' };
-    }
-    if (action.type === 'ack-escalation') {
-      if (this.port.ackEscalation) {
-        await this.port.ackEscalation({ id: action.escalationId, agentId: action.agentId });
+    if (input.hostId !== self.id) {
+      const knownHosts = await this.port.hosts().catch(() => []);
+      if (!knownHosts.some(h => h.id === input.hostId && h.id !== self.id)) {
+        return { ok: false, message: `未知的目标主机：${input.hostId}` };
       }
-      return { ok: true, message: '已标为已处理' };
+      try {
+        return await this.port.remoteAct(input.hostId, input);
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : '跨主机转发失败' };
+      }
     }
-    return { ok: false, message: '未知操作' };
+    try {
+      const { action } = input;
+      if (action.type === 'answer') {
+        await this.port.answerQuestion({
+          id: action.questionId,
+          answers: action.answers,
+          ...(action.otherAnswers ? { otherAnswers: action.otherAnswers } : {}),
+        });
+        return { ok: true, message: '已提交，等待网页确认' };
+      }
+      if (action.type === 'read') {
+        await this.port.markQuestionRead({
+          id: action.questionId,
+          fingerprint: action.fingerprint,
+        });
+        return { ok: true, message: '已读' };
+      }
+      if (action.type === 'ack-escalation') {
+        if (!this.port.ackEscalation) {
+          return { ok: false, message: '升级通知未启用' };
+        }
+        const res = await this.port.ackEscalation({ id: action.escalationId, agentId: action.agentId });
+        if (res && typeof res === 'object' && 'ok' in res && (res as { ok?: boolean }).ok === false) {
+          return { ok: false, message: '未找到该升级事件或升级通知未启用' };
+        }
+        return { ok: true, message: '已标为已处理' };
+      }
+      return { ok: false, message: '未知操作' };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : '操作失败' };
+    }
   }
 }

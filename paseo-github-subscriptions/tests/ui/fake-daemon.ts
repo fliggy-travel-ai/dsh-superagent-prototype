@@ -29,7 +29,7 @@ export class FakeDaemon {
     ...makeBrowser(),
     settings: { enabled: true, port: 17373 },
     connected: true,
-    extensionPath: '~/.paseo/plugins/github-subscriptions/extension',
+    extensionPath: '/Users/demo/.paseo/local-plugins/github-subscriptions/browser-extension',
     instances: [
       { instanceId: 'env-27', instanceName: '环境 27（主力）', connected: true, lastSeenAt: new Date().toISOString(), sessionCount: 2 },
       { instanceId: 'env-29', instanceName: '环境 29（备用）', connected: true, lastSeenAt: new Date().toISOString(), sessionCount: 1 },
@@ -105,12 +105,15 @@ export class FakeDaemon {
     error: null,
     delivery: 'live',
     timezone: 'Asia/Singapore',
-    immediate: [{ days: 'daily', from: '00:00', to: '09:00' }],
-    delayMinutes: 15,
+    immediate: [
+      { days: 'daily', from: '01:00', to: '09:30' },
+      { days: 'weekdays', from: '12:00', to: '14:00' },
+    ],
+    delayMinutes: 0,
     webhook: {
       configured: true,
       hostname: 'hooks.example.net',
-      fingerprint: 'hooks.example.net/…9f2a',
+      fingerprint: 'a3f19c07',
     },
     pendingEvents: [
       {
@@ -382,7 +385,7 @@ export class FakeDaemon {
           ...this.claudeAccounts,
           quotaName: {
             ...this.claudeAccounts.quotaName,
-            ...(input.labelWithQuota !== undefined ? { enabled: Boolean(input.labelWithQuota) } : {}),
+            enabled: true,
             ...(input.autoResumeDefault !== undefined ? { autoResumeDefault: Boolean(input.autoResumeDefault) } : {}),
           },
         };
@@ -391,7 +394,13 @@ export class FakeDaemon {
         this.claudeAccounts = {
           ...this.claudeAccounts,
           accounts: this.claudeAccounts.accounts.map(acc =>
-            acc.providerId === input.providerId ? { ...acc, label: String(input.label ?? acc.label) } : acc,
+            acc.providerId === input.providerId
+              ? {
+                  ...acc,
+                  ...(input.label !== undefined ? { label: String(input.label) } : {}),
+                  ...(input.realEmail !== undefined ? { email: String(input.realEmail) } : {}),
+                }
+              : acc,
           ),
         };
         return this.claudeAccounts;

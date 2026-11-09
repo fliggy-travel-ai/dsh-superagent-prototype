@@ -2,8 +2,11 @@ import { createServer, type Server } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BrowserApprovalEventSchema, BrowserBindingInputSchema, BrowserSettingsSchema, BrowserSyncSchema, type AnswerWebRequest, type BrowserBindingInput, type BrowserPairing, type BrowserSettings, type BrowserSnapshot, type WebRequestAnswer, type WebRequestResult } from '../shared/browser.ts';
 import type { PresenceRuntime } from './presence.ts';
+
+const EXTENSION_PATH = fileURLToPath(new URL('../browser-extension', import.meta.url));
 
 const ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 const MAX_BODY = 65536;
@@ -136,7 +139,7 @@ export class BrowserBridge {
       approvals: this.approvals.map(entry => ({ ...entry })),
       sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })),
       bindings: this.bindings.map(b => ({ ...b })),
-      extensionPath: '~/.paseo/local-plugins/github-subscriptions/browser-extension',
+      extensionPath: EXTENSION_PATH,
       instances,
     };
   }

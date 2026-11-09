@@ -43,7 +43,7 @@ import {
   type ProviderQuotasConfigureInput,
   type ProviderQuotasSnapshot,
 } from '../shared/provider-quotas.ts';
-import { syncHideBuiltinUsage } from './hide-builtin.ts';
+import { syncHideBuiltinUsage } from './paseo-internal.ts';
 import {
   escalationSnapshot,
   escalationConfigure,
@@ -135,6 +135,8 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
   let stalledInflight: Promise<void> | null = null;
   let liveInflight: Promise<void> | null = null;
   let unifyInflight: Promise<void> | null = null;
+  let todoInflight: Promise<void> | null = null;
+  let hiddenTickCount = 0;
   let liveIds: Set<string> | null = null;
   let liveError: string | null = null;
   let scanError: string | null = null;
@@ -192,16 +194,25 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     })().finally(() => { liveInflight = null; });
     return liveInflight;
   };
+  const refreshTodo = () => {
+    if (disposed) return Promise.resolve();
+    todoInflight ??= client.rpc(todoList, {}).then(value => {
+      emit({ todo: value, todoError: null });
+    }).catch(error => {
+      if (!isRpcDisabledError(error, 'todo', state.modules)) emit({ todoError: errorMessage(error) });
+    }).finally(() => {
+      todoInflight = null;
+    });
+    return todoInflight;
+  };
   const refreshUnify = () => {
     if (disposed) return Promise.resolve();
+    const todoTask = refreshTodo();
     unifyInflight ??= (async () => {
       let mods = state.modules;
       await client.rpc(modulesStatus, {}).then(value => { mods = value; emit({ modules: value }); }).catch(() => {});
       await Promise.allSettled([
         client.rpc(machineSettingsSnapshot, {}).then(value => emit({ machineSettings: value })).catch(() => {}),
-        client.rpc(todoList, {}).then(value => emit({ todo: value, todoError: null })).catch(error => {
-          if (!isRpcDisabledError(error, 'todo', mods)) emit({ todoError: errorMessage(error) });
-        }),
         client.rpc(defaultsSnapshot, {}).then(value => emit({ defaults: value })).catch(() => {}),
         client.rpc(providersInstanceStatus, {}).then(value => emit({ providerInstance: value })).catch(() => {}),
         client.rpc(cloudSessionStatus, {}).then(value => emit({ cloudSession: value })).catch(() => {}),
@@ -224,8 +235,8 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
           }
         }),
         client.rpc(providerQuotasSnapshot, {}).then(value => {
-          syncHideBuiltinUsage(value.hideBuiltin);
-          emit({ providerQuotas: value, providerQuotasStatus: 'ready' });
+          const { applied } = syncHideBuiltinUsage(value.hideBuiltin);
+          emit({ providerQuotas: { ...value, hideBuiltinApplied: applied }, providerQuotasStatus: 'ready' });
         }).catch(error => {
           emit({ providerQuotasStatus: isRpcDisabledError(error, 'usage.providerQuotas', mods) ? 'disabled' : 'error' });
         }),
@@ -249,7 +260,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
         }),
       ]);
     })().finally(() => { unifyInflight = null; });
-    return unifyInflight;
+    return Promise.allSettled([todoTask, unifyInflight]).then(() => {});
   };
   const refresh = () => {
     if (disposed) return Promise.resolve();
@@ -312,7 +323,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       return result;
     }),
     exportBackup: () => write(() => client.rpc(machineSettingsExportBackup, {})),
-    configureClaudeAccounts: (input: { labelWithQuota?: boolean; autoResumeDefault?: boolean }) => write(async () => {
+    configureClaudeAccounts: (input: { autoResumeDefault?: boolean }) => write(async () => {
       const result = await client.rpc(claudeAccountsConfigure, input);
       emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
       return result;
@@ -352,8 +363,8 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     }),
     configureProviderQuotas: (input: ProviderQuotasConfigureInput) => write(async () => {
       const result = await client.rpc(providerQuotasConfigure, input);
-      syncHideBuiltinUsage(result.hideBuiltin);
-      emit({ providerQuotas: result, providerQuotasStatus: 'ready' });
+      const { applied } = syncHideBuiltinUsage(result.hideBuiltin);
+      emit({ providerQuotas: { ...result, hideBuiltinApplied: applied }, providerQuotasStatus: 'ready' });
       return result;
     }),
     configureEscalation: (input: {
@@ -389,6 +400,14 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
         void refresh();
         void refreshUnify();
         timer = setInterval(() => {
+          const isHidden =
+            (globalThis as { document?: { visibilityState?: string } }).document?.visibilityState === 'hidden';
+          if (isHidden) {
+            hiddenTickCount += 1;
+            if (hiddenTickCount % 4 !== 0) return;
+          } else {
+            hiddenTickCount = 0;
+          }
           void refresh();
           void refreshUnify();
         }, REFRESH_INTERVAL_MS);

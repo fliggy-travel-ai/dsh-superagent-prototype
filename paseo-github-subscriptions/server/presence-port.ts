@@ -14,8 +14,7 @@ export class PresenceHosts extends HostRouter {
   private speech = new GuardSpeech();
   constructor(origin: Awaited<ReturnType<typeof connectDaemon>>['client']) { super(origin); }
   async invoke(hostId: string, method: 'presence.local' | 'presence.speak' | 'presence.speak-cancel' | 'bluetooth.local-list' | 'bluetooth.local-select' | 'todo.local' | 'todo.act', input: unknown, onTimeout?: () => void) {
-    const speech = method === 'presence.speak' || method === 'presence.speak-cancel';
-    return this.invokePlugin(hostId, method, input, timeouts[method] ?? 5000, onTimeout, speech);
+    return this.invokePlugin(hostId, method, input, timeouts[method] ?? 5000, onTimeout, true);
   }
   async localSpeech(id: string, text: string) {
     return this.speech.speak(id, text);

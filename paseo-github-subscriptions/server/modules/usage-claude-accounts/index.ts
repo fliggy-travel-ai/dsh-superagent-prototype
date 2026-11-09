@@ -10,7 +10,7 @@ import { APPLE_SUFFIX, isAppleRelay, listAccounts } from './accounts.ts';
 import { CLAUDE_ACCOUNTS_FALLBACK, ClaudeAccountsSectionSchema, QuotaSettingsSchema, quotaDefaults, type ClaudeAccountsSection } from './config.ts';
 import { ContinuousUsage } from './continuous-usage.ts';
 import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../../core/provider-config.ts';
-import { baseLabel, withQuota } from './labels.ts';
+import { withQuota } from './labels.ts';
 import { readLabels, setLabel } from './labels-file.ts';
 import { ensureConfigDirectory, LoginFlows, readAuthStatus } from './login.ts';
 import { migrateLegacyClaudeQuota } from './migrate.ts';
@@ -107,8 +107,8 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       } catch (error) { console.warn('无法检查 Claude 会话：', String(error)); }
     });
     void service.start();
-    // 选择 Agent 的列表没有插件扩展位置，所以把剩余额度写进 Provider 显示名称。
-    const labels = new QuotaLabelService({ discover: usage.discover, cached: key => usage.history.cached(key), home, sourceId: config.sourceId, enabled: settings.read().labelWithQuota });
+    // 选择 Agent 的列表没有插件扩展位置，所以把剩余额度写进 Provider 显示名称（默认功能，始终开启）。
+    const labels = new QuotaLabelService({ discover: usage.discover, cached: key => usage.history.cached(key), home, sourceId: config.sourceId, enabled: true });
     labels.start();
     usage.start();
 
@@ -168,7 +168,7 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       return {
         enabled: true,
         accounts,
-        quotaName: { enabled: current.labelWithQuota, lowestRemainingPct: known.length ? Math.min(...known) : null, autoResumeDefault: current.autoResumeDefault, hiddenBuiltinSources: bundledClaudeUsageInstalled() ? [] : ['claude-usage-source'] },
+        quotaName: { enabled: true, lowestRemainingPct: known.length ? Math.min(...known) : null, autoResumeDefault: current.autoResumeDefault, hiddenBuiltinSources: bundledClaudeUsageInstalled() ? [] : ['claude-usage-source'] },
         activeFlow: flows.current(),
         error: settings.error(),
       };
@@ -176,14 +176,13 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     server.handle(rpc.claudeAccountsSnapshot, snapshot);
     server.handle(rpc.claudeAccountsConfigure, async input => {
       settings.update(input);
-      if (input.labelWithQuota !== undefined) await labels.setEnabled(input.labelWithQuota);
       return snapshot();
     });
     server.handle(rpc.claudeAccountsRename, async ({ providerId, label, realEmail }) => {
       const provider = providersRaw()[providerId] ?? (providerId === 'claude' ? {} : undefined);
       if (!provider) throw new Error(`Provider ${providerId} 不存在`);
       const quota = labels.quotas().get(providerId) ?? null;
-      const withName = (name: string) => settings.read().labelWithQuota ? withQuota(name, quota) : baseLabel(name);
+      const withName = (name: string) => withQuota(name, quota);
       if (realEmail !== undefined) {
         const real = realEmail.trim().toLowerCase();
         if (!(await flows.confirmRealEmail(providerId, real))) {

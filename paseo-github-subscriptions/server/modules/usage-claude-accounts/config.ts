@@ -7,8 +7,8 @@ import { z } from 'zod';
  */
 export const ClaudeAccountsSectionSchema = z.strictObject({
   sourceId: z.string().regex(/^[a-z][a-z0-9-]{1,40}$/).default('claude-accounts'),
-  /** Provider 显示名称带额度。 */
-  labelWithQuota: z.boolean().default(true),
+  /** 兼容旧 machine.json；Provider 显示名称带额度始终按开启处理。 */
+  labelWithQuota: z.boolean().optional().transform(() => true),
   /** 额度耗尽后自动继续：没有单独选择过的会话（含新会话）的默认值。 */
   autoResumeDefault: z.boolean().default(false),
   /** 后台登录续期。 */
@@ -24,7 +24,10 @@ export const ClaudeAccountsSectionSchema = z.strictObject({
 export type ClaudeAccountsSection = z.infer<typeof ClaudeAccountsSectionSchema>;
 export const CLAUDE_ACCOUNTS_FALLBACK: ClaudeAccountsSection = ClaudeAccountsSectionSchema.parse({});
 
-/** 页面写入的设置，只保存改过的项。 */
-export const QuotaSettingsSchema = z.strictObject({ labelWithQuota: z.boolean().optional(), autoResumeDefault: z.boolean().optional() });
-export interface QuotaSettings { labelWithQuota: boolean; autoResumeDefault: boolean }
-export const quotaDefaults = (section: ClaudeAccountsSection): QuotaSettings => ({ labelWithQuota: section.labelWithQuota, autoResumeDefault: section.autoResumeDefault });
+/** 页面写入的设置，只保存改过的项（兼容忽略旧文件中的 labelWithQuota）。 */
+export const QuotaSettingsSchema = z.strictObject({
+  labelWithQuota: z.boolean().optional(),
+  autoResumeDefault: z.boolean().optional(),
+}).transform(({ autoResumeDefault }) => (autoResumeDefault === undefined ? {} : { autoResumeDefault }));
+export interface QuotaSettings { autoResumeDefault: boolean }
+export const quotaDefaults = (section: ClaudeAccountsSection): QuotaSettings => ({ autoResumeDefault: section.autoResumeDefault });

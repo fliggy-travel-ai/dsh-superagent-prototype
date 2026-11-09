@@ -10,6 +10,7 @@ import { startModules } from './server/core/modules.ts';
 import { MODULES } from './server/modules/index.ts';
 import { registerAntigravityRpcs } from './server/modules/providers-antigravity/index.ts';
 import { registerProviderQuotasRpcs } from './server/modules/usage-provider-quotas/index.ts';
+import { registerMachineSettingsRpcs } from './server/core/machine-settings-rpc.ts';
 
 /**
  * 开发自动化插件服务端入口。实例角色见 shared/instance.ts，模块见 server/modules/index.ts。
@@ -33,6 +34,9 @@ export default function contribute(server: PluginServerContext) {
     registerProviderQuotasRpcs({ server, machinePath: machine.path, services });
   }
   const host = startModules(MODULES, { server, instance, machine, services, stateDirectory, baseDirectory });
+  if (instance.role === 'main') {
+    registerMachineSettingsRpcs({ server, machine, host, services, stateDirectory, baseDirectory });
+  }
 
   return async () => {
     await host.dispose();
