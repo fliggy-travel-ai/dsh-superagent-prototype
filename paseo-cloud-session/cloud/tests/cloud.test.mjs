@@ -210,7 +210,7 @@ test('MCP 初始化说明含工作区编号和阶段改名要求',async()=>{
 test('权限钩子立即返回并由分离后台进程通知，工具 ID 从记录查找',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'paseo-notify-test-')), file=join(dir,'log'), transcript=join(dir,'transcript'), worker=join(dir,'worker.mjs');
  const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_notify'+Date.now(),TEST_OUTPUT:file};
- await writeFile(transcript,[{type:'assistant',message:{content:[{type:'tool_use',name:'AskUserQuestion',id:'old-id',input:{}}]}},{type:'assistant',message:{content:[{type:'tool_use',name:'AskUserQuestion',id:'new-id',input:{}}]}}].map(JSON.stringify).join('\n')+'\n');
+ await writeFile(transcript,[{type:'assistant',message:{content:[{type:'tool_use',name:'AskUserQuestion',id:'old-id',input:{}}]}},{type:'assistant',message:{content:[{type:'tool_use',name:'AskUserQuestion',id:'new-id',input:{questions:[{question:'问题？'}]}}]}}].map(JSON.stringify).join('\n')+'\n');
  const bundle=pathToFileURL(join(process.cwd(),'dist/paseo-cloud-session.mjs')).href;
  await writeFile(worker,`import {notifyRequest} from ${JSON.stringify(bundle)}; import {writeFile} from 'node:fs/promises'; let data=''; for await(const c of process.stdin) data+=c; await new Promise(r=>setTimeout(r,1200)); await notifyRequest(JSON.parse(data),process.env,async(c,v)=>{await writeFile(process.env.TEST_OUTPUT,JSON.stringify({method:c.name,input:v})); return {shown:true};});`);
  const input={hook_event_name:'PermissionRequest',session_id:'example',transcript_path:transcript,tool_name:'AskUserQuestion',tool_input:{questions:[{question:'问题？'}]}};

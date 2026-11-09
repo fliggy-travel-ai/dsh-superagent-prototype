@@ -7,9 +7,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import readline from 'node:readline';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// #1737 评论 6734539343：forward 停止后关闭请求不再到达。forward 写心跳，通知时发现它不在或卡住就重新拉起。
+const FORWARD_BEAT_MS = 10000, FORWARD_STALE_MS = 120000, REQUEST_RESULTS_MAX = 5000;
 const workspaceInstructions = id => `这个会话在 Paseo 里有自己的工作区 ${id || '（编号见 PASEO_WORKSPACE_ID）'}；定下需求 Issue 后以及每次需求阶段变化时，用 Paseo 工具 rename_workspace 将它改成 <Issue 号>【<状态>】<需求名>。`;
 const instructions = '请用 run_in_background 运行 node /opt/paseo-cloud-session/paseo-cloud-session.mjs wait；被唤醒后处理消息，处理完再启动下一次 wait。经 Paseo 工具创建子会话时必须传 settings.modeId。';
 const redact = (value, env) => env.PASEO_MINI_HOST ? value.replaceAll(env.PASEO_MINI_HOST, '[已隐藏]') : value;
@@ -118,7 +121,7 @@ export class ForwardQueue {
 }
 async function lock(dir, path) {
   await mkdir(dir,{recursive:true}); const file=join(dir,'forward.pid'); const token=randomUUID();
-  const mine={pid:process.pid,path,token,titleHandled:false};
+  const mine={pid:process.pid,path,token,titleHandled:false,beatAt:Date.now()};
   for(let i=0;i<4;i++) {
     try {const f=await open(file,'wx'); await f.writeFile(JSON.stringify(mine)); await f.close(); return {file,token,titleHandled:mine.titleHandled};}
     catch(e) {if(e.code!=='EEXIST') throw e;}
@@ -152,18 +155,43 @@ function resultOutcome(block,row) {
   if(block.is_error && /(?:user (?:denied|rejected)|permission (?:denied|rejected) by (?:the )?user|denied by (?:the )?user|tool use was rejected|user (?:does not|doesn't) want to proceed|用户拒绝)/i.test(text)) return 'denied';
   return 'answered';
 }
-export async function notifyRequest(input, env=process.env, rpc=createRpc(env)) {
+// 钩子输入没带 tool_use_id 时，从记录里找“同名、输入相同、还没有结果”的最后一个 tool_use。
+// 新调用可能还没写进记录，等一会儿再找；找不到就不通知，避免用上一个同名调用的编号。
+async function findToolUseId(path, toolName, toolInput, waitMs) {
+  const deadline=Date.now()+waitMs;
+  for(;;) {
+    try {
+      const lines=(await readFile(path,'utf8')).split('\n'); const finished=new Set();
+      for(const line of lines) {try {const row=JSON.parse(line); if(row.type==='user' && Array.isArray(row.message?.content)) for(const b of row.message.content) if(b.type==='tool_result' && typeof b.tool_use_id==='string') finished.add(b.tool_use_id);} catch {}}
+      for(let i=lines.length-1;i>=0;i--) {try {const row=JSON.parse(lines[i]); if(row.type!=='assistant' || row.isSidechain || row.isMeta) continue; const blocks=row.message?.content; if(!Array.isArray(blocks)) continue; for(let j=blocks.length-1;j>=0;j--) {const b=blocks[j]; if(b.type==='tool_use' && b.name===toolName && typeof b.id==='string' && b.id && !finished.has(b.id) && isDeepStrictEqual(b.input ?? {},toolInput)) return b.id;}} catch {}}
+    } catch {}
+    if(Date.now()>=deadline) return '';
+    await sleep(200);
+  }
+}
+// forward 不在（进程已退出）或心跳过期（卡住）时结束旧进程并重新拉起；新 forward 启动时回放已有的工具结果。
+export async function reviveForward(env=process.env, launch=spawn) {
+  let info; try {info=JSON.parse(await readFile(join(sessionDir(env),'forward.pid'),'utf8'));} catch {return false;}
+  if(typeof info.path!=='string' || !info.path || info.path==='finished') return false;
+  let alive=false; if(info.pid>0) {try {process.kill(info.pid,0); alive=true;} catch(e) {if(e.code==='EPERM') alive=true;}}
+  const stale=!(info.beatAt>0) || Date.now()-info.beatAt>FORWARD_STALE_MS;
+  if(alive && !stale) return false;
+  if(alive) {try {process.kill(info.pid,'SIGTERM');} catch {} for(let i=0;i<20;i++) {try {process.kill(info.pid,0);} catch {break;} await sleep(100);}}
+  const size=await stat(info.path).then(x=>x.size).catch(()=>0);
+  const child=launch(process.execPath,[fileURLToPath(import.meta.url),'forward',info.path,String(size)],{detached:true,stdio:'ignore',env});
+  child.on?.('error',()=>{}); child.unref?.(); return true;
+}
+export async function notifyRequest(input, env=process.env, rpc=createRpc(env), launch=spawn) {
   const toolName=input.tool_name, toolInput=input.tool_input;
   if(typeof toolName!=='string' || !toolName || !toolInput || typeof toolInput!=='object' || Array.isArray(toolInput)) return;
   let id=typeof input.tool_use_id==='string' ? input.tool_use_id : '';
-  if(!id && input.transcript_path) {
-    try {const lines=(await readFile(input.transcript_path,'utf8')).split('\n');
-      for(let i=lines.length-1;i>=0 && !id;i--) {try {const row=JSON.parse(lines[i]); if(row.type!=='assistant' || row.isSidechain || row.isMeta) continue; const blocks=row.message?.content; if(!Array.isArray(blocks)) continue; for(let j=blocks.length-1;j>=0;j--) {const b=blocks[j]; if(b.type==='tool_use' && b.name===toolName && typeof b.id==='string' && b.id) {id=b.id;break;}}} catch {}}
-    } catch {}
-  }
+  if(!id && input.transcript_path) id=await findToolUseId(input.transcript_path,toolName,toolInput,Number(env.PASEO_CLOUD_ID_WAIT_MS) || 3000);
   if(!id) return;
-  await rpc(notifyPendingRequest,{...context(env),request:{toolUseId:id,toolName,kind:toolName==='AskUserQuestion'?'question':'tool',input:toolInput}});
-  const marker=requestMarker(env,id); await mkdir(join(sessionDir(env),'requests'),{recursive:true}); await writeFile(marker,'');
+  // 先写 marker（内容是编号）：工具结果比通知先到时，forward 也能对上这条请求。
+  const marker=requestMarker(env,id); await mkdir(join(sessionDir(env),'requests'),{recursive:true}); await writeFile(marker,id);
+  try {await rpc(notifyPendingRequest,{...context(env),request:{toolUseId:id,toolName,kind:toolName==='AskUserQuestion'?'question':'tool',input:toolInput}});}
+  catch(error) {await unlink(marker).catch(()=>{}); throw error;}
+  await reviveForward(env,launch).catch(()=>{});
 }
 export function permissionHook(input, env=process.env, launch=spawn) {
   if(!eligible(env) || input.agent_id || input.agent_type || input.source==='subagent') return;
@@ -176,15 +204,22 @@ export async function forward(path, env=process.env, rpc=createRpc(env), startOf
   let titleHandled=lease.titleHandled || (await titleFor(path,offset))!=='云端会话';
   let titleAttempts=0, titleNext=0; const titleMcp={attempted:false,initialized:false};
   if(titleHandled && !lease.titleHandled && !await updateLease(lease,{titleHandled:true})) return;
+  // 回放启动位置之前的工具结果：forward 重启后仍能关闭重启前已有结果、但还没关闭的请求。
+  if(offset>0) {try {const head=(await readFile(path)).subarray(0,offset).toString(); for(const line of head.split('\n')) {try {const row=JSON.parse(line); if(row.type==='user' && !row.isMeta && !row.isSidechain && Array.isArray(row.message?.content)) for(const block of row.message.content) if(block.type==='tool_result' && typeof block.tool_use_id==='string') requestResults.set(block.tool_use_id,resultOutcome(block,row));} catch {}}} catch {}}
+  let beatAt=Date.now();
   const register=async()=>{const result=await ensure(rpc,env,path); registered=true; agentId=result.agentId; queue.epoch=result.epoch;};
   queue.onEpochChange=async()=>{registered=false; await register();};
   try { for (;;) {
     if(!await ownsLock(lease)) return;
+    if(Date.now()-beatAt>=FORWARD_BEAT_MS) {beatAt=Date.now(); if(!await updateLease(lease,{beatAt}).catch(()=>true)) return;}
     try {
       const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {const row=JSON.parse(line); if(row.type==='user' && !row.isMeta && !row.isSidechain && Array.isArray(row.message?.content)) for(const block of row.message.content) if(block.type==='tool_result' && typeof block.tool_use_id==='string') requestResults.set(block.tool_use_id,resultOutcome(block,row)); const value=queue.map(row); if(value) {queue.enqueue(value); if(!titleHandled && !titlePending) titlePending=value.items.find(x=>x.type==='user_message')?.text || null;}} catch {} } } } finally {await f.close();}
       if(!registered) await register();
       await queue.flush();
-      for(const [toolUseId,outcome] of requestResults) {const marker=requestMarker(env,toolUseId); try {await stat(marker);} catch(e) {if(e.code==='ENOENT') continue; throw e;} await rpc(resolvePendingRequest,{...context(env),toolUseId,outcome}); await unlink(marker).catch(()=>{}); requestResults.delete(toolUseId);}
+      let resolveError;
+      for(const [toolUseId,outcome] of requestResults) {const marker=requestMarker(env,toolUseId); try {await stat(marker);} catch(e) {if(e.code==='ENOENT') continue; throw e;} try {await rpc(resolvePendingRequest,{...context(env),toolUseId,outcome}); await unlink(marker).catch(()=>{}); requestResults.delete(toolUseId);} catch(error) {resolveError ??= error;}}
+      for(const key of requestResults.keys()) {if(requestResults.size<=REQUEST_RESULTS_MAX) break; requestResults.delete(key);}
+      if(resolveError) throw resolveError;
       if(titlePending && Date.now()>=titleNext) {
         if(!titleHandled) {if(!await updateLease(lease,{titleHandled:true})) return; titleHandled=true;}
         titleAttempts++;
