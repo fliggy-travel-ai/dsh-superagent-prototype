@@ -9,9 +9,12 @@
  * 加载时 PASEO_HOME 和插件状态目录指向临时目录，不连接正式 daemon，不读写正式状态，不安装插件。
  * 没有安装 Paseo 时跳过并以 0 退出。
  *
+ * 宿主替身和 Paseo 一样，对重复注册的 RPC、Provider 抛错；模块注册失败或出现重复注册的日志时判为失败。
+ *
  * 用法：node scripts/check-paseo-load.mjs [--app /Applications/Paseo.app] [--cache <目录>] [--plugin <插件目录>]
+ *        [--enable providers.antigravity,usage.providerQuotas]（在临时目录的 machine.json 里打开这些模块）
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -48,10 +51,17 @@ const home = mkdtempSync(join(tmpdir(), 'paseo-load-home-'));
 process.env.PASEO_HOME = home;
 process.env.PASEO_GHSUB_STATE_DIR = join(home, 'github-subscriptions');
 delete process.env.PASEO_GHSUB_MACHINE_CONFIG;
+const enabled = (args.get('--enable') ?? '').split(',').map(item => item.trim()).filter(Boolean);
+if (enabled.length) {
+  mkdirSync(process.env.PASEO_GHSUB_STATE_DIR, { recursive: true });
+  writeFileSync(join(process.env.PASEO_GHSUB_STATE_DIR, 'machine.json'), JSON.stringify({ version: 1, modules: Object.fromEntries(enabled.map(id => [id, true])) }));
+  console.log(`临时 machine.json 打开模块：${enabled.join('、')}`);
+}
+const methods = new Set();
 const registered = { rpc: 0, providers: [], usageSources: [], hooks: 0, settings: 0 };
 const server = {
-  handle() { registered.rpc++; },
-  registerProvider(provider) { registered.providers.push(provider.id); },
+  handle(contract) { if (methods.has(contract.name)) throw new Error(`Duplicate plugin RPC method: ${contract.name}`); methods.add(contract.name); registered.rpc++; },
+  registerProvider(provider) { if (registered.providers.includes(provider.id)) throw new Error(`Duplicate plugin provider: ${provider.id}`); registered.providers.push(provider.id); },
   registerUsageSource(source) { registered.usageSources.push(source.id ?? source.name ?? '?'); },
   registerSettings() { registered.settings++; return { read: async () => ({ status: 'invalid', revision: '0', error: 'load check' }), subscribe: () => () => {} }; },
   addHook() { registered.hooks++; return () => {}; },
@@ -62,13 +72,20 @@ let failed = false;
 const late = [];
 const onLate = error => late.push(error instanceof Error ? error.message : String(error));
 process.on('unhandledRejection', onLate);
+const errorLines = [];
+const originalError = console.error;
+console.error = (...parts) => { errorLines.push(parts.map(String).join(' ')); originalError(...parts); };
 try {
   const contribute = evaluateBundle(bundles.serverBundle);
   const cleanup = contribute(server);
+  console.error = originalError;
+  const broken = errorLines.filter(line => /Duplicate plugin|注册失败/.test(line));
+  if (broken.length) throw new Error(`模块注册失败：${broken.join('；')}`);
   await new Promise(r => setTimeout(r, 1500));
   await (typeof cleanup === 'function' ? cleanup() : undefined);
   console.log(`加载成功：注册 RPC ${registered.rpc} 个，Provider ${registered.providers.join('、') || '无'}，额度来源 ${registered.usageSources.length} 个，钩子 ${registered.hooks} 个`);
 } catch (error) {
+  console.error = originalError;
   failed = true;
   console.error(`加载失败：${error instanceof Error ? `${error.name}: ${error.message}` : error}`);
 } finally {
