@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { z } from 'zod';
-import { runningTurns, type AgentRow } from '../../../scripts/deploy-lib.ts';
+import { runningTurns, type AgentRow } from '../../running-turns.ts';
 import {
   ANTIGRAVITY_ID_MESSAGE,
   ANTIGRAVITY_ID_PATTERN,

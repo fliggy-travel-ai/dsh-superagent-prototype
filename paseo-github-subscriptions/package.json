@@ -18,7 +18,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types --test --test-timeout=60000 tests/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run scan",
+    "check": "npm run typecheck && npm run boundaries && npm test && npm run scan",
+    "boundaries": "node --experimental-strip-types scripts/check-plugin-boundaries.ts",
     "vendor:check": "node --experimental-strip-types scripts/vendor-sync.ts --check",
     "test:daemon": "node --experimental-strip-types tests/daemon-integration.ts",
     "scan": "node --experimental-strip-types scripts/scan-secrets.ts"
