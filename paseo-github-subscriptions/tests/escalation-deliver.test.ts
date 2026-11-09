@@ -84,3 +84,10 @@ test('页面记录：提问显示问题文字，其他事件显示事件名和�
   assert.equal(project.summary, '新项目：新项目');
   assert.equal(project.agentId, '');
 });
+
+test('页面记录带来源请求编号：单条取自身请求，合并通知取全部提问成员并去重', () => {
+  assert.deepEqual(noticeRecord(notice({ requestId: 'p' }), 'live', 'delivered').requests, [{ agentId: 'main', requestId: 'p' }]);
+  const group = notice({ requestId: 'p1', events: [notice({ id: 'a', requestId: 'p1' }), notice({ id: 'b', agentId: 'x', requestId: 'p2' }), notice({ id: 'c', event: 'new_project', agentId: '', requestId: undefined, permissionId: null })] });
+  assert.deepEqual(noticeRecord(group, 'live', 'delivered').requests, [{ agentId: 'main', requestId: 'p1' }, { agentId: 'x', requestId: 'p2' }]);
+  assert.equal(noticeRecord(notice({ event: 'error', requestId: undefined, permissionId: null }), 'live', 'delivered').requests, undefined);
+});

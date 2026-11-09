@@ -193,6 +193,18 @@ export class TodoRuntime {
         detail: `${deliv.sessionTitle} · ${deliv.summary}`,
       });
     }
+    for (const closure of escalation?.recentClosures ?? []) {
+      logs.push({
+        id: `esc-closed:${closure.id}`,
+        at: closure.at,
+        kind: 'escalation',
+        // 标签沿用已有取值：跨主机快照按枚举校验，新增取值会让旧版本主机读不了整个待办。
+        label: '升级投递',
+        hostId: self.id,
+        hostName: self.name,
+        detail: `已自动结束（${closure.reason}） · ${closure.sessionTitle} · ${closure.summary}`,
+      });
+    }
 
     // 3. 网页等待（waiting / limited，排除已有待答网页提问的会话）
     for (const session of browser?.sessions ?? []) {

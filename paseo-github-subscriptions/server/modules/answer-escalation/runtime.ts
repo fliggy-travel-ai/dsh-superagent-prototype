@@ -19,7 +19,8 @@ import type { RuntimeSettings, EscalationSection } from './config.ts';
 import { createSender } from './deliver.ts';
 import { prefilter } from './prefilter.ts';
 import { QuotaAlerts, isQuotaError, postQuotaAlert, quotaWebhookConfigPath, quotaWebhookCredentials, quotaWebhookFileDir } from './quota.ts';
-import { EscalationRecords } from './records.ts';
+import { CLOSED_REASON_TEXT, EscalationRecords } from './records.ts';
+import { EscalationReconciler, agentView } from './reconcile.ts';
 import { credentialFingerprint, postNotice, storeWebhookCredentials, webhookCredentials, type WebhookCredentials } from './webhook.ts';
 
 export interface EscalationOptions {
@@ -43,6 +44,8 @@ export interface EscalationOptions {
 }
 
 const WEBHOOK_CACHE_MS = 60_000;
+/** 定时对账间隔：补上漏掉的钩子和订阅推送（重载、连接中断、跨重启的存量记录）。 */
+const RECONCILE_MS = 60_000;
 
 /**
  * 升级通知运行时。主会话（置顶工作区中的会话）的提问和错误按时段规则送到 Grok webhook；
@@ -98,7 +101,19 @@ export class EscalationRuntime {
     this.statePath = this.stateFile(settings.delivery);
     const state = await loadState(this.statePath);
     attempt.check();
-    const audit = createAuditWriter(join(directory, 'events.jsonl'));
+    const auditPath = join(directory, 'events.jsonl');
+    const audit = createAuditWriter(auditPath);
+    const reconciler = new EscalationReconciler({
+      records: this.records,
+      audit,
+      lookup: async id => {
+        const ref = paseo.agents.ref(id);
+        if (!(await ref.refresh())) return null;
+        const current = ref.current();
+        return current ? agentView(current) : null;
+      },
+      log: line => this.log(line),
+    });
     const config: NotifyConfig = {
       hostId: machineName, machine: machineName, delivery: settings.delivery, mains: [], children: {}, coalesceWindowSeconds: 60,
       hold: (first, now) => holdAsked(EscalationScheduleSchema.parse(this.schedule()))(first, now),
@@ -125,6 +140,7 @@ export class EscalationRuntime {
       if (!snapshot) return false;
       return ref.pendingPermissions?.some(p => p.id === request) ?? false;
     }, audit);
+    engine.onResolved = (agentId, requestId) => reconciler.closeRequest(agentId, requestId).then(() => {});
     this.engine = engine;
 
     const workspaces = new Map<string, WorkspaceInfo>();
@@ -164,6 +180,8 @@ export class EscalationRuntime {
       await engine.serial(async () => {
         await refreshRoles(); updateAgent(e.agent as never);
         if (config.mains.includes(e.agent.id)) await engine.resolved(e.agent.id, e.requestId, e.resolution, true);
+        // 已不再是主会话（置顶取消）的旧升级事件同样结束。
+        else await reconciler.closeRequest(e.agent.id, e.requestId);
         await tick();
       });
     }));
@@ -182,22 +200,29 @@ export class EscalationRuntime {
     attempt.add(() => { void subscription.release().catch(() => {}); });
     attempt.check();
     const statuses = new Map<string, string>();
+    const settle = async (agent: Parameters<typeof agentView>[0] & { id: string }) => {
+      if (this.records.agentsWithOpen().includes(agent.id)) await reconciler.settle(agent.id, agentView(agent));
+    };
     attempt.add(subscription.subscribe({
       snapshot: ({ entries }) => {
         run(async () => {
           for (const { agent } of entries) {
             updateAgent(agent as never);
             statuses.set(agent.id, agent.status);
+            await settle(agent);
             if (config.mains.includes(agent.id)) for (const request of agent.pendingPermissions ?? []) await asked(agent, request as never);
           }
           await tick();
         });
       },
       update: message => {
-        if (message.type !== 'agent_update' || message.payload.kind !== 'upsert') return;
+        if (message.type !== 'agent_update') return;
+        // 移出列表（例如归档）时逐个查询现状，不凭移出本身结束。
+        if (message.payload.kind !== 'upsert') { run(() => reconciler.sweep()); return; }
         const agent = message.payload.agent;
         run(async () => {
           updateAgent(agent as never);
+          await settle(agent);
           const previous = statuses.get(agent.id);
           statuses.set(agent.id, agent.status);
           if (previous && previous !== agent.status && agent.status === 'error' && config.mains.includes(agent.id))
@@ -212,6 +237,11 @@ export class EscalationRuntime {
     attempt.check();
     const timer = setInterval(() => run(async () => { await tick(); }), 1000);
     attempt.add(() => clearInterval(timer));
+    // 存量记录：回填请求编号后立即对账一次，之后定时对账。
+    const reconcile = async () => { await reconciler.sweep(); await engine.reconcilePending(); };
+    run(async () => { await reconciler.backfill(auditPath); await reconcile(); });
+    const reconcileTimer = setInterval(() => run(reconcile), RECONCILE_MS);
+    attempt.add(() => clearInterval(reconcileTimer));
     if (section.quotaAlerts.enabled) {
       this.quotaAlerts = new QuotaAlerts({
         listReports: () => client.listUsageReports(),
@@ -414,6 +444,7 @@ export class EscalationRuntime {
       webhook: await this.webhookStatus(),
       pendingEvents: this.records.pending().map(item => ({ id: item.id, agentId: item.agentId, sessionTitle: item.sessionTitle, workspaceId: item.workspaceId, questionText: item.questionText, notifiedAt: item.at, delivery: item.delivery })),
       recentDeliveries: this.records.recent().map(item => ({ id: item.id, agentId: item.agentId, sessionTitle: item.sessionTitle, summary: item.summary, at: item.at, delivery: item.delivery, status: item.status })),
+      recentClosures: this.records.closures().map(item => ({ id: item.id, agentId: item.agentId, sessionTitle: item.sessionTitle, summary: item.summary, at: item.closedAt!, reason: CLOSED_REASON_TEXT[item.closedReason!] ?? '来源已不再等待' })),
     };
   }
 }

@@ -257,3 +257,40 @@ test('其他会话的 RPC 未注册或模块未开启时标记为 disabled 且�
   } finally { store.dispose(); }
 });
 
+
+test('待办操作超时后返回失败提示，按钮不会一直“处理中”；之后仍刷新列表', async () => {
+  let lists = 0;
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todo.act') return new Promise(() => {});
+    if (contract.name === 'todo.list') { lists += 1; return { items: [], logs: [], hosts: [], warning: null }; }
+    throw new Error('未注册');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { actTimeoutMs: 20 });
+  try {
+    const result = await store.actTodo({ hostId: 'srv-mini', action: { type: 'ack-escalation', escalationId: 'esc-1' } });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /超时/);
+    await new Promise(done => setTimeout(done, 20));
+    assert.ok(lists >= 1);
+  } finally { store.dispose(); }
+});
+
+test('待办操作成功后重新读取列表，不沿用操作前发出的旧列表结果', async () => {
+  const before = deferred<unknown>();
+  const item = { id: 'esc:srv-mini:esc-1' };
+  let lists = 0;
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todo.act') return { ok: true, message: '已标为已处理' };
+    if (contract.name === 'todo.list') { lists += 1; return lists === 1 ? before.promise : { items: [], logs: [], hosts: [], warning: null }; }
+    throw new Error('未注册');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { actTimeoutMs: 1000 });
+  try {
+    const stale = store.refreshUnify();
+    const acted = store.actTodo({ hostId: 'srv-mini', action: { type: 'ack-escalation', escalationId: 'esc-1' } });
+    before.resolve({ items: [item], logs: [], hosts: [], warning: null });
+    await stale;
+    assert.equal((await acted).ok, true);
+    await new Promise(done => setTimeout(done, 10));
+    assert.equal(lists, 2);
+    assert.deepEqual(store.getState().todo?.items, []);
+  } finally { store.dispose(); }
+});

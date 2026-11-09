@@ -110,6 +110,8 @@ export class Engine {
   send: (notice: Notice) => Promise<void>;
   isPending: (agent: string, request: string) => Promise<boolean>;
   audit: (entry: Record<string, unknown>) => Promise<void>;
+  /** 提问不再等待（已回答、已取消，或检查发现已不在等待）时调用，用于结束页面记录。 */
+  onResolved?: (agentId: string, requestId: string) => void | Promise<void>;
   constructor(
     config: Config,
     state: State,
@@ -289,6 +291,7 @@ export class Engine {
     const key = JSON.stringify([agentId, requestId]);
     const pending = this.state.pending[key];
     delete this.state.pending[key];
+    await this.onResolved?.(agentId, requestId);
     this.state.outbox = this.state.outbox.filter(
       (x) =>
         !(
@@ -368,6 +371,20 @@ export class Engine {
       return failure?.acknowledgedAt === undefined;
     });
     await this.save(this.state);
+  }
+  /**
+   * tick 只检查未送达的提问；已送达的提问靠权限钩子结束。钩子漏掉时（重载、连接中断）由这里补查，
+   * 已不再等待的清出待答状态。查询失败的保留，下次再查。
+   */
+  async reconcilePending(now = Date.now()) {
+    for (const p of Object.values(this.state.pending)) {
+      if (this.state.seen[`asked:${JSON.stringify([p.agentId, p.requestId])}`] === undefined) continue;
+      try {
+        if (await this.isPending(p.agentId, p.requestId)) continue;
+      } catch { continue; }
+      await this.audit({ phase: "pending-expired", mode: this.config.delivery, agentId: p.agentId, permissionId: p.requestId, at: now });
+      await this.resolved(p.agentId, p.requestId, undefined, false, now);
+    }
   }
   async tick(now = Date.now()) {
     const expired = expireOutbox(this.state, now);

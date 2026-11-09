@@ -24,6 +24,10 @@ export const EscalationSnapshotSchema = z.strictObject({
     id: z.string(), agentId: z.string(), sessionTitle: z.string(), summary: z.string(), at: z.string(),
     delivery: DeliverySchema, status: z.enum(['delivered', 'recorded-shadow', 'failed']),
   })),
+  /** 来源提问不再等待而自动结束的升级事件，待办的处理记录显示。 */
+  recentClosures: z.array(z.strictObject({
+    id: z.string(), agentId: z.string(), sessionTitle: z.string(), summary: z.string(), at: z.string(), reason: z.string(),
+  })).optional(),
 });
 export type EscalationSnapshot = z.infer<typeof EscalationSnapshotSchema>;
 

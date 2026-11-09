@@ -97,3 +97,11 @@ test('子会话完结不通知主会话或Grok，旧队列及批次同样过滤'
  const job=f.e.state.outbox.at(-1)!;job.notice.events=[{...job.notice,event:'subagent_done',key:'batch-done'},{...job.notice}];
  await f.e.tick(0);assert.equal(f.sent.length,1);assert.equal(f.sent[0].event,'error');assert.equal(f.sent[0].events?.length,1);assert.equal(f.e.state.outbox.length,0);
 });
+test('提问结束时通知页面记录；已送达但不再等待的提问在对账时清出待答状态',async()=>{
+ const f=fixture();const closed:string[]=[];f.e.onResolved=(agentId,requestId)=>{closed.push(`${agentId}/${requestId}`)};
+ await f.e.asked('main','p1',question,1000);await f.e.asked('main','p2',question,1000);await f.e.tick(1000);assert.equal(f.sent.length,2);
+ await f.e.resolved('main','p1',{behavior:'allow'},true,2000);assert.deepEqual(closed,['main/p1']);
+ // 送达后 tick 不再检查 p2；对账发现已不在等待才清掉。连接失败的不清。
+ f.e.isPending=async()=>{throw Error('断开')};await f.e.reconcilePending(3000);assert.ok(Object.keys(f.e.state.pending).length===1);
+ f.resolve();f.e.isPending=async()=>false;await f.e.reconcilePending(3000);assert.deepEqual(f.e.state.pending,{});assert.deepEqual(closed,['main/p1','main/p2']);
+});

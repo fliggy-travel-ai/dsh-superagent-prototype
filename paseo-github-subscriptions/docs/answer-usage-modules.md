@@ -65,6 +65,7 @@
 - **旧插件保护**：旧插件 `event-notifications` 仍启用时强制影子模式，不能切到实际发送，避免同一事件发两次。
 - **webhook**：地址和鉴权头只从环境变量或 macOS Keychain 读取，服务名写在 `machine.json` 的 `escalation.webhook`（`urlEnv`/`authEnv`，或 `urlService`/`authService`/`account`）。仓库里没有地址、凭据和服务名。旧插件的服务名写在旧源码 `server/webhook.ts` 里，迁移时抄到 `machine.json`。额度报警 webhook 的凭据：环境变量 `QUOTA_WEBHOOK_URL`/`QUOTA_WEBHOOK_KEY`、`~/.config/dsh/quota-webhook.json`，或 `quotaAlerts.fileDirectory`（目录里 `url` 和 `key` 两个文件）。
 - **预筛**：`escalation.prefilter` 写 `{ command, script }`；脚本输出 `{"action":"suppress"}` 时不发送。没有配置就不预筛。
+- **待办中的升级事件自动结束**：来源提问不再等待时（已回答、已取消、权限已处理，或会话不存在、已归档、已关闭），升级事件自动移出“待办总览”，`events.jsonl` 写 `record-closed`，待办的处理记录显示“已自动结束（原因）”。出错事件在会话继续运行后结束。触发点：权限钩子、会话列表订阅推送、启动时对账一次、之后每 60 秒对账一次（逐个查询有未结束事件的会话，查询失败的保留到下次）。旧记录没有请求编号，启动时从 `events.jsonl` 按通知编号回填；回填不到的，会话没有任何等待中的请求才结束。同一轮对账也清掉引擎中已送达但已不再等待的提问。“标为已处理”仍可用；按钮等待超过 15 秒提示超时并恢复，随后重新读取列表。跨主机：每台主机只结束自己的事件，两台主机都要部署本版本。
 - **状态目录** `escalation/`：`settings.json`、`state.json`、`state-shadow.json`、`events.jsonl`（审计）、`records.json`（页面的升级事件和最近投递）、`quota-alerts.json`。
 
 ### 迁移旧状态

@@ -1,6 +1,6 @@
 import type { Notice } from '../../notify/engine.ts';
 import { webhookPayload, type WebhookCredentials } from './webhook.ts';
-import type { EscalationRecord } from './records.ts';
+import { requestsOf, type EscalationRecord } from './records.ts';
 
 export interface DeliverDeps {
   mode(): 'shadow' | 'live';
@@ -19,10 +19,12 @@ const EVENT_NAMES: Record<string, string> = { asked: '提问', error: '错误', 
 export function noticeRecord(notice: Notice, delivery: 'shadow' | 'live', status: EscalationRecord['status'], now: () => number = Date.now): EscalationRecord {
   const name = EVENT_NAMES[notice.event] ?? notice.event;
   const text = notice.questionSummary?.text || '';
+  const requests = requestsOf(notice);
   return {
     id: notice.id, event: notice.event, agentId: notice.agentId, sessionTitle: notice.title || '未命名会话', workspaceId: notice.workspaceId,
     questionText: text, summary: `${name}：${text || notice.title || '无标题'}`,
     at: new Date(now()).toISOString(), delivery, status, acknowledged: false,
+    ...(requests ? { requests } : {}),
   };
 }
 
