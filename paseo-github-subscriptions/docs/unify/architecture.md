@@ -207,7 +207,7 @@ Paseo 0.15 对模块注册的约束（feasibility 第 3、5 项）：
 | 部署目录 | `~/.paseo/local-plugins/github-subscriptions` | `~/.paseo/local-plugins/dev-automation-providers` |
 | 角色文件 | `shared/instance.generated.ts`：`role: "main"` | `role: "providers"` |
 | 服务端注册 | 除 Provider 外的全部模块 | 只注册 Provider 模块和一个 `instance.status` RPC |
-| 客户端注册 | 页面、侧栏、⌘K、设置页、胶囊、时间线 | 不注册任何界面 |
+| 客户端注册 | 页面、侧栏、⌘K、胶囊、时间线 | 不注册任何界面 |
 | 状态目录 | `~/.paseo/github-subscriptions/` | `~/.paseo/github-subscriptions/providers/`（只写自己的子目录） |
 | 何时重载 | 每次更新代码 | 只在 Provider 模块代码或账号列表变化时 |
 

@@ -7,12 +7,6 @@ export interface ScreenEntry {
   title: string | ((params: Record<string, string>) => string);
   Component: AnyComponent;
 }
-export interface SettingsScreenEntry {
-  id: string;
-  title: string;
-  icon: unknown;
-  Component: AnyComponent;
-}
 export interface SidebarEntry {
   id: string;
   title: string;
@@ -42,7 +36,6 @@ export interface PillEntry {
 /** 假宿主的注册表：行为对齐真实宿主（重复注册同一目标会抛错；移除幂等）。 */
 export class Registry {
   readonly screens = new Map<string, ScreenEntry>();
-  readonly settingsScreens = new Map<string, SettingsScreenEntry>();
   readonly sidebar = new Map<string, SidebarEntry>();
   readonly commands = new Map<string, CommandEntry>();
   readonly pills = new Map<string, PillEntry>();
@@ -68,16 +61,6 @@ export class Registry {
     this.bump();
     return () => {
       if (this.screens.delete(entry.id)) this.events.push(`screen- ${entry.id}`);
-      this.bump();
-    };
-  }
-  addSettingsScreen(entry: SettingsScreenEntry) {
-    if (this.settingsScreens.has(entry.id)) throw new Error(`重复的设置页 ${entry.id}`);
-    this.settingsScreens.set(entry.id, entry);
-    this.events.push(`settings+ ${entry.id}`);
-    this.bump();
-    return () => {
-      if (this.settingsScreens.delete(entry.id)) this.events.push(`settings- ${entry.id}`);
       this.bump();
     };
   }

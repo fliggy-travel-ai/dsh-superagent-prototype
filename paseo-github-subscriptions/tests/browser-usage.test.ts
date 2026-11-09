@@ -1475,7 +1475,7 @@ test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置
   installTsxAndReactNativeHooks();
   const React = (await import('react')).default;
   const { isValidElement } = await import('react');
-  const { AdsPowerKeyCard } = await import('../client/settings/index.tsx');
+  const { AdsPowerKeyCard } = await import('../client/drawers.tsx');
   const { bind } = await import('../client/ui.tsx');
 
   const mockTheme = {

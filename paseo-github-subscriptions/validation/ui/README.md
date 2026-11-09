@@ -23,7 +23,7 @@ python3 make_gifs.py
 
 GIF 生成需要 Python Pillow 和 macOS 的黑体字体。验收脚本以当前目录为根目录，必须从本目录执行。验收脚本复用名为 `ghsub-ui-fixture-preview` 的专用 TaskSpace；已结束的用户空间不应自动接管。脚本会重建 `out/` 并覆盖旧证据，因此需要保留旧报告时先另存。
 
-手动入口可带查询参数，例如 `?scene=shadow&layout=compact&theme=dark&route=screen:main`。设置页用 `route=screen:settings`，主会话用 `route=agent:agent-main`。所有订阅和令牌操作都针对夹具。
+手动入口可带查询参数，例如 `?scene=shadow&layout=compact&theme=dark&route=screen:main`。主屏幕用 `route=screen:main`，主会话用 `route=agent:agent-main`。所有订阅和令牌操作都针对夹具。
 
 ## 证据与范围
 

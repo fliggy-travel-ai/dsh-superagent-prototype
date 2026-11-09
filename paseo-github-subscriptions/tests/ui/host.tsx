@@ -11,7 +11,7 @@ export interface PreviewOptions {
   scene: Scene;
   layout: 'wide' | 'compact';
   theme: 'light' | 'dark';
-  /** 例如 screen:main、screen:settings、agent:agent-main */
+  /** 例如 screen:main、agent:agent-main */
   route: string;
 }
 
@@ -23,7 +23,6 @@ const themes: Record<'light' | 'dark', MockHostTheme> = {
 
 type Route =
   | { kind: 'screen'; screenId: string; params: Record<string, string> }
-  | { kind: 'settings'; settingsId: string }
   | { kind: 'agent'; agentId: string };
 type Popover = { kind: 'sidebar' | 'pill'; Content: ComponentType<never>; props: Record<string, unknown> } | null;
 
@@ -38,8 +37,6 @@ function parseRoute(text: string): Route {
     }
   }
   if (kind === 'agent' && id) return { kind: 'agent', agentId: id };
-  if (kind === 'settings') return { kind: 'settings', settingsId: id || 'dev-automation' };
-  if (kind === 'screen' && id === 'settings') return { kind: 'settings', settingsId: params.id || 'dev-automation' };
   return { kind: 'screen', screenId: id || 'main', params };
 }
 
@@ -74,9 +71,7 @@ export function createPreview(options: PreviewOptions) {
     },
     rpc: (contract: Parameters<FakeDaemon['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
     openScreen: (input: { screenId: string; params?: Record<string, string> }) => route.set({ kind: 'screen', screenId: input.screenId, params: input.params ?? {} }),
-    openSettings: (id: string) => route.set({ kind: 'settings', settingsId: id }),
     addScreen: (entry: Parameters<Registry['addScreen']>[0]) => registry.addScreen(entry),
-    addSettingsScreen: (entry: Parameters<Registry['addSettingsScreen']>[0]) => registry.addSettingsScreen(entry),
     addSidebarHeaderItem: (entry: Parameters<Registry['addSidebar']>[0]) => registry.addSidebar(entry),
     addCommandCenterItem: (entry: Parameters<Registry['addCommandCenterItem']>[0]) => registry.addCommandCenterItem(entry),
     addComposerPill: (entry: PillEntry) => registry.addPill(entry),
@@ -145,23 +140,6 @@ export function createPreview(options: PreviewOptions) {
             />
           );
         })}
-        {[...registry.settingsScreens.values()].map((entry) => (
-          <Pressable
-            key={entry.id}
-            accessibilityRole="button"
-            accessibilityLabel={`设置 → ${entry.title}`}
-            onPress={() => route.set({ kind: 'settings', settingsId: entry.id })}
-            style={{
-              paddingVertical: 8,
-              paddingHorizontal: 20,
-              backgroundColor: current.kind === 'settings' && current.settingsId === entry.id ? c.surface2 : 'transparent',
-              marginHorizontal: 8,
-              borderRadius: 10,
-            }}
-          >
-            <Text style={text(13)}>设置 → {entry.title}</Text>
-          </Pressable>
-        ))}
         <View style={{ height: 1, backgroundColor: c.border, marginVertical: 8, marginHorizontal: 12 }} />
         <Text style={[text(12, true), { paddingHorizontal: 20, paddingBottom: 4 }]}>已置顶</Text>
         {agents.map((agent) => (
@@ -189,20 +167,6 @@ export function createPreview(options: PreviewOptions) {
           <Screen
             {...hostProps}
             params={current.params}
-            navigation={{ openAgent: ({ agentId }: { agentId: string }) => route.set({ kind: 'agent', agentId }), openWorkspace: () => undefined }}
-          />
-        );
-      }
-    } else if (current.kind === 'settings') {
-      const settingsScreen = registry.settingsScreens.get(current.settingsId);
-      if (!settingsScreen) {
-        body = <Text style={[text(14), { padding: 24 }]}>设置页 {current.settingsId} 不存在</Text>;
-      } else {
-        title = `设置 → ${settingsScreen.title}`;
-        const Screen = settingsScreen.Component as ComponentType<Record<string, unknown>>;
-        body = (
-          <Screen
-            {...hostProps}
             navigation={{ openAgent: ({ agentId }: { agentId: string }) => route.set({ kind: 'agent', agentId }), openWorkspace: () => undefined }}
           />
         );

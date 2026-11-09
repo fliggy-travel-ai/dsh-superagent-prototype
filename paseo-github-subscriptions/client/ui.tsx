@@ -22,7 +22,6 @@ export interface Env {
   store: SnapshotStore;
   control: ControlStore;
   openScreen(input: { screenId: string; params?: Record<string, string> }): void;
-  openSettings?(id: string): void;
 }
 
 interface UiValue extends Env {

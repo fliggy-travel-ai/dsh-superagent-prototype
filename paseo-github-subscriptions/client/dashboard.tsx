@@ -72,6 +72,29 @@ const NAV_ITEMS: readonly { id: PageId; num: string; label: string }[] = [
   { id: 'todo', num: '4', label: '待办总览' },
 ];
 
+function isModuleOff(
+  id: string,
+  machineSettings: { modules: ReadonlyArray<{ id: string; enabled: boolean; state: string }> } | null,
+  modules: { modules: ReadonlyArray<{ id: string; state: string }> } | null,
+): boolean {
+  const msMod = machineSettings?.modules.find(m => m.id === id);
+  if (msMod) return !msMod.enabled || msMod.state === 'off';
+  const liveMod = modules?.modules.find(m => m.id === id);
+  if (liveMod) return liveMod.state === 'off';
+  return false;
+}
+
+function ModuleOffHint({ onOpenMachineConfig }: { onOpenMachineConfig(): void }) {
+  const { s } = useUi();
+  return (
+    <>
+      <Chip label="未启用" tone="neutral" />
+      <Text style={s.small}>模块未启用，在本机配置中开启，重载后生效</Text>
+      <Btn small label="去本机配置开启" onPress={onOpenMachineConfig} />
+    </>
+  );
+}
+
 function ProvidersPage({
   onOpenDrawer,
 }: {
@@ -95,19 +118,45 @@ function ProvidersPage({
     antigravityError,
     machineSettings,
     machineSettingsError,
+    modules,
     todo,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupResult, setBackupResult] = useState<{ backupPath: string; files: string[] } | null>(null);
+
+  const configPath =
+    machineSettings?.configPath ?? modules?.config.path ?? '~/.paseo/github-subscriptions/machine.json';
+  const hostLabel = machineSettings?.machine ?? (modules?.instance.role === 'provider' ? 'Provider 实例' : '本机');
+  const configErrors = machineSettings?.errors ?? modules?.config.errors ?? [];
+
+  const runBackup = async () => {
+    setBackupBusy(true);
+    setActionError(null);
+    try {
+      const res = await control.exportBackup();
+      setBackupResult({ backupPath: res.backupPath, files: res.files });
+    } catch (e) {
+      setActionError(errorMessage(e));
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   const pausedAll = machineSettings?.pausedAll ?? false;
   const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
   const claudeAccountsDisabled =
-    claudeAccountsStatus === 'disabled' || Boolean(claudeAccounts && !claudeAccounts.enabled);
+    isModuleOff('usage.claudeAccounts', machineSettings, modules) ||
+    claudeAccountsStatus === 'disabled' ||
+    Boolean(claudeAccounts && !claudeAccounts.enabled);
   const claudeQuotaDisabled =
     claudeAccountsDisabled || Boolean(claudeAccounts && !claudeAccounts.quotaName.enabled);
+  const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
+  const defaultsModOff = isModuleOff('providers.defaults', machineSettings, modules);
+  const agModOff = isModuleOff('providers.antigravity', machineSettings, modules);
   const accounts = claudeAccounts?.accounts ?? [];
-  const reloginAccounts = accounts.filter(acc => acc.needsRelogin);
+  const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
   const lowestClaudePct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
 
@@ -121,6 +170,7 @@ function ProvidersPage({
   const agCount = antigravity?.accounts.length ?? 0;
   const agRunningSessions = antigravity?.runningSessionsCount ?? 0;
   const showAntigravityCard =
+    agModOff ||
     antigravityStatus === 'error' ||
     Boolean(antigravityError) ||
     (antigravityStatus === 'ready' && Boolean(antigravity?.enabled || agCount > 0));
@@ -204,10 +254,7 @@ function ProvidersPage({
                 <Text style={s.small}>读取失败：{claudeError ?? '无法读取账号状态'}</Text>
               </>
             ) : claudeAccountsDisabled ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
             ) : !claudeAccounts ? (
               <Text style={s.small}>正在读取…</Text>
             ) : (
@@ -221,7 +268,12 @@ function ProvidersPage({
               </>
             )
           }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('claude-accounts')} />}
+          actions={
+            <>
+              <Btn small primary label="添加账号" onPress={() => onOpenDrawer('add-claude')} />
+              <Btn small label="编辑" onPress={() => onOpenDrawer('claude-accounts')} />
+            </>
+          }
         />
 
         <FeatureCard
@@ -229,8 +281,8 @@ function ProvidersPage({
           trailing={
             <Switch
               accessibilityLabel="启用网页版 claude.ai"
-              disabled={!browser}
-              value={browser?.settings.enabled ?? false}
+              disabled={!browser || browserModOff}
+              value={!browserModOff && (browser?.settings.enabled ?? false)}
               onValueChange={enabled => {
                 if (!browser) return;
                 void control
@@ -243,7 +295,9 @@ function ProvidersPage({
           }
           description="连接 AdsPower 浏览器扩展，自动点击 Allow once 并把网页提问转到 Paseo。"
           kv={
-            browserError ? (
+            browserModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+            ) : browserError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
                 <Text style={s.small}>读取失败：{browserError}</Text>
@@ -278,10 +332,7 @@ function ProvidersPage({
                 <Text style={s.small}>读取失败：{claudeError ?? '无法读取额度状态'}</Text>
               </>
             ) : claudeQuotaDisabled ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
             ) : !claudeAccounts ? (
               <Text style={s.small}>正在读取…</Text>
             ) : (
@@ -313,6 +364,11 @@ function ProvidersPage({
               <Text style={s.small}>读取失败：{defaultsError ?? defaults?.error}</Text>
             ) : !defaults ? (
               <Text style={s.small}>正在读取…</Text>
+            ) : defaultsModOff && !defaults.enabled ? (
+              <>
+                <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+                <Text style={s.small}>{defaults.rules.length} 条规则</Text>
+              </>
             ) : (
               <Text style={s.small}>{defaults.rules.length} 条规则</Text>
             )
@@ -379,6 +435,8 @@ function ProvidersPage({
             trailing={
               antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
                 <Chip label="读取失败" tone="danger" />
+              ) : agModOff ? (
+                <Chip label="未启用" tone="neutral" />
               ) : (
                 <Chip
                   label={antigravity?.reloadRequired ? '待重载' : '运行中'}
@@ -386,10 +444,15 @@ function ProvidersPage({
                 />
               )
             }
-            description="多账号轮换与模型剩余额度。"
+            description="多个 Antigravity 账号分别作为 Provider。"
             kv={
               antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
-                <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
+                <>
+                  <Chip label="读取失败" tone="danger" />
+                  <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
+                </>
+              ) : agModOff ? (
+                <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
               ) : (
                 <>
                   <Text style={s.small}>{agCount} 个账号</Text>
@@ -400,6 +463,36 @@ function ProvidersPage({
             actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
           />
         ) : null}
+
+        <FeatureCard
+          title="本机配置"
+          trailing={<Chip label={hostLabel} tone="neutral" />}
+          description="查看本机配置文件路径与格式校验结果，导出本机配置备份。"
+          kv={
+            <>
+              <Text style={s.mono}>{configPath}</Text>
+              {configErrors.length > 0 ? (
+                <>
+                  <Chip label={`${configErrors.length} 项校验错误`} tone="danger" />
+                  <Text style={s.small}>{configErrors.join('；')}</Text>
+                </>
+              ) : (
+                <Chip label="校验通过" tone="success" />
+              )}
+              {backupResult ? (
+                <Text style={s.small}>
+                  已导出 {backupResult.files.length} 个文件至 {backupResult.backupPath}
+                </Text>
+              ) : null}
+            </>
+          }
+          actions={
+            <>
+              <Btn small label="导出配置备份" busy={backupBusy} onPress={() => void runBackup()} />
+              <Btn small label="编辑" onPress={() => onOpenDrawer('machine-config')} />
+            </>
+          }
+        />
       </View>
     </View>
   );
@@ -418,8 +511,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     quiet,
     quietStatus,
     quietError,
+    machineSettings,
+    modules,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const presenceModOff = isModuleOff('answer.presence', machineSettings, modules);
+  const autoModOff = isModuleOff('answer.automation', machineSettings, modules);
+  const escModOff = isModuleOff('answer.escalation', machineSettings, modules) || escalationStatus === 'disabled';
+  const quietModOff = isModuleOff('answer.quietChildren', machineSettings, modules) || quietStatus === 'disabled';
 
   const settings = presence?.settings ?? null;
   const observedMode = presence?.observation.mode ?? 'unknown';
@@ -448,7 +548,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         </Notice>
       ) : null}
 
-      {escalationError || escalation?.error ? (
+      {!escModOff && (escalationError || escalation?.error) ? (
         <Notice tone="danger">
           <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
             <Text style={s.text}>升级通知异常：{escalationError ?? escalation?.error}</Text>
@@ -461,7 +561,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="问答模式"
           trailing={
-            settings ? (
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : settings ? (
               <Segmented
                 options={[
                   { value: 'online', label: '在线' },
@@ -484,7 +586,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="会话向你提问时，等待本人回答或自动选推荐项。"
           kv={
-            presenceError ? (
+            presenceModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+            ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence || !settings ? (
               <Text style={s.small}>正在读取…</Text>
@@ -510,7 +614,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="蓝牙在场判定"
           trailing={
-            presenceError ? (
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : presenceError ? (
               <Chip label="读取失败" tone="danger" />
             ) : !presence ? (
               <Chip label="正在读取" tone="neutral" />
@@ -523,7 +629,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="按随身蓝牙设备是否在场，自动切换在线或离线。"
           kv={
-            presenceError ? (
+            presenceModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+            ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence || !settings ? (
               <Text style={s.small}>正在读取…</Text>
@@ -544,8 +652,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="升级通知"
-              disabled={!escalation || escalationStatus !== 'ready'}
-              value={escalation?.enabled ?? false}
+              disabled={escModOff || !escalation || escalationStatus !== 'ready'}
+              value={!escModOff && (escalation?.enabled ?? false)}
               onValueChange={enabled =>
                 void control.configureEscalation({ enabled }).catch(e => setActionError(errorMessage(e)))
               }
@@ -555,11 +663,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
           kv={
-            escalationStatus === 'disabled' ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+            escModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
             ) : escalationStatus === 'error' || escalationError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -582,8 +687,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="子会话免提醒"
-              disabled={!quiet || quietStatus !== 'ready'}
-              value={quiet?.enabled ?? false}
+              disabled={quietModOff || !quiet || quietStatus !== 'ready'}
+              value={!quietModOff && (quiet?.enabled ?? false)}
               onValueChange={enabled =>
                 void control.configureQuiet({ enabled }).catch(e => setActionError(errorMessage(e)))
               }
@@ -593,11 +698,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="子会话和未置顶工作区的会话不直接提醒你，异常归并到主会话。"
           kv={
-            quietStatus === 'disabled' ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+            quietModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
             ) : quietStatus === 'error' || quietError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -617,10 +719,10 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="语音提醒"
-              disabled={!settings}
-              value={settings?.speechEnabled ?? false}
+              disabled={!settings || presenceModOff}
+              value={!presenceModOff && (settings?.speechEnabled ?? false)}
               onValueChange={speechEnabled => {
-                if (!settings) return;
+                if (!settings || presenceModOff) return;
                 void control
                   .configurePresence({ ...settings, speechEnabled })
                   .catch(e => setActionError(errorMessage(e)));
@@ -631,7 +733,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="判定在线时，用语音播报新提问和停滞的主会话。"
           kv={
-            presenceError ? (
+            presenceModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+            ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence ? (
               <Text style={s.small}>正在读取…</Text>
@@ -645,7 +749,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="精确授权"
           trailing={
-            automationError ? (
+            autoModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : automationError ? (
               <Chip label="读取失败" tone="danger" />
             ) : !automation ? (
               <Chip label="正在读取" tone="neutral" />
@@ -655,7 +761,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="跨重启保留的单会话命令和工作区路径白名单。"
           kv={
-            automationError ? (
+            autoModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+            ) : automationError ? (
               <Text style={s.small}>读取失败：{automationError}</Text>
             ) : !automation ? (
               <Text style={s.small}>正在读取…</Text>
@@ -671,10 +779,12 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 }
 
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
-  const { s, store, openSettings, theme } = useUi();
+  const { s, store, theme } = useUi();
   const { snapshot, error } = useStoreState();
+  const { machineSettings, modules } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const githubModOff = isModuleOff('github', machineSettings, modules);
   const prefs = snapshot?.preferences ?? null;
   const repoCount = snapshot?.repositories.length ?? 0;
 
@@ -688,18 +798,16 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         </Notice>
       ) : null}
 
-      {snapshot && !snapshot.token.configured ? (
+      {!githubModOff && snapshot && !snapshot.token.configured ? (
         <Notice tone="warning">
           <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
             <Text style={s.text}>未保存 GitHub 令牌，无法轮询事件。</Text>
-            {openSettings ? (
-              <Btn small label="去设置填写" onPress={() => openSettings('dev-automation')} />
-            ) : null}
+            <Btn small label="去编辑面板填写" onPress={() => onOpenDrawer('github-config')} />
           </View>
         </Notice>
       ) : null}
 
-      {error || snapshot?.error ? (
+      {!githubModOff && (error || snapshot?.error) ? (
         <Notice tone="danger">
           <Text style={s.text}>{error ?? snapshot?.error}</Text>
         </Notice>
@@ -711,8 +819,8 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="启用 GitHub 监听"
-              disabled={!prefs}
-              value={prefs?.enabled ?? false}
+              disabled={!prefs || githubModOff}
+              value={!githubModOff && (prefs?.enabled ?? false)}
               onValueChange={enabled => {
                 if (!prefs) return;
                 void store
@@ -725,7 +833,9 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="轮询已订阅的仓库与 PR，把新事件直接发到对应会话。"
           kv={
-            error ? (
+            githubModOff ? (
+              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+            ) : error ? (
               <>
                 <Chip label="读取失败" tone="danger" />
                 <Text style={s.small}>读取失败：{error}</Text>
@@ -1102,7 +1212,7 @@ function TodoPage() {
 }
 
 export function MainScreen(props: PluginScreenProps) {
-  const { s, theme, compact, openSettings } = useUi();
+  const { s, theme, compact } = useUi();
   const storeState = useStoreState();
   const controlState = useControlState();
 
@@ -1214,13 +1324,8 @@ export function MainScreen(props: PluginScreenProps) {
             }}
           >
             <Text style={s.small}>
-              启停 Provider、模型、额度在 Paseo 设置和额度面板。令牌和 API key 在 设置 → 开发自动化。
+              启停 Provider、模型、额度在 Paseo 设置和额度面板。令牌、API key 与 Webhook 凭据在对应卡片的编辑面板配置。
             </Text>
-            {openSettings ? (
-              <Pressable onPress={() => openSettings('dev-automation')}>
-                <Text style={{ color: theme.colors.accent, fontSize: 12 }}>打开设置 → 开发自动化 ›</Text>
-              </Pressable>
-            ) : null}
           </View>
         ) : null}
       </View>

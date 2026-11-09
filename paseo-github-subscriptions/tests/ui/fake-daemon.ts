@@ -24,7 +24,7 @@ export interface RpcLogEntry {
 
 /** 内存里的假守护进程：用真实合约的 Zod 校验输入和输出。 */
 export class FakeDaemon {
-  automation = makeAutomation();
+  automation = { ...makeAutomation(), paused: false };
   browser = {
     ...makeBrowser(),
     settings: { enabled: true, port: 17373 },
@@ -39,7 +39,7 @@ export class FakeDaemon {
   adspowerApiKeyConfigured = false;
   state: Snapshot;
   defaults: DefaultsSnapshot = {
-    enabled: true,
+    enabled: false,
     error: null,
     rules: [
       { provider: 'claude*', apply: 'missing', modeId: 'bypassPermissions', features: { effort: 'xhigh' }, enabled: true },
@@ -90,7 +90,7 @@ export class FakeDaemon {
     error: null,
   };
   antigravity: AntigravitySnapshot = {
-    enabled: true,
+    enabled: false,
     runningSessionsCount: 1,
     reloadRequired: false,
     error: null,
@@ -100,8 +100,8 @@ export class FakeDaemon {
     ],
   };
   escalation: EscalationSnapshot = {
-    enabled: true,
-    status: 'running',
+    enabled: false,
+    status: 'stopped',
     error: null,
     delivery: 'live',
     timezone: 'Asia/Singapore',
@@ -139,7 +139,7 @@ export class FakeDaemon {
     ],
   };
   quiet: QuietSnapshot = {
-    enabled: true,
+    enabled: false,
     forwardEvents: true,
     pinnedWorkspaceCount: 3,
     pinnedWorkspaces: [
@@ -168,16 +168,17 @@ export class FakeDaemon {
     errors: [],
     pausedAll: false,
     modules: [
-      { id: 'providers.defaults', label: '新建会话默认设置', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.automation', label: '精确授权', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.browser', label: '网页版 claude.ai', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.escalation', label: '升级通知', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.quietChildren', label: '子会话免提醒', enabled: true, state: 'running', reloadRequired: false },
+      { id: 'providers.defaults', label: '新建会话默认设置', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'answer.automation', label: '精确授权', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'answer.browser', label: '网页版 claude.ai', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'answer.escalation', label: '升级通知', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'answer.quietChildren', label: '子会话免提醒', enabled: false, state: 'off', reloadRequired: true },
       { id: 'usage.claudeAccounts', label: 'Claude 账号与额度', enabled: true, state: 'running', reloadRequired: true },
-      { id: 'providers.antigravity', label: 'Antigravity 多账号', enabled: true, state: 'running', reloadRequired: true },
-      { id: 'github', label: 'GitHub 订阅', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'todo', label: '待办汇总', enabled: true, state: 'running', reloadRequired: false },
+      { id: 'usage.providerQuotas', label: '其他 Provider 额度', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'providers.antigravity', label: 'Antigravity 多账号', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'github', label: 'GitHub 订阅', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'todo.stalled', label: '停滞会话检查', enabled: true, state: 'running', reloadRequired: true },
     ],
   };
   todo: TodoMergedSnapshot = {
@@ -302,6 +303,15 @@ export class FakeDaemon {
     return contract.output.parse(this.handle(contract.name, parsed)) as O;
   }
 
+  private setModuleState(id: string, enabled: boolean): void {
+    this.machineSettings = {
+      ...this.machineSettings,
+      modules: this.machineSettings.modules.map(m =>
+        m.id === id ? { ...m, enabled, state: enabled ? 'running' : 'off' } : m,
+      ),
+    };
+  }
+
   private handle(name: string, input: Record<string, unknown>): unknown {
     switch (name) {
       case 'modules.status':
@@ -315,12 +325,7 @@ export class FakeDaemon {
       case 'machine.settings.toggle-module': {
         const id = String(input.id);
         const enabled = Boolean(input.enabled);
-        this.machineSettings = {
-          ...this.machineSettings,
-          modules: this.machineSettings.modules.map(m =>
-            m.id === id ? { ...m, enabled, state: enabled ? 'running' : 'off' } : m,
-          ),
-        };
+        this.setModuleState(id, enabled);
         return this.machineSettings;
       }
       case 'machine.settings.pause-all':
@@ -466,7 +471,7 @@ export class FakeDaemon {
         return this.antigravity;
       case 'provider-quotas.snapshot':
         return {
-          enabled: true,
+          enabled: Boolean(this.machineSettings.modules.find(m => m.id === 'usage.providerQuotas')?.enabled),
           enabledSources: ['antigravity', 'codex-multi', 'qoder', 'glm'],
           hideBuiltin: ['codex', 'grok', 'cursor', 'kimi', 'zai'],
           hideBuiltinApplied: false,
@@ -489,7 +494,7 @@ export class FakeDaemon {
       case 'escalation.configure':
         this.escalation = {
           ...this.escalation,
-          ...(input.enabled !== undefined ? { enabled: Boolean(input.enabled) } : {}),
+          ...(input.enabled !== undefined ? { enabled: Boolean(input.enabled), status: input.enabled ? 'running' : 'stopped' } : {}),
           ...(input.delivery !== undefined ? { delivery: input.delivery as 'shadow' | 'live' } : {}),
           ...(input.timezone !== undefined ? { timezone: String(input.timezone) } : {}),
           ...(Array.isArray(input.immediate) ? { immediate: input.immediate as EscalationWindow[] } : {}),
@@ -544,19 +549,31 @@ export class FakeDaemon {
         return { name: String((input.target as { name?: string })?.name ?? '随身手机'), address: null, revision: 'rev-2' };
       case 'todos.stalled':
         return { sessions: [], error: null };
-      case 'automation.snapshot': return this.automation;
-      case 'automation.pause': this.automation = { ...this.automation, paused: Boolean(input.paused) }; return this.automation;
+      case 'automation.snapshot':
+        return this.automation;
+      case 'automation.pause':
+        this.automation = { ...this.automation, paused: Boolean(input.paused) };
+        return this.automation;
       case 'automation.policy': {
         const policy = input as unknown as SessionPolicy;
         this.automation = { ...this.automation, policies: [...this.automation.policies.filter(item => item.agentId !== policy.agentId), policy] };
         return this.automation;
       }
-      case 'browser.snapshot': return this.browser;
-      case 'browser.configure': this.browser = { ...this.browser, settings: input as unknown as BrowserSettings, connected: Boolean(input.enabled) }; return this.browser;
-      case 'browser.pairing': return { url: `http://127.0.0.1:${this.browser.settings.port}/sync`, token: '演示配对令牌，无实际权限' };
-      case 'browser.usage.snapshot': return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
-      case 'browser.usage.save_api_key': this.adspowerApiKeyConfigured = Boolean(String(input.apiKey ?? '').trim()); return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
-      case 'browser.usage.remove_api_key': this.adspowerApiKeyConfigured = false; return { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' };
+      case 'browser.snapshot':
+        return this.browser;
+      case 'browser.configure':
+        this.browser = { ...this.browser, settings: input as unknown as BrowserSettings, connected: Boolean(input.enabled) };
+        return this.browser;
+      case 'browser.pairing':
+        return { url: `http://127.0.0.1:${this.browser.settings.port}/sync`, token: '演示配对令牌，无实际权限' };
+      case 'browser.usage.snapshot':
+        return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
+      case 'browser.usage.save_api_key':
+        this.adspowerApiKeyConfigured = Boolean(String(input.apiKey ?? '').trim());
+        return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
+      case 'browser.usage.remove_api_key':
+        this.adspowerApiKeyConfigured = false;
+        return { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' };
       case 'browser.bind': {
         const binding = input as unknown as BrowserBindingInput;
         this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),
