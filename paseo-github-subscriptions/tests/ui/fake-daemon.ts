@@ -88,6 +88,7 @@ export class FakeDaemon {
     },
     error: null,
   };
+  bluetoothTarget: { name: string; address: string | null; revision: string } = { name: '随身手机', address: 'AA:BB:CC:DD:EE:01', revision: 'rev-1' };
   antigravity: AntigravitySnapshot = {
     enabled: false,
     runningSessionsCount: 1,
@@ -501,15 +502,18 @@ export class FakeDaemon {
         return this.presence;
       case 'bluetooth.list':
         return {
-          target: { name: '随身手机', address: 'AA:BB:CC:DD:EE:01', revision: 'rev-1' },
+          target: this.bluetoothTarget,
           devices: [
             { name: '随身手机', address: 'AA:BB:CC:DD:EE:01', connected: true, rssi: -52 },
             { name: '降噪耳机', address: 'AA:BB:CC:DD:EE:02', connected: false, rssi: null },
           ],
           error: null,
         };
-      case 'bluetooth.select':
-        return { name: String((input.target as { name?: string })?.name ?? '随身手机'), address: null, revision: 'rev-2' };
+      case 'bluetooth.select': {
+        const target = input.target as { name?: string; address?: string | null } | undefined;
+        this.bluetoothTarget = { name: String(target?.name ?? '随身手机'), address: target?.address ?? null, revision: `rev-${Number(this.bluetoothTarget.revision.slice(4)) + 1}` };
+        return this.bluetoothTarget;
+      }
       case 'todos.stalled':
         return { sessions: [], error: null };
       case 'automation.snapshot':

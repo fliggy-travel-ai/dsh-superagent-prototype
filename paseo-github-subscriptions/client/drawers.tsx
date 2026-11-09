@@ -1,5 +1,5 @@
 import { useToast } from '@getpaseo/plugin/client/ui';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { BluetoothSnapshot } from '../shared/bluetooth.ts';
 import type { BrowserUsageSettings } from '../shared/browser-usage.ts';
@@ -836,29 +836,62 @@ function QaModeDrawer() {
 }
 
 function BluetoothDrawer() {
-  const { s, control } = useUi();
+  const { s, control, theme } = useUi();
   const { presence, presenceError } = useControlState();
   const settings = presence?.settings ?? null;
-  const [devices, setDevices] = useState<BluetoothDevice[]>([]);
+  const hostId = settings?.sourceHostId ?? null;
+  const [snapshot, setSnapshot] = useState<BluetoothSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const generation = useRef(0);
 
-  const loadDevices = async (hostId: string | null) => {
+  const loadDevices = async (target: string | null) => {
+    const version = ++generation.current;
     setLoading(true);
+    setError(null);
     try {
-      const res = await control.bluetoothDevices(hostId);
-      setDevices(res.devices);
-    } catch {
-      setDevices([]);
+      const res = await control.bluetoothDevices(target);
+      if (version !== generation.current) return;
+      setSnapshot(res);
+      setError(res.error);
+    } catch (failure) {
+      if (version === generation.current) setError(`设备读取失败：${errorMessage(failure)}`);
     } finally {
-      setLoading(false);
+      if (version === generation.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadDevices(settings?.sourceHostId ?? null);
-  }, [settings?.sourceHostId]);
+    setSnapshot(null);
+    setMessage(null);
+    void loadDevices(hostId);
+  }, [hostId]);
+
+  const choose = async (device: BluetoothDevice) => {
+    const version = ++generation.current;
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const saved = await control.selectBluetooth(hostId, { name: device.name, address: device.address });
+      if (version !== generation.current) return;
+      setSnapshot(previous => ({ target: saved, devices: previous?.devices ?? [], error: null }));
+      setMessage(`锚定设备已修改为“${saved.name}”，等待来源主机重新判定在场。`);
+    } catch (failure) {
+      if (version === generation.current) setError(`保存失败：${errorMessage(failure)}`);
+    } finally {
+      if (version === generation.current) setSaving(false);
+    }
+  };
 
   const hosts = presence?.hosts ?? [];
+  const target = snapshot?.target ?? null;
+  const isAnchor = (device: BluetoothDevice) =>
+    Boolean(target) && (target!.address ? device.address === target!.address : device.address === null && device.name === target!.name);
+  const devices = snapshot?.devices ?? [];
+  const detected = devices.some(isAnchor);
 
   return (
     <View style={{ gap: 12 }}>
@@ -898,8 +931,14 @@ function BluetoothDrawer() {
 
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <SectionTitle>锚定设备</SectionTitle>
-        <Btn small label="刷新设备" busy={loading} onPress={() => void loadDevices(settings?.sourceHostId ?? null)} />
+        <Btn small label="刷新设备" busy={loading} disabled={saving} onPress={() => void loadDevices(hostId)} />
       </View>
+      <View style={s.wrap}>
+        <Text style={s.strong}>当前锚定设备：{target?.name ?? (loading ? '读取中…' : '暂未读取')}</Text>
+        {snapshot ? <Chip label={detected ? '已发现' : '未发现'} tone={detected ? 'success' : 'warning'} /> : null}
+      </View>
+      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
+      {message ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{message}</Text> : null}
       {devices.length === 0 ? (
         <Text style={s.small}>
           {presenceError
@@ -911,20 +950,26 @@ function BluetoothDrawer() {
       ) : (
         devices.map(dev => (
           <View key={`${dev.name}-${dev.address ?? ''}`} style={[s.row, { justifyContent: 'space-between' }]}>
-            <Text style={s.text}>
-              {dev.name} {dev.connected ? '（已连接）' : '（未连接）'}
-            </Text>
-            <Btn
-              small
-              label="设为锚定设备"
-              onPress={() => void control.selectBluetooth(settings?.sourceHostId ?? null, { name: dev.name, address: dev.address })}
-            />
+            <View style={{ flexShrink: 1 }}>
+              <Text style={s.text}>
+                {dev.name}
+                {dev.address ? ` · ${dev.address.slice(-8)}` : ''}
+              </Text>
+              <Text style={s.small}>
+                {dev.connected ? '已连接' : '未连接'} · {dev.rssi === null ? '暂无信号强度' : `信号 ${dev.rssi} dBm`}
+              </Text>
+            </View>
+            {isAnchor(dev) ? (
+              <Btn small label="已锚定" disabled onPress={() => {}} />
+            ) : (
+              <Btn small label="设为锚定设备" busy={saving} disabled={saving || loading} onPress={() => void choose(dev)} />
+            )}
           </View>
         ))
       )}
 
       <RuleNote>
-        两台主机任一检测到设备在场即判为在线；两台都确认离开（连续 2 次扫描未见或信号低于阈值）才判为离线；任一主机未知且无在场主机时判为未知（按在线处理）。
+        按信号强度判定在场，不要求设备处于“已连接”状态；手机通常显示“未连接”但有信号强度。两台主机任一检测到设备在场即判为在线；两台都确认离开（连续 2 次扫描未见或信号低于阈值）才判为离线；任一主机未知且无在场主机时判为未知（按在线处理）。
       </RuleNote>
     </View>
   );

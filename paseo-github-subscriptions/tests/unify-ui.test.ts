@@ -238,6 +238,9 @@ function createTestRenderer() {
           return [states[idx], setState];
         },
         useEffect() {},
+        useRef(init: unknown) {
+          return customDispatcher.useState(() => ({ current: init }))[0];
+        },
         useMemo(fn: () => unknown) {
           return fn();
         },
@@ -1406,4 +1409,73 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
   );
   const orgInputAfterPoll = findNodes(tree, el => el.props.accessibilityLabel === 'GitHub 组织')[0];
   assert.equal(orgInputAfterPoll?.props.value, 'my-editing-org', '轮询更新 snapshot 引用不应重置正在编辑的 GitHub 配置草稿');
+});
+
+test('蓝牙在场判定：显示当前锚定设备和信号强度，“设为锚定设备”保存后更新并提示，失败时显示原因', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
+  const { bind } = await import('../client/ui.tsx');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+  const mockTheme = {
+    colors: {
+      surface0: '#151517', surface1: '#1c1c1f', surface2: '#2b2b2f', border: '#303035', foreground: '#ececef', foregroundMuted: '#8e8e95',
+      accent: '#5b8cff', accentForeground: '#ffffff', statusSuccess: '#4cc274', statusWarning: '#e3a33b', statusDanger: '#ff6b66',
+    },
+  };
+  const daemon = new FakeDaemon('shadow');
+  daemon.latencyMs = 0;
+  const selects: unknown[] = [];
+  let failSelect: string | null = null;
+  const origRpc = daemon.rpc.bind(daemon);
+  daemon.rpc = async <I, O>(contract: { name: string }, input: I): Promise<O> => {
+    if (contract.name === 'bluetooth.select') {
+      selects.push(input);
+      if (failSelect) throw new Error(failSelect);
+    }
+    return origRpc(contract as never, input);
+  };
+  const control = createControlStore(daemon as never, { list: async () => ({ entries: [], pageInfo: { hasMore: false } }) } as never);
+  await Promise.all([control.refresh(), control.refreshUnify()]);
+  const Bound = bind(
+    { store: { subscribe: () => () => {}, getState: () => ({ snapshot: daemon.state, error: null, loaded: true }) } as never, control, openScreen: () => {} },
+    MainScreen,
+  );
+  const renderer = createTestRenderer();
+  const render = () => renderer.render(() =>
+    React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer', drawer: 'bluetooth' } } as never),
+  );
+  const press = (tree: RenderedNode, label: string, index = 0) => {
+    const node = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === label)[index];
+    assert.ok(node, `找不到按钮：${label}`);
+    (node.props.onPress as () => void)();
+  };
+  let tree = render();
+  press(tree, '刷新设备');
+  await tick();
+  tree = render();
+  let text = collectText(tree);
+  assert.match(text, /当前锚定设备：随身手机/);
+  assert.match(text, /-52 dBm/);
+  const anchored = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '已锚定');
+  assert.equal(anchored.length, 1, '当前锚定设备那一行应显示“已锚定”');
+  assert.equal(anchored[0]!.props.disabled, true);
+  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '设为锚定设备').length, 1);
+
+  press(tree, '设为锚定设备');
+  await tick();
+  tree = render();
+  text = collectText(tree);
+  assert.deepEqual((selects[0] as { target: unknown }).target, { name: '降噪耳机', address: 'AA:BB:CC:DD:EE:02' });
+  assert.match(text, /当前锚定设备：降噪耳机/);
+  assert.match(text, /锚定设备已修改/);
+
+  failSelect = '来源主机已变化，请刷新';
+  press(tree, '设为锚定设备');
+  await tick();
+  tree = render();
+  text = collectText(tree);
+  assert.match(text, /来源主机已变化，请刷新/);
 });
