@@ -1,4 +1,6 @@
+import { join } from 'node:path';
 import { registerCloudSession, createCloudSession, redactError } from '../../cloud-session/index.ts';
+import { fileRequestStore } from '../../cloud-session/request-store.ts';
 import type { AnswerWebRequest, ResolveWebRequest } from '../../../shared/web-request.ts';
 import { cloudBridgeAnswer, cloudBridgeConfirm } from '../../../shared/cloud-bridge.ts';
 import { providersInstanceStatus } from '../../../shared/provider-instance.ts';
@@ -31,7 +33,8 @@ export const cloudSessionModule: Module = {
       answerWebRequest = async request => cloudBridgeAnswer.output.parse(await invoke(cloudBridgeAnswer.name, request));
       resolveWebRequest = input => { void invoke(cloudBridgeConfirm.name, input).catch(error => console.error('云端会话确认网页请求失败：', redactError(error))); };
     }
-    const instance = createCloudSession(undefined, answerWebRequest, resolveWebRequest);
+    // 请求表和墓碑落盘；重载后从 daemon 读回存量待批请求（#1737 评论 6734539343）。
+    const instance = createCloudSession(undefined, answerWebRequest, resolveWebRequest, { store: fileRequestStore(join(context.stateDirectory, 'cloud-requests.json')), importFromDaemon: true });
     if (context.instance.legacy) {
       context.server.handle(providersInstanceStatus, async () => {
         const cloudStatus = instance.status();
