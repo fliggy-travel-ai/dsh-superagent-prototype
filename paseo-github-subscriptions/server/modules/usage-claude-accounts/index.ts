@@ -9,7 +9,7 @@ import { isMainInstance, type Module } from '../types.ts';
 import { APPLE_SUFFIX, isAppleRelay, listAccounts } from './accounts.ts';
 import { CLAUDE_ACCOUNTS_FALLBACK, ClaudeAccountsSectionSchema, QuotaSettingsSchema, quotaDefaults, type ClaudeAccountsSection } from './config.ts';
 import { ContinuousUsage } from './continuous-usage.ts';
-import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from './config-writer.ts';
+import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../../core/provider-config.ts';
 import { baseLabel, withQuota } from './labels.ts';
 import { readLabels, setLabel } from './labels-file.ts';
 import { ensureConfigDirectory, LoginFlows, readAuthStatus } from './login.ts';

@@ -8,6 +8,8 @@ import { MainServices } from './server/core/services.ts';
 import { loadMachineConfig, type SectionSpec } from './server/core/machine-config.ts';
 import { startModules } from './server/core/modules.ts';
 import { MODULES } from './server/modules/index.ts';
+import { registerAntigravityRpcs } from './server/modules/providers-antigravity/index.ts';
+import { registerProviderQuotasRpcs } from './server/modules/usage-provider-quotas/index.ts';
 
 /**
  * 开发自动化插件服务端入口。实例角色见 shared/instance.ts，模块见 server/modules/index.ts。
@@ -25,7 +27,12 @@ export default function contribute(server: PluginServerContext) {
 
   const daemon = new SharedDaemon(home);
   const main = instance.role === 'main' ? new MainServices(stateDirectory, daemon) : null;
-  const host = startModules(MODULES, { server, instance, machine, services: { home, daemon, main }, stateDirectory, baseDirectory });
+  const services = { home, daemon, main };
+  if (instance.role === 'main') {
+    registerAntigravityRpcs({ server, machinePath: machine.path, services });
+    registerProviderQuotasRpcs({ server, machinePath: machine.path, services });
+  }
+  const host = startModules(MODULES, { server, instance, machine, services, stateDirectory, baseDirectory });
 
   return async () => {
     await host.dispose();

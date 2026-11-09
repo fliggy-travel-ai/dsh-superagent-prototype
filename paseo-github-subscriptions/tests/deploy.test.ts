@@ -23,7 +23,7 @@ test('角色文件可以写入和读回，读不到时按兼容模式', () => {
 });
 
 test('各角色托管的 Provider：兼容模式托管云端会话，main 不托管', () => {
-  assert.deepEqual(providersHostedBy(null), ['cloud-session']);
+  assert.deepEqual(providersHostedBy(null), ['cloud-session', 'antigravity-*']);
   assert.deepEqual(providersHostedBy('main'), []);
   assert.deepEqual(providersHostedBy('provider'), ['cloud-session', 'antigravity-*']);
   assert.equal(pluginIdFor('main'), 'github-subscriptions');

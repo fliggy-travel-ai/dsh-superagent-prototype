@@ -20,6 +20,7 @@ const TOKEN_RULES: { kind: string; pattern: RegExp }[] = [
   { kind: 'API 密钥', pattern: /\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}/g },
   { kind: 'Slack 令牌', pattern: /\bxox[abpr]-[A-Za-z0-9-]{10,}/g },
   { kind: 'AWS 密钥', pattern: /\bAKIA[0-9A-Z]{16}\b/g },
+  { kind: 'Google OAuth 密钥', pattern: /\b(?:GOCSPX-[A-Za-z0-9_-]{16,}|[0-9]{10,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com)\b/g },
 ];
 const EMAIL = /[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})/g;
 const URL_PATTERN = /https?:\/\/([^/\s"'`)<>]+)([^\s"'`)<>]*)/g;

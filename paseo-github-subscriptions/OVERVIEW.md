@@ -92,3 +92,32 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 | `subsession-quiet` | `answer.quietChildren` | 本机副本 0.0.0 |
 | `event-notifications` | `answer.escalation`、`answer.quietChildren`（事件转发） | Mac Mini 副本，包含 2026-11-08 的启动重试修复 |
 
+## Antigravity 多账号 Provider
+
+`providers.antigravity` 模块在 Provider 实例（或兼容模式主实例）中按 `machine.json` 的 `antigravity.accounts` 列表注册 Antigravity Provider。模块默认关闭，保持原有 `antigravity-cy517`、`antigravity-beibeimao` 等 Provider ID 不变，已有会话可直接恢复；显示名称与启动命令从配置读取，源码不含邮箱或机器路径。
+
+- 复制文件来源与版本：`server/modules/providers-antigravity/server/internal/{catalog,process,prompt,session,signals,timeline,wire}.ts` 复制自 Paseo 0.15.0 内置的 `antigravity-provider`，与其逐文件一致，只有两处差别：导入路径加了 `.ts` 后缀；`signals.ts` 加了 macOS 进程组 `EPERM` 信号回退修复。配置驱动的工厂与 RPC 位于单独文件 `provider.ts` 和 `index.ts`。
+- 读取和写入的本机文件与环境变量（不复制凭据）：
+  - `PASEO_GHSUB_MACHINE_CONFIG` 或 `~/.paseo/github-subscriptions/machine.json`：读取 `modules["providers.antigravity"]` 与 `antigravity.accounts`。
+  - `PASEO_HOME`（默认 `~/.paseo`）下的 `~/.paseo/config.json`：同步读取 `plugins["<providerId>-provider"]`（若旧插件仍启用，或 config.json 读不出、无法解析，都按“仍启用”处理：跳过该账号并报错）及 `agents.providers[providerId]`（新增账号时写入 `enabled`、`label`、`command`、`env.HOME`、`env.HTTPS_PROXY`、`env.HTTP_PROXY`）。
+  - 各账号的 Antigravity CLI 在其配置的 `HOME` 目录下自行读取登录凭据。
+- `machine.json` 的账号 ID 必须匹配 `antigravity-[a-z0-9][a-z0-9-]{0,31}`，因此不会占用内置 `antigravity`、`cloud-session` 等 Provider ID。`homeDir` 只在新增账号时写入 Paseo 配置的 `env.HOME`；之后页面显示 Paseo 配置里的值，启动不读 `machine.json` 的 `homeDir`、`proxy`。
+- 新增账号（`antigravity.account.add`）：`command`、`env`、`label` 不在 `paseo.config.patch` 支持范围内，所以直接写 `~/.paseo/config.json`——先备份（`config.json.bak-<毫秒时间>`）、原子写入、读回核对，再写 `machine.json`（同样先备份）；`machine.json` 写失败时用备份恢复 `config.json`。任一文件存在但无法解析时报错，不写入。新账号需要重载 Provider 实例才生效。
+- 启停账号（`antigravity.account.toggle`）：写 `machine.json`（先备份），再向守护进程发 `paseo.config.patch` `{ providers: { <id>: { enabled } } }` 并检查返回；失败时恢复 `machine.json` 并报错。
+- “需要重载”不存在内存标志里，而由“启动时实际注册的账号”和“配置里启用的账号”比较得出；Provider 实例重载后自动清除。
+
+## 其他 Provider 额度来源
+
+`usage.providerQuotas` 模块在主实例中按 `machine.json` 的 `providerQuotas` 配置逐个启用额度来源，并支持配置隐藏 Paseo 内置额度来源（`hideBuiltin`：可选 `codex`、`cursor`、`grok`、`kimi`、`zai`）。模块默认关闭。注册前同步读取 `~/.paseo/config.json` 的 `plugins`：若 `provider-quotas-usage-source` 仍启用则跳过对应来源并报错；若 Mac mini 上的 `glm-usage-source` 仍启用则跳过 `glm` 来源并报错，确保 `glm` 在两边只注册一次。
+
+- 复制文件来源与版本：`server/modules/usage-provider-quotas/server/{usage,usage-display,token-switch,token-hub-quota,token-hub-browser}.ts` 与 `icons/{antigravity,codex,cursor,grok,qoder,zai}.svg` 复制自本机插件 `provider-quotas-usage-source` v0.1.0，之后做过以下修改（不再是原样复制）：删除了内置的 Antigravity OAuth 客户端密钥，改为读环境变量或 `agy-oauth.json`；网络与代理代码移到 `net.ts`；凭据写回改为原子写入；Codex 不再刷新令牌；子进程统一跟踪并在模块停止时结束。模块开关、旧插件冲突保护、内置来源隐藏及 RPC 位于单独文件 `index.ts` 和 `hide-builtin.ts`。
+- **`hideBuiltin` 目前只保存配置，还没有生效**：过滤内置额度来源的显示需要在客户端实现，尚未做；快照的 `hideBuiltinApplied` 为 `false`。
+- 各额度来源读取的本机文件与环境变量（不复制凭据）。**令牌刷新会写回原文件**：Antigravity 和 Cursor 刷新访问令牌后，以原子写入（临时文件再改名，权限 0600）写回原凭据文件，Cursor 同时保存新的刷新令牌；Codex 令牌过期时只提示，插件不刷新、不写回（刷新会让 Codex CLI 登出）：
+  - 公共配置与代理：读取环境变量 `PASEO_HOME`（默认 `~/.paseo`）、`~/.paseo/config.json` 的 `plugins` 与 `agents.providers`；网络请求读取 Provider `env.HTTPS_PROXY` / `env.HTTP_PROXY`、进程环境变量 `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` / `http_proxy`，以及 macOS 系统代理（`scutil --proxy`，先读 HTTPS 再读 HTTP，遵守例外列表；调用带 2 秒超时，结果缓存 60 秒）。账号显式配置的代理连接失败时报错，不改直连；带刷新令牌的请求即使走系统代理，失败也不直连。
+  - `antigravity`（Antigravity 额度）：读取会话或 Provider `env.HOME`（默认系统主目录 `~`）下的 `<HOME>/.gemini/antigravity-cli/antigravity-oauth-token`；OAuth 刷新读取环境变量 `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` 或 `~/.paseo/github-subscriptions/agy-oauth.json`。
+  - `codex-multi`（Codex 多账号额度）：读取会话或 Provider `env.CODEX_HOME`（默认 `~/.codex`）下的 `<CODEX_HOME>/auth.json`。
+  - `cursor-cli`（Cursor 额度）：读取会话或 Provider `env.HOME`（默认 `~`）下的 `<HOME>/.cursor/auth.json` 或 `<HOME>/.config/cursor/auth.json`。
+  - `grok-multi`（Grok 多账号额度）：读取会话或 Provider `env.GROK_HOME`（默认 `~/.grok`）下的 `<GROK_HOME>/auth.json`，令牌失效时调用 Provider 配置的 `grok` 命令刷新。
+  - `glm`（GLM Coding Plan 额度）：读取会话或 Provider `env.XDG_CONFIG_HOME`、进程环境变量 `XDG_CONFIG_HOME`（默认 `~/.config`）下的 `<XDG_CONFIG_HOME>/glm-acp-agent/credentials.json` 中的 `z_ai_api_key`。
+  - `qoder`（Qoder 额度）：调用 Provider `command[0]` 或 `~/.local/bin/qodercli`（以 `--sdk` 协议运行，传入 Provider `env.HOME` 或系统主目录）。
+  - `opencode-token-switch`（OpenCode TokenHub 额度）：只读打开 `<HOME>/.token-switch/token-switch.db`（SQLite）、读取 `env.OPENCODE_CONFIG` 或 `<XDG_CONFIG_HOME|~/.config>/opencode/opencode.json`、读取 `~/.paseo/token-hub-browser.json` 并通过 `~/.local/bin/ego-browser` 查询同账号共享额度，脱敏后的观测时间缓存在 `~/.paseo/cache/provider-quotas-usage-source/`。

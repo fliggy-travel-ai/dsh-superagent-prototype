@@ -5,7 +5,9 @@
     "providers.defaults": true,
     "answer.quietChildren": true,
     "answer.escalation": true,
-    "usage.claudeAccounts": true
+    "usage.claudeAccounts": true,
+    "providers.antigravity": false,
+    "usage.providerQuotas": false
   },
   "agentDefaults": [
     {
@@ -91,5 +93,42 @@
     "renewal": true,
     "loginWorkspaceName": "账号登录",
     "loginGuide": false
+  },
+  "antigravity": {
+    "accounts": [
+      {
+        "id": "antigravity-cy517",
+        "label": "Antigravity · 账号一",
+        "command": [
+          "agy"
+        ]
+      },
+      {
+        "id": "antigravity-beibeimao",
+        "label": "Antigravity · 账号二",
+        "enabled": false,
+        "command": [
+          "agy"
+        ]
+      }
+    ]
+  },
+  "providerQuotas": {
+    "sources": [
+      "antigravity",
+      "codex-multi",
+      "grok-multi",
+      "qoder",
+      "glm",
+      "cursor-cli",
+      "opencode-token-switch"
+    ],
+    "hideBuiltin": [
+      "codex",
+      "grok",
+      "cursor",
+      "kimi",
+      "zai"
+    ]
   }
 }
