@@ -8,7 +8,6 @@ import type { BrowserBindingInput, BrowserSettings } from '../../shared/browser.
 import type { PresenceSettings } from '../../shared/presence.ts';
 import type { AgentDefaultRule, DefaultsSnapshot } from '../../shared/defaults.ts';
 import type { ClaudeAccountsSnapshot } from '../../shared/claude-accounts.ts';
-import type { AntigravitySnapshot } from '../../shared/antigravity.ts';
 import type { EscalationSnapshot } from '../../shared/escalation.ts';
 import type { EscalationWindow } from '../../client/control-store.ts';
 import type { QuietSnapshot } from '../../shared/quiet.ts';
@@ -89,16 +88,6 @@ export class FakeDaemon {
     error: null,
   };
   bluetoothTarget: { name: string; address: string | null; revision: string } = { name: '随身手机', address: 'AA:BB:CC:DD:EE:01', revision: 'rev-1' };
-  antigravity: AntigravitySnapshot = {
-    enabled: false,
-    runningSessionsCount: 1,
-    reloadRequired: false,
-    error: null,
-    accounts: [
-      { providerId: 'antigravity-1', label: '账号 A（主力）', enabled: true, homeDir: '~/.antigravity-1' },
-      { providerId: 'antigravity-2', label: '账号 B（备用）', enabled: true, homeDir: '~/.antigravity-2' },
-    ],
-  };
   escalation: EscalationSnapshot = {
     enabled: false,
     status: 'stopped',
@@ -409,30 +398,6 @@ export class FakeDaemon {
           ),
         };
         return this.claudeAccounts;
-      case 'antigravity.snapshot':
-        return this.antigravity;
-      case 'antigravity.account.toggle':
-        this.antigravity = {
-          ...this.antigravity,
-          accounts: this.antigravity.accounts.map(acc =>
-            acc.providerId === input.providerId ? { ...acc, enabled: Boolean(input.enabled) } : acc,
-          ),
-        };
-        return this.antigravity;
-      case 'antigravity.account.add':
-        this.antigravity = {
-          ...this.antigravity,
-          accounts: [
-            ...this.antigravity.accounts,
-            {
-              providerId: String(input.providerId),
-              label: String(input.label),
-              enabled: true,
-              homeDir: input.homeDir ? String(input.homeDir) : undefined,
-            },
-          ],
-        };
-        return this.antigravity;
       case 'provider-quotas.snapshot':
         return {
           enabled: Boolean(this.machineSettings.modules.find(m => m.id === 'usage.providerQuotas')?.enabled),

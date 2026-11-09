@@ -351,7 +351,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     assert.match(providersText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
     assert.match(providersText, /校验通过/);
     assert.match(providersText, /导出配置备份/);
-    assert.match(providersText, /Antigravity/, 'Antigravity 模块关闭时卡片照常显示');
+    assert.doesNotMatch(providersText, /多个 Antigravity 账号分别作为 Provider/);
     assert.match(
       providersText,
       /模块未启用，在本机配置中开启，重载后生效/,
@@ -897,7 +897,6 @@ test('审阅项 5/7/14：待办“打开会话”传递 serverId，网页提问�
           claudeAccounts: daemon.claudeAccounts,
           claudeAccountsStatus: 'ready' as const,
           claudeAccountsError: null,
-          antigravity: daemon.antigravity,
           antigravityStatus: 'ready' as const,
           antigravityError: null,
           providerQuotas: null,
@@ -997,7 +996,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   const { escalationSnapshot } = await import('../shared/escalation.ts');
   const { quietSnapshot } = await import('../shared/quiet.ts');
   const { providerQuotasSnapshot } = await import('../shared/provider-quotas.ts');
-  const { antigravitySnapshot } = await import('../shared/antigravity.ts');
   const { todoList } = await import('../shared/todo.ts');
   const { modulesStatus } = await import('../shared/modules.ts');
   const { defaultsSnapshot } = await import('../shared/defaults.ts');
@@ -1027,7 +1025,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   assert.ok(await fake.rpc(escalationSnapshot, {}));
   assert.ok(await fake.rpc(quietSnapshot, {}));
   assert.ok(await fake.rpc(providerQuotasSnapshot, {}));
-  assert.ok(await fake.rpc(antigravitySnapshot, {}));
   assert.ok(await fake.rpc(todoList, {}));
   assert.ok(await fake.rpc(modulesStatus, {}));
   assert.ok(await fake.rpc(defaultsSnapshot, {}));
@@ -1239,19 +1236,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   assert.ok(savedEscConfig);
   const immediateSent = (savedEscConfig as { immediate: Array<{ days: unknown }> }).immediate;
   assert.deepEqual(immediateSent[0]?.days, [1, 3, 5], '自定义星期数组不应被改写为 weekdays');
-
-  // 第 8b 项：AntigravityDrawer 含 homeDir 输入框
-  renderer.reset();
-  tree = renderer.render(() =>
-    React.createElement(BoundOkMain, {
-      theme: mockTheme,
-      host: { id: 'h1', label: 'Host' },
-      layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'antigravity' },
-    } as never),
-  );
-  const homeDirInput = findNodes(tree, (el) => el.props.accessibilityLabel === 'Antigravity 目录')[0];
-  assert.ok(homeDirInput, 'Antigravity 抽屉应包含 homeDir 输入框');
 
   // I: GitHub 订阅页会话列允许显示两行会话标题（numberOfLines=2）
   const BoundSubs = bind(

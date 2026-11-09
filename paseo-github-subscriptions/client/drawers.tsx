@@ -18,7 +18,6 @@ export type DrawerId =
   | 'add-browser'
   | 'session-defaults'
   | 'cloud'
-  | 'antigravity'
   | 'qa-mode'
   | 'bluetooth'
   | 'escalation'
@@ -33,7 +32,6 @@ const DRAWER_TITLES: Record<DrawerId, string> = {
   'add-browser': '添加浏览器环境',
   'session-defaults': '新建会话默认设置',
   cloud: '云端会话',
-  antigravity: 'Antigravity 账号',
   'qa-mode': '问答模式',
   bluetooth: '蓝牙在场判定',
   escalation: '升级通知',
@@ -602,131 +600,6 @@ function CloudSessionDrawer() {
       <RuleNote>
         把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。由本机 Provider 实例承载；主实例通过跨实例转发收发消息和提问。
       </RuleNote>
-    </View>
-  );
-}
-
-function AntigravityDrawer() {
-  const { s, control, theme } = useUi();
-  const { antigravity, antigravityStatus, antigravityError } = useControlState();
-  const [providerId, setProviderId] = useState('');
-  const [label, setLabel] = useState('');
-  const [homeDir, setHomeDir] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const accounts = antigravity?.accounts ?? [];
-
-  const addAccount = async () => {
-    if (!providerId.trim() || !label.trim()) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await control.addAntigravityAccount({
-        providerId: providerId.trim(),
-        label: label.trim(),
-        homeDir: homeDir.trim() || undefined,
-      });
-      setProviderId('');
-      setLabel('');
-      setHomeDir('');
-    } catch (failure) {
-      setErr(errorMessage(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <View style={{ gap: 12 }}>
-      {antigravityStatus === 'disabled' ? (
-        <Notice tone="neutral">
-          <Text style={s.text}>Antigravity 多账号模块未启用（等待对应服务端模块合并或开启）。</Text>
-        </Notice>
-      ) : null}
-      {antigravity?.reloadRequired ? (
-        <Notice tone="warning">
-          <Text style={s.text}>Antigravity 账号配置已变更，需在无运行中会话时重载 Provider 实例后生效。</Text>
-        </Notice>
-      ) : null}
-      {antigravityError || antigravity?.error || err ? (
-        <Notice tone="danger">
-          <Text style={s.text}>{err ?? antigravityError ?? antigravity?.error}</Text>
-        </Notice>
-      ) : null}
-
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <SectionTitle>本机 Antigravity 账号</SectionTitle>
-        <Text style={s.small}>运行中会话：{antigravity?.runningSessionsCount ?? 0} 个</Text>
-      </View>
-      {accounts.length === 0 ? (
-        <Text style={s.muted}>暂无已登记的 Antigravity 账号。</Text>
-      ) : (
-        <View>
-          <TableRow first header cells={['账号标识', '名称', '目录', '启用']} />
-          {accounts.map(acc => (
-            <TableRow
-              key={acc.providerId}
-              cells={[
-                <Text key="id" style={s.mono}>
-                  {acc.providerId}
-                </Text>,
-                acc.label,
-                <Text key="dir" style={s.mono}>
-                  {acc.homeDir ?? '默认'}
-                </Text>,
-                <Switch
-                  key="sw"
-                  accessibilityLabel={`启用 ${acc.label}`}
-                  value={acc.enabled}
-                  onValueChange={val =>
-                    void control
-                      .toggleAntigravityAccount({ providerId: acc.providerId, enabled: val })
-                      .catch(e => setErr(errorMessage(e)))
-                  }
-                  trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-                  thumbColor={theme.colors.accentForeground}
-                />,
-              ]}
-            />
-          ))}
-        </View>
-      )}
-      <View style={s.wrap}>
-        <TextInput
-          accessibilityLabel="Antigravity 账号 ID"
-          style={s.input}
-          value={providerId}
-          onChangeText={setProviderId}
-          placeholder="标识（如 antigravity-3）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-        <TextInput
-          accessibilityLabel="Antigravity 名称"
-          style={s.input}
-          value={label}
-          onChangeText={setLabel}
-          placeholder="显示名称（如 账号 C）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-        />
-        <TextInput
-          accessibilityLabel="Antigravity 目录"
-          style={s.input}
-          value={homeDir}
-          onChangeText={setHomeDir}
-          placeholder="配置目录（可选，如 ~/.agy-c）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-        <Btn
-          primary
-          label="添加账号"
-          disabled={!providerId.trim() || !label.trim() || busy}
-          onPress={() => void addAccount()}
-        />
-      </View>
-      <RuleNote>停用或移除账号不会中断已经用该账号启动的会话；新回合按剩余可用账号顺序选择。</RuleNote>
     </View>
   );
 }
@@ -1878,8 +1751,6 @@ export function DrawerOverlay(props: {
         return <SessionDefaultsDrawer />;
       case 'cloud':
         return <CloudSessionDrawer />;
-      case 'antigravity':
-        return <AntigravityDrawer />;
       case 'qa-mode':
         return <QaModeDrawer />;
       case 'bluetooth':

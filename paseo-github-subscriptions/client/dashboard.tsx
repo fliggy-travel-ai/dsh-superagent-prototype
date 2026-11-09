@@ -111,9 +111,6 @@ function ProvidersPage({
     cloudSessionError,
     claudeAccounts,
     claudeAccountsStatus,
-    antigravity,
-    antigravityStatus,
-    antigravityError,
     machineSettings,
     machineSettingsError,
     modules,
@@ -149,7 +146,6 @@ function ProvidersPage({
     Boolean(claudeAccounts && !claudeAccounts.enabled);
   const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
   const defaultsModOff = isModuleOff('providers.defaults', machineSettings, modules);
-  const agModOff = isModuleOff('providers.antigravity', machineSettings, modules);
   const accounts = claudeAccounts?.accounts ?? [];
   const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
@@ -161,13 +157,6 @@ function ProvidersPage({
     ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
     : false;
   const resolvedCloud = cloudSession ?? providerInstance?.cloudSession ?? null;
-  const agCount = antigravity?.accounts.length ?? 0;
-  const agRunningSessions = antigravity?.runningSessionsCount ?? 0;
-  const showAntigravityCard =
-    agModOff ||
-    antigravityStatus === 'error' ||
-    Boolean(antigravityError) ||
-    (antigravityStatus === 'ready' && Boolean(antigravity?.enabled || agCount > 0));
 
   return (
     <View style={{ gap: 14 }}>
@@ -334,41 +323,6 @@ function ProvidersPage({
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
         />
-
-        {showAntigravityCard ? (
-          <FeatureCard
-            title="Antigravity"
-            trailing={
-              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
-                <Chip label="读取失败" tone="danger" />
-              ) : agModOff ? (
-                <Chip label="未启用" tone="neutral" />
-              ) : (
-                <Chip
-                  label={antigravity?.reloadRequired ? '待重载' : '运行中'}
-                  tone={antigravity?.reloadRequired ? 'warning' : 'success'}
-                />
-              )
-            }
-            description="多个 Antigravity 账号分别作为 Provider。"
-            kv={
-              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
-                <>
-                  <Chip label="读取失败" tone="danger" />
-                  <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
-                </>
-              ) : agModOff ? (
-                <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
-              ) : (
-                <>
-                  <Text style={s.small}>{agCount} 个账号</Text>
-                  <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
-                </>
-              )
-            }
-            actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
-          />
-        ) : null}
 
         <FeatureCard
           title="本机配置"
