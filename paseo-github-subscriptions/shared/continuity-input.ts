@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { inputSchema } from "../server/vendor/paseo-0.15.0/claude-usage-source/shared/input.ts";
+import { inputSchema } from "./claude-usage-input.ts";
 
 const accountKey = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/);
 const localInput = inputSchema.extend({ accountKey });

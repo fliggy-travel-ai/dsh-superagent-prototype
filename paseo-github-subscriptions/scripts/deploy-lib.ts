@@ -62,10 +62,5 @@ export function providersHostedBy(role: InstanceRole | null): string[] {
   return ['cloud-session', 'antigravity-*'];
 }
 
-export interface AgentRow { id: string; name?: string; provider: string; status: string }
-
-export function runningTurns(agents: readonly AgentRow[], providers: readonly string[]): AgentRow[] {
-  const providerOf = (value: string) => value.split('/')[0]!;
-  const matches = (id: string) => providers.some(pattern => pattern.endsWith('*') ? id.startsWith(pattern.slice(0, -1)) : id === pattern);
-  return agents.filter(agent => agent.status === 'running' && matches(providerOf(agent.provider)));
-}
+// 服务端（Antigravity 模块）也要用，放在 server/；插件包不能引入 scripts/ 下的文件。
+export { runningTurns, type AgentRow } from '../server/running-turns.ts';
