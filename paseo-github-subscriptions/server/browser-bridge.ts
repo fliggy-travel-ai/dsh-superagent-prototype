@@ -2,16 +2,22 @@ import { createServer, type Server } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { BrowserApprovalEventSchema, BrowserBindingInputSchema, BrowserSettingsSchema, BrowserSyncSchema, type AnswerWebRequest, type BrowserBindingInput, type BrowserPairing, type BrowserSettings, type BrowserSnapshot, type WebRequestAnswer, type WebRequestResult } from '../shared/browser.ts';
 import type { PresenceRuntime } from './presence.ts';
+import { MAIN_PLUGIN_ID } from '../shared/instances.ts';
+import { extensionDirectory } from './plugin-directory.ts';
 
-const EXTENSION_PATH = fileURLToPath(new URL('../browser-extension', import.meta.url));
 
 const ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 const MAX_BODY = 65536;
 const MAX_AGE = 150_000;
 const SYNC_DECISION_BUDGET_MS = 3000;
+// 扩展目录在加载后按需查 Paseo 配置（打包后没有 import.meta.url），结果缓存 60 秒。
+let extensionCache: { at: number; value: string | null } | null = null;
+const extensionPath = () => {
+  if (!extensionCache || Date.now() - extensionCache.at > 60_000) extensionCache = { at: Date.now(), value: extensionDirectory(MAIN_PLUGIN_ID) };
+  return extensionCache.value;
+};
 const cleanTitle = (title: string) => title.replace(/\s+/g, ' ').trim().slice(0, 120) || '未命名会话';
 const key = (instanceId: string, sessionId: string) => `${instanceId}:${sessionId}`;
 
@@ -142,7 +148,8 @@ export class BrowserBridge {
       approvals: this.approvals.map(entry => ({ ...entry })),
       sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })),
       bindings: this.bindings.map(b => ({ ...b })),
-      extensionPath: EXTENSION_PATH,
+      // 浏览器桥接只在主实例（含兼容模式）运行，插件 ID 是主实例的 ID。
+      ...(extensionPath() ? { extensionPath: extensionPath()! } : {}),
       instances,
     };
   }

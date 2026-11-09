@@ -51,6 +51,22 @@ test('边界检查放行合法引用：server 引入 shared、shared 引入 shar
   try { assert.deepEqual(checkPluginBoundaries(p.dir), []); } finally { p.close(); }
 });
 
+test('Paseo 把 server 包当作 eval 出的 CommonJS 函数执行：打包的源码不能用 import.meta、__dirname、__filename', () => {
+  const p = plugin({
+    'index.server.ts': "import { dir } from './server/paths.ts'; import { a } from './shared/a.ts'; export default () => [dir, a];\n",
+    'server/paths.ts': "import { fileURLToPath } from 'node:url'; export const dir = fileURLToPath(new URL('../assets', import.meta.url));\n",
+    'shared/a.ts': 'export const a = typeof __dirname;\n',
+    'index.client.tsx': "export const c = String(__filename);\n",
+  });
+  try {
+    assert.deepEqual(checkPluginBoundaries(p.dir), [
+      'Paseo runs plugin bundles without __dirname: shared/a.ts',
+      'Paseo runs plugin bundles without __filename: index.client.tsx',
+      'Paseo runs plugin bundles without import.meta: server/paths.ts',
+    ]);
+  } finally { p.close(); }
+});
+
 test('shared 里的 Claude 用量输入结构与 server/vendor 的 Paseo 副本逐字一致', () => {
   const vendored = readFileSync(join(root, 'server/vendor/paseo-0.15.0/claude-usage-source/shared/input.ts'), 'utf8');
   const shared = readFileSync(join(root, 'shared/claude-usage-input.ts'), 'utf8');
