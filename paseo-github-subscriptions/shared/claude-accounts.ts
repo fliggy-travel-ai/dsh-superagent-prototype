@@ -55,9 +55,11 @@ export const claudeAccountsLoginStart = defineRpc({
   input: z.strictObject({ providerId: z.string().min(1).optional(), browserProfile: z.string().min(1).max(100).optional() }),
   output: ClaudeAccountsSnapshotSchema,
 });
+/** 授权码会被输入终端：只允许字母、数字和 _ - # . ~，不能含空格、引号、分号等 shell 字符。 */
+export const AuthCodeSchema = z.string().regex(/^[A-Za-z0-9_\-#.~]{1,512}$/, '授权码只能含字母、数字和 _ - # . ~，最长 512 个字符');
 export const claudeAccountsLoginSubmitCode = defineRpc({
   name: 'claude-accounts.login.submit-code',
-  input: z.strictObject({ providerId: z.string().min(1), code: z.string().min(1).max(4096), realEmail: z.string().min(3).max(200).optional() }),
+  input: z.strictObject({ providerId: z.string().min(1), code: AuthCodeSchema, realEmail: z.string().min(3).max(200).optional() }),
   output: ClaudeAccountsSnapshotSchema,
 });
 export const claudeAccountsLoginRetry = defineRpc({

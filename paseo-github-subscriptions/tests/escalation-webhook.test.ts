@@ -90,3 +90,38 @@ test("单事件 HTTP 使用现有鉴权头、稳定标识并包含完整字段",
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+import { storeWebhookCredentials } from "../server/modules/answer-escalation/webhook.ts";
+const SECRET_URL = "https://example.test/hook/test-secret-path";
+const SECRET_AUTH = "X-Key: test-secret-value";
+const cfg = { urlService: "svc-url", authService: "svc-auth", account: "acct" };
+
+test("保存 webhook：凭据只经标准输入交给 security -i，不出现在命令行参数里", async () => {
+  const calls: Array<{ args: string[]; input: string }> = [];
+  await storeWebhookCredentials(cfg, { url: SECRET_URL, auth: SECRET_AUTH }, async (args, input) => { calls.push({ args, input }); });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.args, ["-i"]);
+  assert.ok(!JSON.stringify(calls[0]!.args).includes("test-secret"));
+  const lines = calls[0]!.input.trim().split("\n");
+  assert.equal(lines.length, 2);
+  assert.match(lines[0]!, /^add-generic-password -U -s "svc-url" -a "acct" -w "https:\/\/example\.test\/hook\/test-secret-path"$/);
+  assert.match(lines[1]!, /-s "svc-auth" .* -w "X-Key: test-secret-value"$/);
+});
+
+test("保存 webhook：引号、反斜杠被转义；换行和空字符被拒绝", async () => {
+  const calls: string[] = [];
+  await storeWebhookCredentials(cfg, { url: SECRET_URL, auth: 'X-Key: a"b\\c' }, async (_args, input) => { calls.push(input); });
+  assert.match(calls[0]!, /-w "X-Key: a\\"b\\\\c"/);
+  await assert.rejects(storeWebhookCredentials(cfg, { url: SECRET_URL, auth: "X-Key: a\nadd-generic-password -s x" }, async () => {}), /鉴权头/);
+});
+
+test("保存 webhook 失败时只抛通用提示，不带地址、鉴权头或底层错误原文", async () => {
+  for (const credentials of [{ url: SECRET_URL, auth: SECRET_AUTH }, { url: "not a url test-secret", auth: SECRET_AUTH }, { url: "http://example.test/test-secret", auth: SECRET_AUTH }, { url: SECRET_URL, auth: "没有冒号 test-secret" }]) {
+    await assert.rejects(storeWebhookCredentials(cfg, credentials, async () => { throw new Error(`Command failed: security -w ${credentials.url} ${credentials.auth}`); }), (error: Error) => {
+      assert.ok(!error.message.includes("test-secret"), error.message);
+      assert.ok(!error.message.includes("example.test"), error.message);
+      return true;
+    });
+  }
+  await assert.rejects(storeWebhookCredentials(undefined, { url: SECRET_URL, auth: SECRET_AUTH }, async () => {}), /Keychain/);
+});

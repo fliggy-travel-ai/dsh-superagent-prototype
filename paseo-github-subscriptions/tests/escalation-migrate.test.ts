@@ -21,6 +21,7 @@ test('复制状态和额度报警记录，不复制事件日志；旧文件保�
     assert.deepEqual(JSON.parse(readFileSync(join(next, 'state.json'), 'utf8')).seen, { a: 1 });
     assert.deepEqual(result.suggestion, { delivery: 'live', webhook: { urlEnv: 'GROK_URL', authEnv: 'GROK_AUTH' } });
     assert.match(result.notes.join('\n'), /默认影子/);
+    assert.match(result.notes.join('\n'), /quotaAlerts\.fileDirectory/);
     assert.equal(existsSync(join(root, 'new', 'machine.json')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { APPLE_SUFFIX, isAppleRelay } from './accounts.ts';
-import type { ClaudeAccountsSnapshot } from '../../../shared/claude-accounts.ts';
+import { AuthCodeSchema, type ClaudeAccountsSnapshot } from '../../../shared/claude-accounts.ts';
 
 const exec = promisify(execFile);
 export type ActiveFlow = NonNullable<ClaudeAccountsSnapshot['activeFlow']>;
@@ -29,9 +29,12 @@ export interface LoginPorts {
   /** 用户目录，用来拼配置目录 `~/.claude-N`。 */
   homeDirectory: string;
   providers(): Record<string, any>;
-  /** 改配置前备份 config.json。 */
-  backupConfig(): void;
-  patchProvider(id: string, entry: Record<string, unknown>): Promise<void>;
+  /** 改配置前备份 config.json，返回备份路径（名字精确到毫秒，不覆盖已有备份）。 */
+  backupConfig(): string;
+  /** 直接写 config.json 的 Provider 条目，写后读回核对；不一致时抛错。守护进程的 config.patch 不保存这些键。 */
+  writeProvider(id: string, entry: Record<string, unknown>, backupPath: string | null): void;
+  /** 让 Paseo 重载配置。 */
+  reloadProviders(): Promise<void>;
   ensureConfigDirectory(directory: string): void;
   findLoginWorkspace(): Promise<{ id: string; cwd: string } | null>;
   createTerminal(workspaceId: string, name: string, cwd: string): Promise<TerminalLike>;
@@ -113,40 +116,61 @@ export class LoginFlows {
   }
   private display(directory: string) { return directory.startsWith(`${this.ports.homeDirectory}/`) ? `~${directory.slice(this.ports.homeDirectory.length)}` : directory; }
 
+  /** 找到之前建好但没登录完的 Provider（标签以“（待登录）”结尾），重复点“添加账号”时复用，不再新建。 */
+  private pendingProvider(providers: Record<string, any>): string | null {
+    for (const [id, provider] of Object.entries(providers)) {
+      if (provider?.extends === 'claude' && typeof provider.label === 'string' && provider.label.endsWith('（待登录）') && provider.env?.CLAUDE_CONFIG_DIR) return id;
+    }
+    return null;
+  }
+
   async start(input: { providerId?: string; browserProfile?: string }): Promise<ActiveFlow> {
-    if (this.flow && this.flow.error === null && this.flow.step >= 3) await this.flow.terminal?.kill().catch(() => {});
     const providers = this.ports.providers();
-    const existing = input.providerId !== undefined;
-    const id = input.providerId ?? nextProviderId(providers);
-    if (existing && !providers[id]) throw new Error(`Provider ${id} 不存在`);
+    if (input.providerId !== undefined && !providers[input.providerId]) throw new Error(`Provider ${input.providerId} 不存在`);
+    // 同时只允许一个登录流程；出错的流程和同一个账号的重新开始可以替换。
+    if (this.flow && !this.flow.error && input.providerId !== this.flow.providerId) {
+      throw new Error(`已有进行中的登录引导（${this.flow.providerId}）。先完成它，或对同一个账号点“重新触发”`);
+    }
+    if (this.flow) await this.flow.terminal?.kill().catch(() => {});
+    const reused = input.providerId === undefined ? this.pendingProvider(providers) : null;
+    const existing = input.providerId !== undefined || reused !== null;
+    const id = input.providerId ?? reused ?? nextProviderId(providers);
     const configured = providers[id]?.env?.CLAUDE_CONFIG_DIR as string | undefined;
     const configDir = configured ?? this.configDirectory(id);
     this.flow = { providerId: id, configDir: this.display(configDir), step: 1, terminalId: null, workspaceId: null, loginUrl: null, detectedEmail: null, requiresRealEmailConfirmation: false, error: null, terminal: null };
     const flow = this.flow;
     try {
+      // 先确认登录终端的工作区在，再写配置：失败时不留下写了一半的 Provider。
+      const workspace = await this.ports.findLoginWorkspace();
+      if (!workspace) throw new Error('没有名为“账号登录”的工作区。先在 Paseo 中创建这个工作区，再重试。');
+      flow.workspaceId = workspace.id;
       if (!existing) {
-        this.ports.backupConfig();
+        const backup = this.ports.backupConfig();
         const number = id.slice('claude-'.length);
         const models = providers.claude?.models;
-        await this.ports.patchProvider(id, {
+        const entry = {
           extends: 'claude', label: `Claude ${number}（待登录）`, description: `第 ${number} 个 Claude 账号（配置目录 ${this.display(configDir)}）`,
           env: { CLAUDE_CONFIG_DIR: configDir, CLAUDE_CODE_TMPDIR: `${configDir}/tmp`, TMPDIR: `${configDir}/tmp`, XDG_CACHE_HOME: `${configDir}/cache/xdg` },
           ...(models !== undefined ? { models: JSON.parse(JSON.stringify(models)) } : {}),
           enabled: true,
-        });
+        };
+        this.ports.writeProvider(id, entry, backup);
+        await this.reload();
       }
       flow.step = 2;
       this.ports.ensureConfigDirectory(configDir);
       flow.step = 3;
-      const workspace = await this.ports.findLoginWorkspace();
-      if (!workspace) throw new Error('没有名为“账号登录”的工作区。先在 Paseo 中创建这个工作区，再重试。');
-      flow.workspaceId = workspace.id;
       const number = id.replace(/^claude-?/, '') || '1';
       flow.terminal = await this.ports.createTerminal(workspace.id, `Claude ${number} 登录`, workspace.cwd);
       flow.terminalId = flow.terminal.id;
       await this.runLogin(flow, configDir);
     } catch (error) { flow.error = error instanceof Error ? error.message : String(error); }
     return this.current()!;
+  }
+
+  private async reload() {
+    try { await this.ports.reloadProviders(); }
+    catch { throw new Error('配置已写入，但 Paseo 重载失败。请手动重载 Paseo 配置后再点“重新触发”'); }
   }
 
   /** 在终端里启动登录命令并读出链接。BROWSER 指向 true，避免系统默认浏览器自动打开授权页。 */
@@ -195,6 +219,9 @@ export class LoginFlows {
   async submitCode(input: { providerId: string; code: string; realEmail?: string }): Promise<ActiveFlow | null> {
     const flow = this.requireFlow(input.providerId);
     if (!flow.terminal || flow.step < 5) throw new Error('还没有读到登录链接，不能提交授权码');
+    // 授权码会被输入终端：先限制字符，再确认终端还停在授权码输入框，否则它会被当作 shell 命令执行。
+    if (!AuthCodeSchema.safeParse(input.code).success) throw new Error('授权码格式不对：只能含字母、数字和 _ - # . ~，最长 512 个字符');
+    if (!(await flow.terminal.capture()).join('').includes('Paste code here')) throw new Error('终端已不在等待授权码，请点“重新触发”后再试');
     flow.error = null;
     flow.terminal.write(input.code);
     flow.terminal.sendKeys(['Enter']);
@@ -226,7 +253,10 @@ export class LoginFlows {
   }
 
   private async finish(flow: NonNullable<typeof this.flow>, label: string | null) {
-    if (label) await this.ports.patchProvider(flow.providerId, { label });
+    if (label) {
+      this.ports.writeProvider(flow.providerId, { label }, null);
+      await this.reload();
+    }
     await flow.terminal?.kill().catch(() => {});
     this.flow = null;
   }

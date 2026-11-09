@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { Notice } from '../../notify/engine.ts';
@@ -79,9 +79,31 @@ export async function postNotice(notice: Notice, credentials: WebhookCredentials
   return { httpStatus: result.status };
 }
 
-export async function storeWebhookCredentials(config: WebhookConfig | undefined, credentials: WebhookCredentials, run: (file: string, args: string[]) => Promise<unknown> = (file, args) => exec(file, args, { timeout: 5000 })) {
+export type SecurityRunner = (args: string[], input: string) => Promise<void>;
+
+/** 凭据经标准输入交给 `security -i`，不出现在命令行参数里（进程列表和错误信息都看不到）。 */
+const runSecurity: SecurityRunner = (args, input) => new Promise<void>((resolve, reject) => {
+  const child = spawn('/usr/bin/security', args, { stdio: ['pipe', 'ignore', 'ignore'] });
+  const timer = setTimeout(() => child.kill(), 5000);
+  child.once('error', () => { clearTimeout(timer); reject(new Error('Keychain 写入失败')); });
+  child.once('close', code => { clearTimeout(timer); if (code === 0) resolve(); else reject(new Error('Keychain 写入失败')); });
+  child.stdin.on('error', () => {});
+  child.stdin.end(input);
+});
+
+const quote = (value: string, what: string) => {
+  if (/[\r\n\0]/.test(value)) throw new Error(`${what}含有换行或空字符`);
+  return `"${value.replace(/[\\"]/g, '\\$&')}"`;
+};
+
+/** 失败时只抛通用提示，不带地址、鉴权头或底层错误原文。 */
+export async function storeWebhookCredentials(config: WebhookConfig | undefined, credentials: WebhookCredentials, run: SecurityRunner = runSecurity) {
   if (!config?.urlService || !config.authService) throw Error('没有配置 Keychain 服务名，不能保存 webhook');
-  if (new URL(credentials.url).protocol !== 'https:' || !/^[A-Za-z][A-Za-z0-9-]*:\s*\S.*$/.test(credentials.auth)) throw Error('Webhook 配置需要 HTTPS 地址和“头名: 值”格式的鉴权头');
-  for (const [service, value] of [[config.urlService, credentials.url], [config.authService, credentials.auth]] as const)
-    await run('/usr/bin/security', ['add-generic-password', '-U', '-s', service, '-a', config.account, '-w', value]);
+  let protocol = '';
+  try { protocol = new URL(credentials.url).protocol; } catch { throw new Error('Webhook 地址格式无效'); }
+  if (protocol !== 'https:') throw new Error('Webhook 地址需要 HTTPS');
+  if (!/^[A-Za-z][A-Za-z0-9-]*:\s*\S.*$/.test(credentials.auth)) throw new Error('鉴权头需要“头名: 值”格式');
+  const input = [[config.urlService, credentials.url, '地址'], [config.authService, credentials.auth, '鉴权头']]
+    .map(([service, value, what]) => `add-generic-password -U -s ${quote(service!, '服务名')} -a ${quote(config.account, '账号')} -w ${quote(value!, what!)}\n`).join('');
+  try { await run(['-i'], input); } catch { throw new Error('保存 webhook 凭据失败（Keychain 写入没有成功）'); }
 }

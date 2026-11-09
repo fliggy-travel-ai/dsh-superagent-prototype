@@ -111,6 +111,7 @@ export class QuotaLabelService {
     writeFileSync(temp, JSON.stringify(config, null, 2), { mode: 0o600 });
     renameSync(temp, this.path);
     await cli(["reload", "--json"]);
-    console.info("已更新账号额度显示：", changed.map((id) => `${id}=${providers[id].label}`).join("，"));
+    // 显示名称含邮箱，日志只写 Provider 编号和剩余百分比。
+    console.info("已更新账号额度显示：", changed.map((id) => { const quota = quotas.get(id); return `${id}=${quota ? `${quota.historical ? "上次剩" : "剩"} ${quota.remainingPct}%` : "无额度"}`; }).join("，"));
   }
 }

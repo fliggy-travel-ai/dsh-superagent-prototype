@@ -7,6 +7,7 @@ import type { SharedDaemon } from '../../core/daemon.ts';
 import { isMainSession, type RolesReader, type WorkspaceRoles, parseWorkspaceRoles } from '../../core/session-roles.ts';
 import type { SettingsStore } from '../../core/settings-store.ts';
 import { summarizeError } from '../../core/modules.ts';
+import { Attempt } from '../../core/attempt.ts';
 import { createAuditWriter } from '../../notify/audit.ts';
 import type { NotifyConfig } from '../../notify/config.ts';
 import { Engine, expireOutbox, type Notice } from '../../notify/engine.ts';
@@ -32,6 +33,10 @@ export interface EscalationOptions {
   settings: SettingsStore<RuntimeSettings>;
   /** 旧插件仍启用时不能实际发送，否则同一事件会发两次。给出原因就强制影子模式。 */
   forceShadow?: string;
+  /** 切到实际发送前调用（例如重新复制旧状态）。 */
+  beforeLive?: () => void;
+  /** 测试用：替换额度报警凭据的读取。 */
+  quotaCredentials?: () => Promise<{ url: string; auth: string } | null>;
   log?: (line: string) => void;
   /** 测试用：替换凭据读取和投递。 */
   credentials?: () => Promise<WebhookCredentials>;
@@ -50,10 +55,9 @@ export class EscalationRuntime {
   readonly records: EscalationRecords;
   private readonly options: EscalationOptions;
   private readonly lifetime = new AbortController();
-  private readonly removers: Array<() => void> = [];
+  private attempt: Attempt | null = null;
   private engine: Engine | null = null;
   private statePath = '';
-  private timer: ReturnType<typeof setInterval> | undefined;
   private quotaAlerts: QuotaAlerts | null = null;
   private roles: WorkspaceRoles = parseWorkspaceRoles(null);
   private rolesError: string | null = null;
@@ -77,25 +81,23 @@ export class EscalationRuntime {
 
   /** 连接守护进程并开始监听。失败时清掉已注册的钩子和订阅再抛错，调用方稍后重试。 */
   async start(): Promise<void> {
-    try { await this.begin(); }
-    catch (error) { this.teardown(); throw error; }
+    this.attempt?.cancel();
+    const attempt = new Attempt();
+    this.attempt = attempt;
+    if (this.stopped) attempt.cancel();
+    try { await this.begin(attempt); }
+    catch (error) { attempt.cancel(); throw error; }
   }
 
-  private teardown() {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    this.quotaAlerts?.stop();
-    this.quotaAlerts = null;
-    for (const remove of this.removers.splice(0)) { try { remove(); } catch { /* 已移除 */ } }
-  }
-
-  private async begin(): Promise<void> {
+  /** 每次 await 之后检查 attempt，停止或失败清理后不再注册任何东西；清理后才登记的清理函数立即执行。 */
+  private async begin(attempt: Attempt): Promise<void> {
     const { paseo, client } = await this.options.daemon.ready();
-    if (this.stopped) throw new Error('插件已停止');
+    attempt.check();
     const { directory, machineName, section, server } = this.options;
     const settings = this.settings();
     this.statePath = this.stateFile(settings.delivery);
     const state = await loadState(this.statePath);
+    attempt.check();
     const audit = createAuditWriter(join(directory, 'events.jsonl'));
     const config: NotifyConfig = {
       hostId: machineName, machine: machineName, delivery: settings.delivery, mains: [], children: {}, coalesceWindowSeconds: 60,
@@ -105,6 +107,7 @@ export class EscalationRuntime {
     const bootDrops = expireOutbox(state, Date.now(), Date.now());
     for (const drop of bootDrops) await audit({ phase: 'outbox-expired', mode: config.delivery, ...drop });
     if (bootDrops.length) await saveState(this.statePath, state);
+    attempt.check();
 
     const send = createSender({
       mode: () => this.settings().delivery,
@@ -154,17 +157,17 @@ export class EscalationRuntime {
       if (config.mains.includes(agent.id) && questionRequest(request)) await engine.asked(agent.id, request.id, request);
     };
 
-    this.removers.push(server.addHook('agent.permission.before', async e => {
+    attempt.add(server.addHook('agent.permission.before', async e => {
       await engine.serial(async () => { await refreshRoles(); updateAgent(e.agent as never); await asked(e.agent, e.request as never); await tick(); });
     }));
-    this.removers.push(server.addHook('agent.permission.after', async e => {
+    attempt.add(server.addHook('agent.permission.after', async e => {
       await engine.serial(async () => {
         await refreshRoles(); updateAgent(e.agent as never);
         if (config.mains.includes(e.agent.id)) await engine.resolved(e.agent.id, e.requestId, e.resolution, true);
         await tick();
       });
     }));
-    this.removers.push(server.addHook('agent.turn.after', async e => {
+    attempt.add(server.addHook('agent.turn.after', async e => {
       await engine.serial(async () => {
         await refreshRoles(); updateAgent(e.agent as never);
         if (config.mains.includes(e.agent.id) && e.outcome.kind === 'failed') await engine.turnEnded(e.agent.id, e.turnId, e.outcome);
@@ -176,9 +179,10 @@ export class EscalationRuntime {
     }));
 
     const { subscription } = await paseo.agents.list({ subscribe: {}, signal: this.lifetime.signal });
+    attempt.add(() => { void subscription.release().catch(() => {}); });
+    attempt.check();
     const statuses = new Map<string, string>();
-    this.removers.push(() => { void subscription.release().catch(() => {}); });
-    this.removers.push(subscription.subscribe({
+    attempt.add(subscription.subscribe({
       snapshot: ({ entries }) => {
         run(async () => {
           for (const { agent } of entries) {
@@ -204,14 +208,15 @@ export class EscalationRuntime {
       },
     }));
 
-    if (section.newObjects) await this.watchNewObjects(paseo, engine, workspaces, run, refreshRoles);
-
-    this.timer = setInterval(() => run(async () => { await tick(); }), 1000);
+    if (section.newObjects) await this.watchNewObjects(attempt, paseo, engine, workspaces, run, refreshRoles);
+    attempt.check();
+    const timer = setInterval(() => run(async () => { await tick(); }), 1000);
+    attempt.add(() => clearInterval(timer));
     if (section.quotaAlerts.enabled) {
       this.quotaAlerts = new QuotaAlerts({
         listReports: () => client.listUsageReports(),
         listAgentReports: agentId => client.listUsageReports({ agentId }),
-        credentials: () => quotaWebhookCredentials(process.env, quotaWebhookConfigPath(), quotaWebhookFileDir(process.env, section.quotaAlerts.fileDirectory)),
+        credentials: () => this.quotaCredentials(),
         post: (payload, credentials) => postQuotaAlert(payload, credentials, this.lifetime.signal),
         audit,
         mains: () => config.mains.map(id => engine.state.agents![id]).filter(Boolean).map(a => ({ agentId: a!.id, workspaceId: a!.workspaceId || null, title: a!.title || null, provider: a!.provider || null })),
@@ -220,15 +225,17 @@ export class EscalationRuntime {
         statePath: join(directory, 'quota-alerts.json'),
         dryRun: () => this.settings().delivery !== 'live',
       });
-      await this.quotaAlerts.start();
-      this.removers.push(() => this.quotaAlerts?.stop());
+      const alerts = this.quotaAlerts;
+      attempt.add(() => { alerts.stop(); if (this.quotaAlerts === alerts) this.quotaAlerts = null; });
+      await alerts.start();
+      attempt.check();
     }
     this.health = 'ready';
     this.error = null;
     this.log(`已启动，投递模式：${settings.delivery}`);
   }
 
-  private async watchNewObjects(paseo: Awaited<ReturnType<SharedDaemon['ready']>>['paseo'], engine: Engine, workspaces: Map<string, WorkspaceInfo>, run: (fn: () => Promise<unknown>) => void, refreshRoles: () => Promise<void>) {
+  private async watchNewObjects(attempt: Attempt, paseo: Awaited<ReturnType<SharedDaemon['ready']>>['paseo'], engine: Engine, workspaces: Map<string, WorkspaceInfo>, run: (fn: () => Promise<unknown>) => void, refreshRoles: () => Promise<void>) {
     const pathOf = async (path: string) => { try { return await realpath(path); } catch { return path.replace(/\/$/, ''); } };
     const announce = async (workspace: { id: string; name: string | null }, path: string, duplicates: string[]) => {
       await engine.enqueue('new_workspace', '', { workspaceId: workspace.id, title: workspace.name ?? '', path, duplicateWorkspaceIds: duplicates }, `workspace:${workspace.id}`);
@@ -237,11 +244,9 @@ export class EscalationRuntime {
       if (this.settings().enabled) await engine.tick();
     };
     const baseline = await paseo.workspaces.list({ subscribe: {} });
+    if (baseline.subscription) { const owned = baseline.subscription; attempt.add(() => { void owned.release().catch(() => {}); }); }
+    attempt.check();
     for (const w of baseline.entries) workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path: await pathOf(w.workspaceDirectory || w.projectRootPath) });
-    if (baseline.subscription) {
-      const owned = baseline.subscription;
-      this.removers.push(() => { void owned.release().catch(() => {}); });
-    }
     const stopWorkspaces = baseline.subscription?.subscribe({
       snapshot: ({ entries }) => {
         void (async () => {
@@ -263,9 +268,9 @@ export class EscalationRuntime {
         });
       },
     });
-    if (stopWorkspaces) this.removers.push(stopWorkspaces);
+    if (stopWorkspaces) attempt.add(stopWorkspaces);
     // 创建钩子覆盖创建瞬间；订阅用于补漏。相同工作区共用去重键。
-    this.removers.push(this.options.server.addHook('workspace.create.after', async e => {
+    attempt.add(this.options.server.addHook('workspace.create.after', async e => {
       await engine.serial(async () => {
         await refreshRoles();
         const w = e.workspace;
@@ -274,8 +279,9 @@ export class EscalationRuntime {
       });
     }));
     const projects = await paseo.projects.list();
+    attempt.check();
     const known = new Set(projects.projects.map(p => p.projectId));
-    this.removers.push(paseo.projects.subscribe(update => {
+    attempt.add(paseo.projects.subscribe(update => {
       if (update.kind !== 'upsert' || known.has(update.project.projectId)) return;
       known.add(update.project.projectId);
       run(async () => {
@@ -287,6 +293,24 @@ export class EscalationRuntime {
     }));
   }
 
+  private quotaCredentials() {
+    return this.options.quotaCredentials ? this.options.quotaCredentials() : quotaWebhookCredentials(process.env, quotaWebhookConfigPath(), quotaWebhookFileDir(process.env, this.options.section.quotaAlerts.fileDirectory));
+  }
+
+  /** 额度报警开了但没有凭据时的警告，页面显示；60 秒内只查一次。 */
+  private quotaWarning: { at: number; value: string | null } | null = null;
+  private async quotaCredentialWarning(): Promise<string | null> {
+    if (!this.options.section.quotaAlerts.enabled) return null;
+    if (this.quotaWarning && Date.now() - this.quotaWarning.at < WEBHOOK_CACHE_MS) return this.quotaWarning.value;
+    let value: string | null = null;
+    try {
+      if (!(await this.quotaCredentials())) value = '额度报警已开启，但没有找到凭据：报警只记录、不会发送。在 machine.json 的 escalation.quotaAlerts.fileDirectory 写凭据目录，或设置 QUOTA_WEBHOOK_URL 和 QUOTA_WEBHOOK_KEY。';
+    } catch (error) { value = `额度报警凭据无法读取：${summarizeError(error)}`; }
+    if (value && this.quotaWarning?.value !== value) this.log(value);
+    this.quotaWarning = { at: Date.now(), value };
+    return value;
+  }
+
   private schedule() {
     const { timezone, immediate, delayMinutes } = this.settings();
     return { timezone, immediate, delayMinutes };
@@ -295,7 +319,7 @@ export class EscalationRuntime {
   async stop() {
     this.stopped = true;
     this.lifetime.abort();
-    this.teardown();
+    this.attempt?.cancel();
   }
 
   markFailed(error: unknown) {
@@ -303,20 +327,30 @@ export class EscalationRuntime {
     this.error = summarizeError(error);
   }
 
-  /** 切换影子和实际发送。两种模式各用一份去重记录（state-shadow.json、state.json），互不消耗；未答复的问题带到新模式。 */
-  private async switchDelivery(next: 'shadow' | 'live') {
+  /**
+   * 切换影子和实际发送。两种模式各用一份去重记录（state-shadow.json、state.json），互不消耗；未答复的问题带到新模式。
+   * 顺序：先写好新记录文件，最后才提交设置；设置写失败时回退内存里的切换，不会出现“记录已切、设置没切”。
+   */
+  private async switchDelivery(next: 'shadow' | 'live', commit: () => void) {
     const engine = this.engine;
-    if (!engine) return;
+    if (!engine) { commit(); return; }
     await engine.serial(async () => {
       await saveState(this.statePath, engine.state);
+      if (next === 'live') this.options.beforeLive?.();
       const target = this.stateFile(next);
       const loaded = await loadState(target);
       loaded.agents = { ...engine.state.agents, ...loaded.agents };
       loaded.pending = { ...engine.state.pending, ...loaded.pending };
+      await saveState(target, loaded);
+      const previous = { state: engine.state, delivery: engine.config.delivery, path: this.statePath };
       engine.state = loaded;
       engine.config.delivery = next;
       this.statePath = target;
-      await saveState(target, loaded);
+      try { commit(); }
+      catch (error) {
+        engine.state = previous.state; engine.config.delivery = previous.delivery; this.statePath = previous.path;
+        throw error;
+      }
     });
   }
 
@@ -325,8 +359,9 @@ export class EscalationRuntime {
     if (this.options.forceShadow && patch.delivery === 'live') throw new Error(this.options.forceShadow);
     // 时段规则合并后整体校验，不合法就整个拒绝。
     EscalationScheduleSchema.parse({ timezone: patch.timezone ?? before.timezone, immediate: patch.immediate ?? before.immediate, delayMinutes: patch.delayMinutes ?? before.delayMinutes });
-    if (patch.delivery && patch.delivery !== before.delivery) await this.switchDelivery(patch.delivery);
-    this.options.settings.update(patch);
+    const commit = () => { this.options.settings.update(patch); };
+    if (patch.delivery && patch.delivery !== before.delivery) await this.switchDelivery(patch.delivery, commit);
+    else commit();
     return this.snapshot();
   }
 
@@ -371,7 +406,7 @@ export class EscalationRuntime {
     return {
       enabled: settings.enabled,
       status: failed ? 'error' : settings.enabled ? 'running' : 'stopped',
-      error: this.error ?? this.options.forceShadow ?? this.options.settings.error() ?? this.rolesError,
+      error: this.error ?? this.options.forceShadow ?? this.options.settings.error() ?? this.rolesError ?? await this.quotaCredentialWarning(),
       delivery: settings.delivery,
       timezone: settings.timezone,
       immediate: settings.immediate,

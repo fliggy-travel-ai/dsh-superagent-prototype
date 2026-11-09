@@ -1,21 +1,22 @@
-import { copyFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as rpc from '../../../shared/claude-accounts.ts';
 import { continuityInput } from '../../../shared/continuity-input.ts';
-import { legacyPluginEnabled } from '../../core/legacy-plugins.ts';
+import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
 import { createSettingsStore } from '../../core/settings-store.ts';
 import { isMainInstance, type Module } from '../types.ts';
 import { APPLE_SUFFIX, isAppleRelay, listAccounts } from './accounts.ts';
 import { CLAUDE_ACCOUNTS_FALLBACK, ClaudeAccountsSectionSchema, QuotaSettingsSchema, quotaDefaults, type ClaudeAccountsSection } from './config.ts';
 import { ContinuousUsage } from './continuous-usage.ts';
+import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from './config-writer.ts';
 import { baseLabel, withQuota } from './labels.ts';
 import { readLabels, setLabel } from './labels-file.ts';
 import { ensureConfigDirectory, LoginFlows, readAuthStatus } from './login.ts';
 import { migrateLegacyClaudeQuota } from './migrate.ts';
 import { bundledClaudeUsageInstalled, discoverAccounts, isClaudeProvider } from './providers.ts';
 import { QuotaLabelService } from './quota-labels.ts';
-import { ResumeService } from './resume.ts';
+import { cli, ResumeService } from './resume.ts';
 
 const ICON = 'server/vendor/paseo-0.15.0/claude-usage-source/icon.svg';
 
@@ -43,8 +44,9 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     const labelsFile = join(context.baseDirectory, 'labels.json');
     const settings = createSettingsStore(join(directory, 'settings.json'), QuotaSettingsSchema, quotaDefaults(config));
 
-    if (legacyPluginEnabled(home, config.legacyPluginId)) {
-      const message = `旧插件 ${config.legacyPluginId} 仍启用，已跳过额度来源 ${config.sourceId} 和整个模块。先停用旧插件，再重载本插件。`;
+    const legacy = legacyPluginStatus(home, config.legacyPluginId);
+    if (legacy.enabled) {
+      const message = `${legacy.problem ?? `旧插件 ${config.legacyPluginId} 仍启用`}，已跳过额度来源 ${config.sourceId} 和整个模块。先停用旧插件，再重载本插件。`;
       server.handle(rpc.claudeAccountsSnapshot, async () => emptySnapshot(message));
       const refuse = async () => { throw new Error(message); };
       server.handle(rpc.claudeAccountsConfigure, refuse);
@@ -116,15 +118,24 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     };
     const baseEnv = () => { const env = { ...process.env }; delete env.CLAUDE_CONFIG_DIR; return env; };
     const providerEnv = (id: string): NodeJS.ProcessEnv => ({ ...baseEnv(), ...Object.fromEntries(Object.entries(providersRaw()[id]?.env ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string')) });
-    const patchProvider = async (id: string, entry: Record<string, unknown>) => {
-      const { client } = await services.daemon.ready();
-      await client.patchDaemonConfig({ providers: { [id]: entry } } as never);
+    // 守护进程的 config.patch 只保存 enabled、additionalModels、paseoTools，不保存 extends、env、models、label：
+    // 直接写 config.json（备份、原子写入、写后读回核对），再让 Paseo 重载。
+    const writeProvider = (id: string, entry: Record<string, unknown>, backup: string | null) => {
+      writeProviderEntry(home, id, entry);
+      verifyProviderEntry(home, id, entry, backup);
+    };
+    const reloadProviders = async () => { await cli(['reload', '--json']); };
+    const rewriteLabel = async (id: string, label: string) => {
+      const backup = backupConfigFile(home);
+      writeProvider(id, { label }, backup);
+      await reloadProviders();
     };
     const flows = new LoginFlows({
       homeDirectory: homedir(),
       providers: providersRaw,
-      backupConfig: () => copyFileSync(join(home, 'config.json'), join(home, `config.json.bak-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}`)),
-      patchProvider,
+      backupConfig: () => backupConfigFile(home),
+      writeProvider,
+      reloadProviders,
       ensureConfigDirectory: dir => ensureConfigDirectory(dir, join(homedir(), '.claude')),
       findLoginWorkspace: async () => {
         const { paseo } = await services.daemon.ready();
@@ -179,15 +190,20 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
           const hidden = usage.identityEmail(providerEnv(providerId));
           if (!hidden || !isAppleRelay(hidden)) throw new Error('这个账号不是 Apple 登录，不需要确认真实邮箱');
           setLabel(labelsFile, hidden, `${real}${APPLE_SUFFIX}`);
-          await patchProvider(providerId, { label: withName(`Claude · ${real}${APPLE_SUFFIX}`) });
+          await rewriteLabel(providerId, withName(`Claude · ${real}${APPLE_SUFFIX}`));
         }
       }
-      if (label !== undefined) await patchProvider(providerId, { label: withName(label) });
+      if (label !== undefined) await rewriteLabel(providerId, withName(label));
       return snapshot();
     });
-    server.handle(rpc.claudeAccountsLoginStart, async input => { await flows.start(input); return snapshot(); });
-    server.handle(rpc.claudeAccountsLoginSubmitCode, async input => { await flows.submitCode(input); return snapshot(); });
-    server.handle(rpc.claudeAccountsLoginRetry, async ({ providerId }) => { await flows.retry(providerId); return snapshot(); });
+    // 添加账号引导在真机验证前默认关闭（claudeAccounts.loginGuide）。
+    const guide = <T>(run: () => Promise<T>) => async () => {
+      if (!config.loginGuide) throw new Error('添加账号引导还没有开放：在真机上验证后，把 machine.json 的 claudeAccounts.loginGuide 设为 true');
+      return run();
+    };
+    server.handle(rpc.claudeAccountsLoginStart, async input => { await guide(() => flows.start(input))(); return snapshot(); });
+    server.handle(rpc.claudeAccountsLoginSubmitCode, async input => { await guide(() => flows.submitCode(input))(); return snapshot(); });
+    server.handle(rpc.claudeAccountsLoginRetry, async ({ providerId }) => { await guide(() => flows.retry(providerId))(); return snapshot(); });
 
     return async () => { removeStart(); removeArchive(); removeEnd(); service.stop(); await usage.stop(); await labels.stop(); };
   },

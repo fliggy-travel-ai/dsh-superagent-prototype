@@ -73,7 +73,7 @@ export function resolveForwardTarget(input: { parentId: string; parentWorkspaceI
 }
 
 export interface RolesReader {
-  /** 没有文件算没有置顶；文件无法读取或解析时抛错，调用方不要把错误当作“没有置顶”。 */
+  /** 文件不存在、无法读取或无法解析时都抛错，调用方不要把错误当作“没有置顶”：要显示原因，且不做依赖角色的操作。 */
   read(): Promise<WorkspaceRoles>;
 }
 
@@ -89,7 +89,8 @@ export function createRolesReader(home: string): RolesReader {
         if (mtimeMs !== mtime) { cached = parseWorkspaceRoles(JSON.parse(await readFile(file, 'utf8'))); mtime = mtimeMs; }
         return cached;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') { mtime = -1; return parseWorkspaceRoles(null); }
+        mtime = -1;
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('工作区状态文件 workspaces.json 不存在，无法确定哪些工作区已置顶');
         throw error;
       }
     },
@@ -102,4 +103,30 @@ export function sessionRoles(home: string): RolesReader {
   let reader = readers.get(home);
   if (!reader) { reader = createRolesReader(home); readers.set(home, reader); }
   return reader;
+}
+
+export interface AncestorTarget { agentId: string; serverId?: string }
+
+/**
+ * 多层子会话：沿父会话标签逐层向上，找到置顶工作区中的主会话（与旧插件继承上层目标一致）。
+ * - 上层是主会话就停；上层记录已不存在，或不是主会话又没有更上层时，目标取最后找到的父会话，
+ *   投递时再按工作区接班（resolveForwardTarget）。
+ * - 上层在另一台主机（serverId 不是本机）时不能继续向上走，目标带 serverId，由对方主机解析。
+ * - 标签成环时停在成环处。本身就是主会话或没有父会话标签时返回 null。
+ */
+export function findMainAncestor(input: { agentId: string; lookup: (id: string) => RoleAgent | undefined; roles: WorkspaceRoles; localServerId?: string | null }): AncestorTarget | null {
+  const start = input.lookup(input.agentId);
+  let link = start && !isMainSession(start, input.roles) ? parentLink(start) : null;
+  const seen = new Set<string>([input.agentId]);
+  let last: AncestorTarget | null = null;
+  while (link) {
+    const remote = !!link.serverId && link.serverId !== input.localServerId;
+    last = remote ? { agentId: link.agentId, serverId: link.serverId! } : { agentId: link.agentId };
+    if (remote || seen.has(link.agentId)) return last;
+    seen.add(link.agentId);
+    const parent = input.lookup(link.agentId);
+    if (!parent || isMainSession(parent, input.roles)) return last;
+    link = parentLink(parent);
+  }
+  return last;
 }

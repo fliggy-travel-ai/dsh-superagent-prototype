@@ -18,9 +18,14 @@ test('子会话的待查看清除，主会话保留', () => {
   assert.equal(shouldClearAttention({ workspaceId: 'wks_old', status: 'idle', requiresAttention: true }, roles), false);
 });
 
-test('子会话等待工具授权时保留提醒，等待提问时清除', () => {
-  assert.equal(shouldClearAttention({ workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, pendingPermissions: [{ kind: 'tool' }] }, roles), false);
-  assert.equal(shouldClearAttention({ workspaceId: 'wks_sub', status: 'running', requiresAttention: true, pendingPermissions: [{ kind: 'question' }] }, roles), true);
+test('子会话等待工具授权时保留提醒；等待提问时，只有提问会转给主会话才清除', () => {
+  assert.equal(shouldClearAttention({ workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, pendingPermissions: [{ kind: 'tool' }] }, roles, { questionHandled: true }), false);
+  const question = { workspaceId: 'wks_sub', status: 'running', requiresAttention: true, pendingPermissions: [{ kind: 'question' }] };
+  assert.equal(shouldClearAttention(question, roles), false);
+  assert.equal(shouldClearAttention(question, roles, { questionHandled: false }), false);
+  assert.equal(shouldClearAttention(question, roles, { questionHandled: true }), true);
+  assert.equal(attentionClearScope(question, roles, { questionHandled: true }), 'agent');
+  assert.equal(attentionClearScope(question, roles), null);
 });
 
 test('已关闭、初始化中和状态未知的会话不处理', () => {
@@ -32,7 +37,7 @@ test('已关闭、初始化中和状态未知的会话不处理', () => {
 test('清除范围：提问和授权按会话，其余按工作区', () => {
   assert.equal(attentionClearScope({ workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, attentionReason: 'finished' }, roles), 'workspace');
   assert.equal(attentionClearScope({ workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, attentionReason: 'permission' }, roles), 'agent');
-  assert.equal(attentionClearScope({ workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, pendingPermissions: [{ kind: 'question' }] }, roles), 'agent');
+  assert.equal(attentionClearScope({ workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, pendingPermissions: [{ kind: 'question' }] }, roles, { questionHandled: true }), 'agent');
   assert.equal(attentionClearScope({ workspaceId: 'wks_main', status: 'idle', requiresAttention: true }, roles), null);
 });
 

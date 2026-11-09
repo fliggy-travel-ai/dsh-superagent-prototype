@@ -45,7 +45,7 @@ test('建配置目录：子目录权限 700，技能和提示词用链接共享�
 
 function fixture(options: { email?: string | null; urlLines?: string[]; workspace?: boolean; loggedInAfter?: number } = {}) {
   const log: string[] = [];
-  const state = { providers: { claude: { models: [{ id: 'm1' }] } } as Record<string, any>, patched: [] as Array<[string, any]>, labels: {} as Record<string, string>, typed: [] as string[], keys: [] as string[][], statusCalls: 0, provider: {} as Record<string, string>, killed: 0 };
+  const state = { providers: { claude: { models: [{ id: 'm1' }] } } as Record<string, any>, written: [] as Array<[string, any]>, reloads: 0, backups: [] as string[], reloadFails: false, labels: {} as Record<string, string>, typed: [] as string[], keys: [] as string[][], statusCalls: 0, provider: {} as Record<string, string>, killed: 0 };
   let phase: 'login' | 'shell' = 'login';
   const terminal: TerminalLike = {
     id: 'term-1',
@@ -55,8 +55,9 @@ function fixture(options: { email?: string | null; urlLines?: string[]; workspac
     kill: async () => { state.killed++; },
   };
   const ports: LoginPorts = {
-    homeDirectory: '/Users/test', providers: () => state.providers, backupConfig: () => { log.push('backup'); },
-    patchProvider: async (id, entry) => { state.patched.push([id, entry]); if (entry.label !== undefined || entry.extends) state.provider[id] = entry.label as string; },
+    homeDirectory: '/Users/test', providers: () => state.providers, backupConfig: () => { log.push('backup'); const path = `/backup/${state.backups.length}`; state.backups.push(path); return path; },
+    writeProvider: (id, entry) => { state.written.push([id, entry]); state.providers[id] = { ...state.providers[id], ...entry }; if (entry.label !== undefined) state.provider[id] = entry.label as string; },
+    reloadProviders: async () => { state.reloads++; if (state.reloadFails) throw new Error('reload failed'); },
     ensureConfigDirectory: dir => { log.push(`dir:${dir}`); },
     findLoginWorkspace: async () => options.workspace === false ? null : { id: 'wks-login', cwd: '/tmp/login' },
     createTerminal: async (workspaceId, name) => { log.push(`terminal:${workspaceId}:${name}`); return terminal; },
@@ -71,7 +72,8 @@ test('添加账号：写配置、建目录、开终端、读到登录链接，�
   const { flows, state, log } = fixture();
   const flow = await flows.start({});
   assert.deepEqual(log.slice(0, 3), ['backup', 'dir:/Users/test/.claude-2', 'terminal:wks-login:Claude 2 登录']);
-  const [id, entry] = state.patched[0]!;
+  const [id, entry] = state.written[0]!;
+  assert.equal(state.reloads, 1);
   assert.equal(id, 'claude-2');
   assert.equal(entry.extends, 'claude');
   assert.equal(entry.env.CLAUDE_CONFIG_DIR, '/Users/test/.claude-2');
@@ -91,18 +93,75 @@ test('重新登录已有账号：不改配置，只开终端', async () => {
   const { flows, state } = fixture();
   state.providers['claude-3'] = { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/Users/test/.claude-3' } };
   const flow = await flows.start({ providerId: 'claude-3' });
-  assert.deepEqual(state.patched, []);
+  assert.deepEqual(state.written, []);
   assert.equal(flow.providerId, 'claude-3');
   assert.equal(flow.configDir, '~/.claude-3');
   await assert.rejects(flows.start({ providerId: 'nope' }), /不存在/);
 });
 
-test('没有“账号登录”工作区时报错并保留已写入的配置，不开终端', async () => {
-  const { flows, state } = fixture({ workspace: false });
+test('没有“账号登录”工作区时先报错，不写配置、不备份、不开终端', async () => {
+  const { flows, state, log } = fixture({ workspace: false });
   const flow = await flows.start({});
   assert.match(flow.error!, /账号登录/);
-  assert.equal(flow.step, 3);
-  assert.equal(state.patched.length, 1);
+  assert.equal(flow.step, 1);
+  assert.deepEqual(state.written, []);
+  assert.deepEqual(log, []);
+  assert.equal(state.reloads, 0);
+});
+
+test('重复点“添加账号”复用没登录完的 Provider，不再新建、不再备份', async () => {
+  const { flows, state } = fixture({ workspace: false });
+  await flows.start({});
+  assert.equal(state.written.length, 0);
+  const second = fixture();
+  await second.flows.start({});
+  assert.equal(second.state.written.length, 1);
+  assert.equal(second.state.backups.length, 1);
+  second.state.providers['claude-2'].label = 'Claude 2（待登录）';
+  // 流程出错后再点添加：复用 claude-2
+  const failing = fixture({ workspace: true });
+  failing.state.providers['claude-2'] = { extends: 'claude', label: 'Claude 2（待登录）', env: { CLAUDE_CONFIG_DIR: '/Users/test/.claude-2' } };
+  const flow = await failing.flows.start({});
+  assert.equal(flow.providerId, 'claude-2');
+  assert.deepEqual(failing.state.written, []);
+  assert.deepEqual(failing.state.backups, []);
+});
+
+test('同时只允许一个登录流程；同一个账号可以重新开始，出错的流程可以被替换', async () => {
+  const { flows, state } = fixture();
+  await flows.start({});
+  await assert.rejects(flows.start({}), /已有进行中的登录引导（claude-2）/);
+  state.providers['claude-5'] = { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/Users/test/.claude-5' } };
+  await assert.rejects(flows.start({ providerId: 'claude-5' }), /已有进行中/);
+  const again = await flows.start({ providerId: 'claude-2' });
+  assert.equal(again.providerId, 'claude-2');
+  assert.equal(state.killed, 1);
+  const failed = fixture({ workspace: false });
+  await failed.flows.start({});
+  failed.state.providers['claude-5'] = { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/Users/test/.claude-5' } };
+  assert.equal((await failed.flows.start({ providerId: 'claude-5' })).providerId, 'claude-5');
+});
+
+test('写配置后重载；写后读回不一致时报错并停在第 1 步，不开终端', async () => {
+  const bad = fixture();
+  const original = bad.state.providers;
+  void original;
+  const ports = (bad.flows as unknown as { ports: LoginPorts }).ports;
+  ports.writeProvider = () => { throw new Error('写入后读回不一致（extends）。配置可能被其他程序改动，可用备份 /backup/0 恢复'); };
+  const flow = await bad.flows.start({});
+  assert.match(flow.error!, /读回不一致.*\/backup\/0/);
+  assert.equal(flow.step, 1);
+  assert.equal(bad.state.reloads, 0);
+  assert.ok(!bad.log.some(line => line.startsWith('terminal')));
+});
+
+test('配置已写入但重载失败：提示手动重载，不开终端', async () => {
+  const { flows, state, log } = fixture();
+  state.reloadFails = true;
+  const flow = await flows.start({});
+  assert.match(flow.error!, /配置已写入，但 Paseo 重载失败/);
+  assert.equal(state.written.length, 1);
+  assert.ok(!log.some(line => line.startsWith('terminal')));
 });
 
 test('提交授权码：输入到终端，读到邮箱后命名为“Claude · 邮箱”，流程结束并关闭终端', async () => {
@@ -151,4 +210,29 @@ test('重新触发：发送 Ctrl-C，确认回到命令行后重新登录并读�
   assert.deepEqual(state.keys[0], ['C-c']);
   assert.match(state.typed.join(''), /claude auth login --claudeai/);
   assert.equal(flow.loginUrl, URL_TEXT);
+});
+
+import { claudeAccountsLoginSubmitCode } from '../shared/claude-accounts.ts';
+
+test('授权码只能含字母、数字和 _ - # . ~，长度有限；含 shell 字符的被拒绝，终端里什么都不输入', async () => {
+  const { flows, state } = fixture();
+  await flows.start({});
+  state.typed.length = 0; state.keys.length = 0;
+  for (const code of ['x; rm -rf ~', '$(touch /tmp/x)', 'a b', 'a`b`', 'a\nb', 'a|b', "a'b", 'a&b', 'a'.repeat(513), '']) {
+    await assert.rejects(flows.submitCode({ providerId: 'claude-2', code }), /授权码/, JSON.stringify(code));
+  }
+  assert.deepEqual(state.typed, []);
+  assert.deepEqual(state.keys, []);
+  assert.equal(claudeAccountsLoginSubmitCode.input.safeParse({ providerId: 'claude-2', code: 'x; rm -rf ~' }).success, false);
+  assert.equal(claudeAccountsLoginSubmitCode.input.safeParse({ providerId: 'claude-2', code: 'AbC123_-.~#xyz' }).success, true);
+});
+
+test('写入授权码前确认终端仍在等待授权码，否则拒绝，不输入', async () => {
+  const { flows, state, terminal } = fixture();
+  await flows.start({});
+  terminal.sendKeys(['C-c']);
+  state.typed.length = 0; state.keys.length = 0;
+  await assert.rejects(flows.submitCode({ providerId: 'claude-2', code: 'valid-code#123' }), /终端已不在等待授权码/);
+  assert.deepEqual(state.typed, []);
+  assert.deepEqual(state.keys, []);
 });

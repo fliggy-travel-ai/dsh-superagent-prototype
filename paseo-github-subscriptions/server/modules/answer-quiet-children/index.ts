@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import * as rpc from '../../../shared/quiet.ts';
-import { legacyPluginEnabled } from '../../core/legacy-plugins.ts';
+import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
 import { sessionRoles } from '../../core/session-roles.ts';
 import { createSettingsStore } from '../../core/settings-store.ts';
 import type { RoleAgent } from '../../core/session-roles.ts';
@@ -42,7 +42,7 @@ export const quietChildrenModule: Module<QuietSection> = {
     const directory = join(context.stateDirectory, 'quiet-children');
     const roles = sessionRoles(services.home);
     const resolveLocal = createMainResolver({ list: () => listAgents(services.daemon as never), roles });
-    const forwarderActive = legacyPluginEnabled(services.home, config.legacyForwarderId);
+    const forwarder = legacyPluginStatus(services.home, config.legacyForwarderId);
     const runtime = new QuietRuntime({
       server: server as PluginServerContext,
       daemon: services.daemon,
@@ -51,7 +51,7 @@ export const quietChildrenModule: Module<QuietSection> = {
       machineName: context.machine.machine ?? 'local',
       settings: createSettingsStore(join(directory, 'settings.json'), QuietSettingsSchema, quietDefaults(config)),
       resolveLocal,
-      ...(forwarderActive ? { forwardBlocked: `旧插件 ${config.legacyForwarderId} 仍启用，事件转发已关闭。先停用旧插件，再打开事件转发。` } : {}),
+      ...(forwarder.enabled ? { forwardBlocked: `${forwarder.problem ?? `旧插件 ${config.legacyForwarderId} 仍启用`}，事件转发已关闭。先停用旧插件，再打开事件转发。` } : {}),
     });
     runtime.start();
     server.handle(rpc.quietSnapshot, async () => runtime.snapshot());

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startModules } from '../server/core/modules.ts';
@@ -10,10 +10,12 @@ import { resolveInstance } from '../shared/instances.ts';
 import { escalationModule } from '../server/modules/answer-escalation/index.ts';
 import { quietChildrenModule } from '../server/modules/answer-quiet-children/index.ts';
 
-function setup(files: Record<string, unknown> = {}, json: unknown = { version: 1, modules: { 'answer.escalation': true, 'answer.quietChildren': true } }, ready: () => Promise<never> = () => new Promise<never>(() => {})) {
+function setupBroken() { return setup({}, undefined, undefined, '{坏'); }
+function setup(files: Record<string, unknown> = {}, json: unknown = { version: 1, modules: { 'answer.escalation': true, 'answer.quietChildren': true } }, ready: () => Promise<never> = () => new Promise<never>(() => {}), rawConfig?: string) {
   const home = mkdtempSync(join(tmpdir(), 'answer-modules-'));
   mkdirSync(join(home, 'github-subscriptions'));
   for (const [name, value] of Object.entries(files)) { mkdirSync(join(home, name, '..'), { recursive: true }); writeFileSync(join(home, name), JSON.stringify(value)); }
+  if (rawConfig !== undefined) writeFileSync(join(home, 'config.json'), rawConfig);
   const handlers = new Map<string, (input: unknown) => Promise<any>>();
   const hooks: string[] = [];
   const server = {
@@ -49,6 +51,7 @@ test('升级通知和子会话免提醒注册约定的 RPC，默认影子模式�
     assert.equal(quiet.forwardEvents, false);
     assert.equal(quiet.enabled, true);
     assert.equal(quiet.pinnedWorkspaceCount, 0);
+    assert.match(quiet.error, /workspaces\.json 不存在/);
   } finally { await run.done(); }
 });
 
@@ -75,6 +78,27 @@ test('旧事件通知插件仍启用时：升级通知强制影子模式，事�
     await assert.rejects(run.handlers.get('quiet.configure')!({ forwardEvents: true }), /仍启用/);
     assert.equal((await run.handlers.get('quiet.snapshot')!({})).forwardEvents, false);
   } finally { await run.done(); }
+});
+
+test('旧插件仍启用时不复制旧状态；停用后启动才复制，旧文件不动', async () => {
+  const legacyState = { pending: {}, outbox: [], seen: { a: 1 } };
+  const active = setup({ 'config.json': { plugins: { 'event-notifications': { enabled: true } } }, 'event-notifications/state.json': legacyState });
+  try { assert.equal(existsSync(join(active.home, 'github-subscriptions', 'escalation', 'state.json')), false); } finally { await active.done(); }
+  const stopped = setup({ 'event-notifications/state.json': legacyState });
+  try {
+    assert.deepEqual(JSON.parse(readFileSync(join(stopped.home, 'github-subscriptions', 'escalation', 'state.json'), 'utf8')), legacyState);
+    assert.deepEqual(JSON.parse(readFileSync(join(stopped.home, 'event-notifications', 'state.json'), 'utf8')), legacyState);
+  } finally { await stopped.done(); }
+});
+
+test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：强制影子，事件转发打不开', async () => {
+  const broken = setupBroken();
+  try {
+    const escalation = await broken.handlers.get('escalation.snapshot')!({});
+    assert.equal(escalation.delivery, 'shadow');
+    assert.match(escalation.error, /config\.json 无法解析/);
+    await assert.rejects(broken.handlers.get('quiet.configure')!({ forwardEvents: true }), /config\.json 无法解析/);
+  } finally { await broken.done(); }
 });
 
 test('置顶工作区数量来自 workspaces.json；无法读取时给出错误而不是当作没有', async () => {

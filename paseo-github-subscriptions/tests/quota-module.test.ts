@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as nodeModule from 'node:module';
@@ -25,7 +25,7 @@ hooks.deregister();
 
 const RELAY = 'private' + 'relay.appleid.example';
 
-function setup(options: { plugins?: Record<string, unknown>; json?: unknown; legacy?: Record<string, string> } = {}) {
+function setup(options: { plugins?: Record<string, unknown>; json?: unknown; legacy?: Record<string, string>; rawConfig?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'quota-module-'));
   const home = join(root, 'paseo'); const state = join(home, 'github-subscriptions');
   mkdirSync(state, { recursive: true });
@@ -34,6 +34,7 @@ function setup(options: { plugins?: Record<string, unknown>; json?: unknown; leg
   writeFileSync(join(home, 'config.json'), JSON.stringify({ plugins: options.plugins ?? {}, agents: { providers: {
     claude: { label: 'Claude · 默认' }, 'claude-2': { extends: 'claude', label: 'Claude · 旧名称', env: { CLAUDE_CONFIG_DIR: configDir } },
   } } }));
+  if (options.rawConfig !== undefined) writeFileSync(join(home, 'config.json'), options.rawConfig);
   if (options.legacy) { mkdirSync(join(home, 'claude-quota-resume')); for (const [name, text] of Object.entries(options.legacy)) writeFileSync(join(home, 'claude-quota-resume', name), text); }
   const cli = join(root, 'paseo-cli'); writeFileSync(cli, '#!/bin/sh\necho "[]"\n'); chmodSync(cli, 0o755);
   const previousCli = process.env.PASEO_CLI; process.env.PASEO_CLI = cli;
@@ -47,7 +48,7 @@ function setup(options: { plugins?: Record<string, unknown>; json?: unknown; leg
     addHook: () => () => {}, on: () => () => {}, before: () => () => {}, registerProvider: () => {},
     registerUsageSource: (source: { id: string; label: string }) => { sources.push(source); }, registerSettings: () => { throw new Error('unused'); },
   };
-  const daemon = { ready: async () => ({ client: { patchDaemonConfig: async (patch: unknown) => { patches.push(patch); } }, paseo: {} }), current: () => null };
+  const daemon = { ready: async () => ({ client: {}, paseo: {} }), current: () => null };
   const json = options.json ?? { version: 1, modules: { 'usage.claudeAccounts': true } };
   const machine = loadMachineConfig(join(state, 'machine.json'), { claudeAccounts: claudeAccountsModule.config!.spec }, () => JSON.stringify(json));
   const host = startModules([claudeAccountsModule], {
@@ -100,6 +101,16 @@ test('旧插件仍启用：不注册额度来源，模块报错，页面看到�
   } finally { await run.done(); }
 });
 
+test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：不注册额度来源，页面显示原因', async () => {
+  const run = setup({ rawConfig: '{坏' });
+  try {
+    assert.deepEqual(run.sources, []);
+    assert.equal(run.host.status().modules[0]!.state, 'error');
+    const snapshot = await run.handlers.get('claude-accounts.snapshot')!({});
+    assert.match(snapshot.error, /config\.json 无法解析.*按旧插件仍启用/);
+  } finally { await run.done(); }
+});
+
 test('设置：自动继续默认值和名称带额度写入设置文件并立即生效', async () => {
   const run = setup();
   try {
@@ -116,15 +127,30 @@ test('设置：自动继续默认值和名称带额度写入设置文件并立�
 test('改名：用 config.patch 改 Provider 显示名称；Apple 账号确认真实邮箱写入 labels.json', async () => {
   const run = setup();
   try {
+    const label = () => JSON.parse(readFileSync(join(run.home, 'config.json'), 'utf8')).agents.providers['claude-2'].label;
     await run.handlers.get('claude-accounts.rename')!({ providerId: 'claude-2', label: 'Claude · 备用' });
-    assert.deepEqual(run.patches[0], { providers: { 'claude-2': { label: 'Claude · 备用' } } });
+    assert.match(label(), /备用/);
     const renamed = await run.handlers.get('claude-accounts.rename')!({ providerId: 'claude-2', realEmail: 'Real@Example.com' });
     assert.deepEqual(JSON.parse(readFileSync(join(run.state, 'labels.json'), 'utf8')), { [`x@${RELAY}`]: 'real@example.com（Apple 登录）' });
-    assert.deepEqual(run.patches[1], { providers: { 'claude-2': { label: 'Claude · real@example.com（Apple 登录）' } } });
+    assert.match(label(), /real@example\.com（Apple 登录）/);
+    assert.equal(readdirSync(run.home).filter(name => name.startsWith('config.json.bak-')).length, 2);
     assert.equal(renamed.accounts[1].email, 'real@example.com');
     await assert.rejects(run.handlers.get('claude-accounts.rename')!({ providerId: 'claude', realEmail: 'a@example.com' }), /不是 Apple 登录/);
     await assert.rejects(run.handlers.get('claude-accounts.rename')!({ providerId: 'nope', label: 'x' }), /不存在/);
   } finally { await run.done(); }
+});
+
+test('添加账号引导在真机验证前默认关闭；打开 loginGuide 后才进入流程', async () => {
+  const closed = setup();
+  try {
+    for (const name of ['claude-accounts.login.start', 'claude-accounts.login.submit-code', 'claude-accounts.login.retry']) {
+      await assert.rejects(closed.handlers.get(name)!({ providerId: 'claude-2', code: 'abc' }), /loginGuide/);
+    }
+  } finally { await closed.done(); }
+  const open = setup({ json: { version: 1, modules: { 'usage.claudeAccounts': true }, claudeAccounts: { loginGuide: true } } });
+  try {
+    await assert.rejects(open.handlers.get('claude-accounts.login.retry')!({ providerId: 'claude-2' }), /没有正在进行/);
+  } finally { await open.done(); }
 });
 
 test('旧状态目录存在时启动自动复制，旧文件不动', async () => {

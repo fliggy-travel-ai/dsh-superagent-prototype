@@ -31,6 +31,7 @@ export function migrateLegacyEscalation(legacyDirectory: string, targetDirectory
     }
     if (suggestion.delivery === 'live') notes.push('旧配置是实际发送；新模块默认影子，核对 escalation.records 和 events.jsonl 后再在页面切到实际发送。');
     else notes.push('新模块默认影子模式。');
+    notes.push('额度报警 webhook 的凭据目录：旧插件默认从它源码 server/quota.ts 里写的目录读取，请把该目录写进 machine.json 的 escalation.quotaAlerts.fileDirectory（或设置环境变量 QUOTA_WEBHOOK_FILE_DIR）。');
     notes.push('旧插件的 Keychain 服务名写在旧源码里，需要在 machine.json 的 escalation.webhook 中填 urlService、authService。');
   } catch { /* 没有旧配置或无法解析：不给建议 */ }
   return { report, suggestion, notes };

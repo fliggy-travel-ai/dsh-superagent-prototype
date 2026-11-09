@@ -95,10 +95,13 @@ export class QuietRuntime {
       this.rolesFailure = message;
       return;
     }
-    const scope = attentionClearScope(agent, roles);
+    // 提问提醒只在有人接手时清除：转发已打开且找到转发目标，或旧的转发插件仍在运行。
+    const hasQuestion = (agent.pendingPermissions ?? []).some(request => request.kind === 'question');
+    const forwarding = await this.forwardStatus(agent);
+    const questionHandled = hasQuestion && (!!this.options.forwardBlocked || forwarding.status === 'forwarded');
+    const scope = attentionClearScope(agent, roles, { questionHandled });
     if (!scope) return;
     this.clearer?.enqueue(scope, agent.id, agent.workspaceId);
-    const forwarding = await this.forwardStatus(agent);
     this.handled.add({
       id: `${agent.id}:${Date.now()}`, agentId: agent.id, sessionTitle: agent.title || this.titles.get(agent.id) || '未命名会话',
       eventKind: agent.attentionReason === 'error' ? 'failed' : 'completed', clearedAttention: true,

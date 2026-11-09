@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import * as rpc from '../../../shared/escalation.ts';
-import { legacyPluginEnabled } from '../../core/legacy-plugins.ts';
+import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
 import { sessionRoles } from '../../core/session-roles.ts';
 import { createSettingsStore } from '../../core/settings-store.ts';
 import { startWithRetry } from '../../core/start-retry.ts';
@@ -28,9 +28,15 @@ export const escalationModule: Module<EscalationSection> = {
     const { server, config, services } = context;
     const directory = join(context.stateDirectory, 'escalation');
     const legacyDirectory = config.legacyDirectory ?? join(services.home, LEGACY_PLUGIN);
-    const migration = migrateLegacyEscalation(legacyDirectory, directory);
-    if (migration.report.copied.length) console.error(`[开发自动化·升级通知] 已复制旧状态：${migration.report.copied.join('、')}。旧文件未改动。${migration.notes.join('')}`);
-    const legacyActive = legacyPluginEnabled(services.home, LEGACY_PLUGIN);
+    const legacy = legacyPluginStatus(services.home, LEGACY_PLUGIN);
+    // 旧插件仍在运行时它的状态还在变，复制过来没有意义，切实际发送后还可能重复发 Grok：不复制。
+    // 切到实际发送前（beforeLive）再试一次，只复制不覆盖。
+    const copyLegacy = () => {
+      if (legacy.enabled) return;
+      const migration = migrateLegacyEscalation(legacyDirectory, directory);
+      if (migration.report.copied.length) console.error(`[开发自动化·升级通知] 已复制旧状态：${migration.report.copied.join('、')}。旧文件未改动。${migration.notes.join('')}`);
+    };
+    copyLegacy();
     const runtime = new EscalationRuntime({
       server,
       daemon: services.daemon,
@@ -39,7 +45,8 @@ export const escalationModule: Module<EscalationSection> = {
       machineName: context.machine.machine ?? 'local',
       section: config,
       settings: createSettingsStore(join(directory, 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(config)),
-      ...(legacyActive ? { forceShadow: `旧插件 ${LEGACY_PLUGIN} 仍启用，已强制影子模式。先停用旧插件，再切换到实际发送。` } : {}),
+      beforeLive: copyLegacy,
+      ...(legacy.enabled ? { forceShadow: `${legacy.problem ?? `旧插件 ${LEGACY_PLUGIN} 仍启用`}，已强制影子模式。先停用旧插件，再切换到实际发送。` } : {}),
     });
     const lifetime = new AbortController();
     void startWithRetry(() => runtime.start().catch(error => { runtime.markFailed(error); throw error; }), {

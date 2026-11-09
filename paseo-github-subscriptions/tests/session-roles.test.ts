@@ -73,11 +73,11 @@ test('转发目标：不把子会话自己当作接班会话', () => {
   assert.equal(resolveForwardTarget({ parentId: 'gone', parentWorkspaceId: 'wks_main', childId: 'c', agents, roles }), null);
 });
 
-test('读取器按修改时间缓存；没有文件算没有置顶；损坏时抛错而不是当作没有置顶', async () => {
+test('读取器按修改时间缓存；文件不存在或损坏时都抛错，不当作没有置顶', async () => {
   const home = mkdtempSync(join(tmpdir(), 'roles-'));
   try {
     const reader = createRolesReader(home);
-    assert.equal((await reader.read()).pinned.size, 0);
+    await assert.rejects(reader.read(), /workspaces\.json 不存在/);
     mkdirSync(join(home, 'projects'));
     const file = join(home, 'projects', 'workspaces.json');
     writeFileSync(file, JSON.stringify([{ workspaceId: 'w1', pinnedAt: 'x' }]));
@@ -85,4 +85,43 @@ test('读取器按修改时间缓存；没有文件算没有置顶；损坏时�
     writeFileSync(file, '{坏');
     await assert.rejects(reader.read());
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+import { findMainAncestor } from '../server/core/session-roles.ts';
+const link = (parent: string, serverId?: string) => ({ 'paseo.parent-agent-id': parent, ...(serverId ? { 'paseo.parent-server-id': serverId } : {}) });
+
+test('多层子会话沿父会话标签逐层向上，找到置顶工作区中的主会话', () => {
+  const agents = new Map<string, RoleAgent>([
+    ['main', agent('main')],
+    ['mid', agent('mid', { workspaceId: 'wks_sub', labels: link('main') })],
+    ['leaf', agent('leaf', { workspaceId: 'wks_sub', labels: link('mid') })],
+  ]);
+  const lookup = (id: string) => agents.get(id);
+  assert.deepEqual(findMainAncestor({ agentId: 'leaf', lookup, roles }), { agentId: 'main' });
+  assert.deepEqual(findMainAncestor({ agentId: 'mid', lookup, roles }), { agentId: 'main' });
+  assert.equal(findMainAncestor({ agentId: 'main', lookup, roles }), null);
+});
+
+test('上层会话已不在记录里或不在置顶工作区且没有更上层时，目标取最后找到的父会话，由投递时再按工作区接班', () => {
+  const agents = new Map<string, RoleAgent>([
+    ['mid', agent('mid', { workspaceId: 'wks_sub', labels: link('gone') })],
+    ['leaf', agent('leaf', { workspaceId: 'wks_sub', labels: link('mid') })],
+    ['orphan', agent('orphan', { workspaceId: 'wks_sub' })],
+    ['leaf2', agent('leaf2', { workspaceId: 'wks_sub', labels: link('orphan') })],
+  ]);
+  const lookup = (id: string) => agents.get(id);
+  assert.deepEqual(findMainAncestor({ agentId: 'leaf', lookup, roles }), { agentId: 'gone' });
+  assert.deepEqual(findMainAncestor({ agentId: 'leaf2', lookup, roles }), { agentId: 'orphan' });
+});
+
+test('父会话标签成环时不死循环；跨主机的上层不能继续向上走', () => {
+  const agents = new Map<string, RoleAgent>([
+    ['a', agent('a', { workspaceId: 'wks_sub', labels: link('b') })],
+    ['b', agent('b', { workspaceId: 'wks_sub', labels: link('a') })],
+    ['remote-child', agent('remote-child', { workspaceId: 'wks_sub', labels: link('far', 'srv_other') })],
+  ]);
+  const lookup = (id: string) => agents.get(id);
+  assert.ok(findMainAncestor({ agentId: 'a', lookup, roles }));
+  assert.deepEqual(findMainAncestor({ agentId: 'remote-child', lookup, roles, localServerId: 'srv_local' }), { agentId: 'far', serverId: 'srv_other' });
+  assert.deepEqual(findMainAncestor({ agentId: 'remote-child', lookup, roles, localServerId: 'srv_other' }), { agentId: 'far' });
 });

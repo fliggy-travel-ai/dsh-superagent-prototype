@@ -89,6 +89,7 @@
     "labelWithQuota": true,
     "autoResumeDefault": false,
     "renewal": true,
-    "loginWorkspaceName": "账号登录"
+    "loginWorkspaceName": "账号登录",
+    "loginGuide": false
   }
 }
