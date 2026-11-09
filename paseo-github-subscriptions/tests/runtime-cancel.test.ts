@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EscalationRuntime } from '../server/modules/answer-escalation/runtime.ts';
@@ -68,23 +68,16 @@ import { writeFileSync } from 'node:fs';
 import { Engine, emptyState } from '../server/notify/engine.ts';
 import { loadState } from '../server/notify/store.ts';
 
-test('切换实际发送：写设置失败时回退，状态、模式和记录文件都保持原样', async () => {
+test('影子模式已删除：去重记录只用 state.json，改设置不写 state-shadow.json', async () => {
   const f = fixture();
   try {
     const section = { ...ESCALATION_FALLBACK };
-    const blocker = join(f.dir, 'blocker'); writeFileSync(blocker, 'x');
-    // 设置文件放在“文件”下面，写入必然失败。
-    const settings = createSettingsStore(join(blocker, 's.json'), RuntimeSettingsSchema, runtimeDefaults(section));
+    const settings = createSettingsStore(join(f.dir, 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(section));
     const runtime = new EscalationRuntime({ server: f.server as never, daemon: f.daemon as never, roles: f.roles, directory: f.dir, machineName: 'test', section, settings, log: () => {} });
-    const state = emptyState(); state.pending['q'] = { agentId: 'a', requestId: 'q', at: 1, data: {} };
-    const engine = new Engine({ hostId: 'h', machine: 'h', delivery: 'shadow', mains: [], children: {} }, state, async () => {}, async () => {}, async () => true);
-    Object.assign(runtime as unknown as Record<string, unknown>, { engine, statePath: join(f.dir, 'state-shadow.json') });
-    await assert.rejects(runtime.configure({ delivery: 'live' }));
-    assert.equal(engine.config.delivery, 'shadow');
-    assert.equal(engine.state, state);
-    assert.equal((runtime as unknown as { statePath: string }).statePath, join(f.dir, 'state-shadow.json'));
-    assert.equal(settings.read().delivery, 'shadow');
-    assert.deepEqual(Object.keys((await loadState(join(f.dir, 'state-shadow.json'))).pending), ['q']);
+    assert.equal((runtime as unknown as { statePath: string }).statePath, join(f.dir, 'state.json'));
+    const next = await runtime.configure({ delayMinutes: 10 });
+    assert.equal(next.delayMinutes, 10);
+    assert.equal(existsSync(join(f.dir, 'state-shadow.json')), false);
   } finally { f.done(); }
 });
 

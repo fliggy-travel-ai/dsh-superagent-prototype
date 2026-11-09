@@ -530,7 +530,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       '升级通知模块未启用时，不应显示发测试通知按钮',
     );
     daemon.down = true;
-    const saveDelayBtnWhileOff = findNodes(escDrawerTree, n => n.props.accessibilityLabel === '保存分钟')[0];
+    const saveDelayBtnWhileOff = findNodes(escDrawerTree, n => n.props.accessibilityLabel === '保存等待时间')[0];
     assert.ok(saveDelayBtnWhileOff);
     (saveDelayBtnWhileOff.props.onPress as () => void)();
     await new Promise(r => setTimeout(r, 20));
@@ -590,11 +590,11 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     const escText = collectText(escDrawerTree);
     assert.equal(escText.includes('去设置更换'), false);
-    assert.match(escText, /8 位指纹/);
+    assert.match(escText, /8 位识别码/);
     const urlInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 地址')[0];
-    const authInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 认证头')[0];
+    const authInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 鉴权信息')[0];
     assert.ok(urlInput, '升级通知模块启用后编辑面板应有 Webhook 地址输入框');
-    assert.ok(authInput, '升级通知模块启用后编辑面板应有 Webhook 认证头输入框');
+    assert.ok(authInput, '升级通知模块启用后编辑面板应有 Webhook 鉴权信息输入框');
     assert.equal(
       findNodes(escDrawerTree, n => n.props.accessibilityLabel === '发测试通知').length,
       0,
@@ -605,7 +605,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     const saveWebhookBtn = findNodes(
       escDrawerTree,
-      n => n.props.accessibilityLabel === '更换 Webhook 凭据' || n.props.accessibilityLabel === '保存 Webhook 凭据',
+      n => n.props.accessibilityLabel === '更换地址' || n.props.accessibilityLabel === '保存地址',
     )[0];
     assert.ok(saveWebhookBtn, '应有保存/更换 Webhook 凭据按钮');
     (saveWebhookBtn.props.onPress as () => void)();
@@ -791,7 +791,7 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   assert.match(text, /未运行/);
   assert.match(text, /01:00/);
   assert.match(text, /12:00/);
-  assert.match(text, /最近投递记录/);
+  assert.equal(text.includes('最近投递记录'), false);
   const btSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '蓝牙在场判定');
   assert.equal(btSwitch.length, 0, '蓝牙卡片不应放置偷偷改问答模式的假开关');
 
@@ -1231,9 +1231,11 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   );
   const delayInput = findNodes(tree, (el) => el.props.accessibilityLabel === '其余时段等待分钟数')[0];
   assert.equal(delayInput?.props.value, '15');
-  const saveScheduleBtn = findNodes(tree, (el) => collectText(el).trim() === '保存分钟' && typeof el.props.onPress === 'function')[0];
+  const saveScheduleBtn = findNodes(tree, (el) => collectText(el).trim() === '保存等待时间' && typeof el.props.onPress === 'function')[0];
   assert.ok(saveScheduleBtn);
-  await (saveScheduleBtn.props.onPress as () => Promise<void>)();
+  (saveScheduleBtn.props.onPress as () => void)();
+  // 按钮回调不返回 Promise：等保存完成、结果提示写入后再检查。
+  await new Promise(r => setTimeout(r, 20));
   assert.ok(savedEscConfig);
   const immediateSent = (savedEscConfig as { immediate: Array<{ days: unknown }> }).immediate;
   assert.deepEqual(immediateSent[0]?.days, [1, 3, 5], '自定义星期数组不应被改写为 weekdays');
@@ -1478,4 +1480,100 @@ test('蓝牙在场判定：显示当前锚定设备和信号强度，“设为�
   tree = render();
   text = collectText(tree);
   assert.match(text, /来源主机已变化，请刷新/);
+});
+
+test('升级通知编辑面板：没有投递模式和最近投递列表；等待分钟和免等时段有明确的保存按钮与结果提示；Webhook 用易懂的名称；旧插件仍启用时提示先停用', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
+  const { bind } = await import('../client/ui.tsx');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+  const mockTheme = {
+    colors: {
+      surface0: '#151517', surface1: '#1c1c1f', surface2: '#2b2b2f', border: '#303035', foreground: '#ececef', foregroundMuted: '#8e8e95',
+      accent: '#5b8cff', accentForeground: '#ffffff', statusSuccess: '#4cc274', statusWarning: '#e3a33b', statusDanger: '#ff6b66',
+    },
+  };
+  const daemon = new FakeDaemon('shadow');
+  daemon.latencyMs = 0;
+  daemon.machineSettings = { ...daemon.machineSettings, modules: daemon.machineSettings.modules.map(m => m.id === 'answer.escalation' ? { ...m, enabled: true, state: 'running' } : m) };
+  daemon.escalation = { ...daemon.escalation, enabled: true, status: 'running' };
+  const configures: Array<Record<string, unknown>> = [];
+  let failConfigure: string | null = null;
+  const origRpc = daemon.rpc.bind(daemon);
+  daemon.rpc = async <I, O>(contract: { name: string }, input: I): Promise<O> => {
+    if (contract.name === 'escalation.configure') {
+      configures.push(input as Record<string, unknown>);
+      if (failConfigure) throw new Error(failConfigure);
+    }
+    return origRpc(contract as never, input);
+  };
+  const control = createControlStore(daemon as never, { list: async () => ({ entries: [], pageInfo: { hasMore: false } }) } as never);
+  await Promise.all([control.refresh(), control.refreshUnify()]);
+  const Bound = bind(
+    { store: { subscribe: () => () => {}, getState: () => ({ snapshot: daemon.state, error: null, loaded: true }) } as never, control, openScreen: () => {} },
+    MainScreen,
+  );
+  const renderer = createTestRenderer();
+  const render = () => renderer.render(() =>
+    React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: true, platform: 'web' }, params: { page: 'answer', drawer: 'escalation' } } as never),
+  );
+  const press = (tree: RenderedNode, label: string) => {
+    const node = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === label)[0];
+    assert.ok(node, `找不到按钮：${label}`);
+    (node.props.onPress as () => void)();
+  };
+  const input = (tree: RenderedNode, label: string) => {
+    const node = findNodes(tree, n => n.props.accessibilityLabel === label && typeof n.props.onChangeText === 'function')[0];
+    assert.ok(node, `找不到输入框：${label}`);
+    return node;
+  };
+
+  let tree = render();
+  let text = collectText(tree);
+  for (const gone of ['投递模式', '影子', '最近投递记录', '凭据', '指纹']) assert.equal(text.includes(gone), false, `面板不应出现“${gone}”`);
+  assert.match(text, /Grok bot 类个人机器人通知 Webhook/);
+  assert.match(text, /识别码/);
+  // 等待分钟输入框不再是 56 宽的窄框。
+  const delay = input(tree, '其余时段等待分钟数');
+  const width = ([] as Array<{ width?: number }>).concat(delay.props.style as never).reduce((value, style) => style?.width ?? value, 0 as number | undefined);
+  assert.ok(!width || width >= 72, `等待分钟输入框宽度过窄：${width}`);
+
+  (delay.props.onChangeText as (v: string) => void)('15');
+  tree = render();
+  press(tree, '保存等待时间');
+  await tick();
+  tree = render();
+  assert.equal(configures.at(-1)?.delayMinutes, 15);
+  assert.match(collectText(tree), /已保存：其余时段满 15 分钟未答后通知/);
+
+  (input(tree, '其余时段等待分钟数').props.onChangeText as (v: string) => void)('abc');
+  tree = render();
+  press(tree, '保存等待时间');
+  await tick();
+  tree = render();
+  assert.match(collectText(tree), /请填写 0 或正整数分钟/);
+
+  failConfigure = '时区无效';
+  (input(tree, '其余时段等待分钟数').props.onChangeText as (v: string) => void)('20');
+  tree = render();
+  press(tree, '保存等待时间');
+  await tick();
+  tree = render();
+  assert.match(collectText(tree), /保存失败：时区无效/);
+  failConfigure = null;
+
+  press(tree, '添加免等时段');
+  await tick();
+  tree = render();
+  assert.match(collectText(tree), /已添加免等时段/);
+
+  daemon.escalation = { ...daemon.escalation, status: 'error', blockedReason: '旧插件 event-notifications 仍启用，升级通知不发送。先停用旧插件，再重载本插件。', error: '旧插件 event-notifications 仍启用，升级通知不发送。先停用旧插件，再重载本插件。' };
+  await control.refreshUnify();
+  tree = render();
+  text = collectText(tree);
+  assert.match(text, /旧插件仍启用，先停用/);
+  assert.equal(text.includes('读取失败'), false);
 });

@@ -33,7 +33,7 @@ function setup(files: Record<string, unknown> = {}, json: unknown = { version: 1
   return { home, handlers, host, done: async () => { await host.dispose(); rmSync(home, { recursive: true, force: true }); } };
 }
 
-test('升级通知和子会话免提醒注册约定的 RPC，默认影子模式且不启用事件转发', async () => {
+test('升级通知和子会话免提醒注册约定的 RPC，升级通知只有实际发送且不启用事件转发', async () => {
   const run = setup();
   try {
     assert.deepEqual([...run.handlers.keys()].filter(name => /^(escalation|quiet)\./.test(name)).sort(), [
@@ -42,7 +42,8 @@ test('升级通知和子会话免提醒注册约定的 RPC，默认影子模式�
     ]);
     assert.deepEqual(run.host.status().modules.map(m => [m.id, m.state]), [['answer.escalation', 'running'], ['answer.quietChildren', 'running']]);
     const escalation = await run.handlers.get('escalation.snapshot')!({});
-    assert.equal(escalation.delivery, 'shadow');
+    assert.equal('delivery' in escalation, false);
+    assert.equal(escalation.blockedReason, null);
     assert.equal(escalation.enabled, true);
     assert.equal(escalation.delayMinutes, 0);
     assert.equal(escalation.webhook.configured, false);
@@ -68,13 +69,13 @@ test('页面写入的设置立即生效并持久化；不合法的时段整个�
   } finally { await run.done(); }
 });
 
-test('旧事件通知插件仍启用时：升级通知强制影子模式，事件转发不能打开', async () => {
+test('旧事件通知插件仍启用时：升级通知不启动、不发送，面板显示先停用旧插件；事件转发不能打开', async () => {
   const run = setup({ 'config.json': { plugins: { 'event-notifications': { enabled: true } } } });
   try {
     const escalation = await run.handlers.get('escalation.snapshot')!({});
-    assert.equal(escalation.delivery, 'shadow');
-    assert.match(escalation.error, /event-notifications/);
-    await assert.rejects(run.handlers.get('escalation.configure')!({ delivery: 'live' }), /仍启用/);
+    assert.match(escalation.blockedReason, /event-notifications/);
+    assert.match(escalation.blockedReason, /停用旧插件/);
+    assert.equal(escalation.status, 'error');
     await assert.rejects(run.handlers.get('quiet.configure')!({ forwardEvents: true }), /仍启用/);
     assert.equal((await run.handlers.get('quiet.snapshot')!({})).forwardEvents, false);
   } finally { await run.done(); }
@@ -91,12 +92,11 @@ test('旧插件仍启用时不复制旧状态；停用后启动才复制，旧�
   } finally { await stopped.done(); }
 });
 
-test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：强制影子，事件转发打不开', async () => {
+test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：升级通知不发送，事件转发打不开', async () => {
   const broken = setupBroken();
   try {
     const escalation = await broken.handlers.get('escalation.snapshot')!({});
-    assert.equal(escalation.delivery, 'shadow');
-    assert.match(escalation.error, /config\.json 无法解析/);
+    assert.match(escalation.blockedReason, /config\.json 无法解析/);
     await assert.rejects(broken.handlers.get('quiet.configure')!({ forwardEvents: true }), /config\.json 无法解析/);
   } finally { await broken.done(); }
 });
@@ -125,6 +125,21 @@ test('webhook 配置不完整时保存凭据抛出明确错误', async () => {
     await assert.rejects(run.handlers.get('escalation.webhook.configure')!({ url: 'https://example.test/hook', auth: 'X-Key: test-secret' }), /Keychain/);
     const test = await run.handlers.get('escalation.test-webhook')!({});
     assert.equal(test.sent, false);
-    assert.match(test.message, /影子/);
+    assert.match(test.message, /发送失败/);
   } finally { await run.done(); }
+});
+
+test('旧配置的 delivery: "shadow"（machine.json 或页面设置）照常读取，按实际发送处理并在日志提示', async () => {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.join(' ')); };
+  const run = setup({ 'github-subscriptions/escalation/settings.json': { delivery: 'shadow', delayMinutes: 5 } }, { version: 1, modules: { 'answer.escalation': true }, escalation: { delivery: 'shadow' } });
+  try {
+    const escalation = await run.handlers.get('escalation.snapshot')!({});
+    assert.equal(escalation.status, 'running');
+    // 旧设置文件照常读取，不报“设置文件不合法”。
+    assert.doesNotMatch(escalation.error ?? '', /设置文件|影子|shadow/);
+    assert.equal(escalation.delayMinutes, 5);
+    assert.ok(lines.some(line => /影子模式已删除/.test(line) && /实际发送/.test(line)), lines.join('\n'));
+  } finally { console.error = original; await run.done(); }
 });

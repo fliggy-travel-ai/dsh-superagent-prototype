@@ -32,10 +32,8 @@ export interface EscalationOptions {
   machineName: string;
   section: EscalationSection;
   settings: SettingsStore<RuntimeSettings>;
-  /** 旧插件仍启用时不能实际发送，否则同一事件会发两次。给出原因就强制影子模式。 */
-  forceShadow?: string;
-  /** 切到实际发送前调用（例如重新复制旧状态）。 */
-  beforeLive?: () => void;
+  /** 旧插件仍启用时不能发送，否则同一事件会发两次。给出原因就不启动，面板显示原因。 */
+  blocked?: string;
   /** 测试用：替换额度报警凭据的读取。 */
   quotaCredentials?: () => Promise<{ url: string; auth: string } | null>;
   log?: (line: string) => void;
@@ -60,7 +58,7 @@ export class EscalationRuntime {
   private readonly lifetime = new AbortController();
   private attempt: Attempt | null = null;
   private engine: Engine | null = null;
-  private statePath = '';
+  private readonly statePath: string;
   private quotaAlerts: QuotaAlerts | null = null;
   private roles: WorkspaceRoles = parseWorkspaceRoles(null);
   private rolesError: string | null = null;
@@ -70,14 +68,14 @@ export class EscalationRuntime {
   constructor(options: EscalationOptions) {
     this.options = options;
     this.records = new EscalationRecords(join(options.directory, 'records.json'));
+    // 影子模式已删除：只用 state.json；旧的 state-shadow.json 不读不写。
+    this.statePath = join(options.directory, 'state.json');
   }
 
   private log(line: string) { (this.options.log ?? console.error)(`[开发自动化·升级通知] ${line}`); }
   private settings(): RuntimeSettings {
-    const value = this.options.settings.read();
-    return this.options.forceShadow ? { ...value, delivery: 'shadow' } : value;
+    return this.options.settings.read();
   }
-  private stateFile(mode: 'shadow' | 'live') { return join(this.options.directory, mode === 'live' ? 'state.json' : 'state-shadow.json'); }
   private credentials(): Promise<WebhookCredentials> {
     return this.options.credentials ? this.options.credentials() : webhookCredentials(this.options.section.webhook);
   }
@@ -88,6 +86,7 @@ export class EscalationRuntime {
     const attempt = new Attempt();
     this.attempt = attempt;
     if (this.stopped) attempt.cancel();
+    if (this.options.blocked) { attempt.cancel(); return; }
     try { await this.begin(attempt); }
     catch (error) { attempt.cancel(); throw error; }
   }
@@ -97,8 +96,6 @@ export class EscalationRuntime {
     const { paseo, client } = await this.options.daemon.ready();
     attempt.check();
     const { directory, machineName, section, server } = this.options;
-    const settings = this.settings();
-    this.statePath = this.stateFile(settings.delivery);
     const state = await loadState(this.statePath);
     attempt.check();
     const auditPath = join(directory, 'events.jsonl');
@@ -115,7 +112,7 @@ export class EscalationRuntime {
       log: line => this.log(line),
     });
     const config: NotifyConfig = {
-      hostId: machineName, machine: machineName, delivery: settings.delivery, mains: [], children: {}, coalesceWindowSeconds: 60,
+      hostId: machineName, machine: machineName, delivery: 'live', mains: [], children: {}, coalesceWindowSeconds: 60,
       hold: (first, now) => holdAsked(EscalationScheduleSchema.parse(this.schedule()))(first, now),
     };
     // 重载不补发旧事件：清掉早于本次启动的积压；仍待答的问题由 pending 重建后正常投递。
@@ -125,7 +122,6 @@ export class EscalationRuntime {
     attempt.check();
 
     const send = createSender({
-      mode: () => this.settings().delivery,
       audit,
       isMain: id => config.mains.includes(id),
       prefilter: payload => prefilter(section.prefilter, payload),
@@ -254,7 +250,6 @@ export class EscalationRuntime {
         machine: machineName,
         hostId: machineName,
         statePath: join(directory, 'quota-alerts.json'),
-        dryRun: () => this.settings().delivery !== 'live',
       });
       const alerts = this.quotaAlerts;
       attempt.add(() => { alerts.stop(); if (this.quotaAlerts === alerts) this.quotaAlerts = null; });
@@ -263,7 +258,7 @@ export class EscalationRuntime {
     }
     this.health = 'ready';
     this.error = null;
-    this.log(`已启动，投递模式：${settings.delivery}`);
+    this.log('已启动');
   }
 
   private async watchNewObjects(attempt: Attempt, paseo: Awaited<ReturnType<SharedDaemon['ready']>>['paseo'], engine: Engine, workspaces: Map<string, WorkspaceInfo>, run: (fn: () => Promise<unknown>) => void, refreshRoles: () => Promise<void>) {
@@ -358,41 +353,11 @@ export class EscalationRuntime {
     this.error = summarizeError(error);
   }
 
-  /**
-   * 切换影子和实际发送。两种模式各用一份去重记录（state-shadow.json、state.json），互不消耗；未答复的问题带到新模式。
-   * 顺序：先写好新记录文件，最后才提交设置；设置写失败时回退内存里的切换，不会出现“记录已切、设置没切”。
-   */
-  private async switchDelivery(next: 'shadow' | 'live', commit: () => void) {
-    const engine = this.engine;
-    if (!engine) { commit(); return; }
-    await engine.serial(async () => {
-      await saveState(this.statePath, engine.state);
-      if (next === 'live') this.options.beforeLive?.();
-      const target = this.stateFile(next);
-      const loaded = await loadState(target);
-      loaded.agents = { ...engine.state.agents, ...loaded.agents };
-      loaded.pending = { ...engine.state.pending, ...loaded.pending };
-      await saveState(target, loaded);
-      const previous = { state: engine.state, delivery: engine.config.delivery, path: this.statePath };
-      engine.state = loaded;
-      engine.config.delivery = next;
-      this.statePath = target;
-      try { commit(); }
-      catch (error) {
-        engine.state = previous.state; engine.config.delivery = previous.delivery; this.statePath = previous.path;
-        throw error;
-      }
-    });
-  }
-
-  async configure(patch: { enabled?: boolean; delivery?: 'shadow' | 'live'; timezone?: string; immediate?: RuntimeSettings['immediate']; delayMinutes?: number }) {
+  async configure(patch: { enabled?: boolean; timezone?: string; immediate?: RuntimeSettings['immediate']; delayMinutes?: number }) {
     const before = this.settings();
-    if (this.options.forceShadow && patch.delivery === 'live') throw new Error(this.options.forceShadow);
     // 时段规则合并后整体校验，不合法就整个拒绝。
     EscalationScheduleSchema.parse({ timezone: patch.timezone ?? before.timezone, immediate: patch.immediate ?? before.immediate, delayMinutes: patch.delayMinutes ?? before.delayMinutes });
-    const commit = () => { this.options.settings.update(patch); };
-    if (patch.delivery && patch.delivery !== before.delivery) await this.switchDelivery(patch.delivery, commit);
-    else commit();
+    this.options.settings.update(patch);
     return this.snapshot();
   }
 
@@ -416,7 +381,7 @@ export class EscalationRuntime {
   }
 
   async testWebhook(): Promise<{ sent: boolean; message: string }> {
-    if (this.settings().delivery !== 'live') return { sent: false, message: '影子模式只记录，没有发送测试通知。切换到实际发送后再试。' };
+    if (this.options.blocked) return { sent: false, message: this.options.blocked };
     const notice = {
       id: randomUUID(), key: `test:${randomUUID()}`, event: 'test', agentId: '', hostId: this.options.machineName, machine: this.options.machineName,
       workspaceId: null, title: '测试通知', provider: null, permissionId: null, firstSeenAt: new Date().toISOString(), answeredBy: null,
@@ -433,12 +398,13 @@ export class EscalationRuntime {
 
   async snapshot(): Promise<EscalationSnapshot> {
     const settings = this.settings();
-    const failed = this.health === 'failed';
+    const blocked = this.options.blocked ?? null;
+    const failed = this.health === 'failed' || blocked !== null;
     return {
       enabled: settings.enabled,
       status: failed ? 'error' : settings.enabled ? 'running' : 'stopped',
-      error: this.error ?? this.options.forceShadow ?? this.options.settings.error() ?? this.rolesError ?? await this.quotaCredentialWarning(),
-      delivery: settings.delivery,
+      error: this.error ?? blocked ?? this.options.settings.error() ?? this.rolesError ?? await this.quotaCredentialWarning(),
+      blockedReason: blocked,
       timezone: settings.timezone,
       immediate: settings.immediate,
       delayMinutes: settings.delayMinutes,

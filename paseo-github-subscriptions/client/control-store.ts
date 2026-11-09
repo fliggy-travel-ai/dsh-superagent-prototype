@@ -369,7 +369,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     }),
     configureEscalation: (input: {
       enabled?: boolean;
-      delivery?: 'shadow' | 'live';
       timezone?: string;
       immediate?: EscalationWindow[];
       delayMinutes?: number;

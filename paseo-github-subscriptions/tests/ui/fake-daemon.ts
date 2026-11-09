@@ -103,7 +103,7 @@ export class FakeDaemon {
     enabled: false,
     status: 'stopped',
     error: null,
-    delivery: 'live',
+    blockedReason: null,
     timezone: 'Asia/Singapore',
     immediate: [
       { days: 'daily', from: '01:00', to: '09:30' },
@@ -459,7 +459,6 @@ export class FakeDaemon {
         this.escalation = {
           ...this.escalation,
           ...(input.enabled !== undefined ? { enabled: Boolean(input.enabled), status: input.enabled ? 'running' : 'stopped' } : {}),
-          ...(input.delivery !== undefined ? { delivery: input.delivery as 'shadow' | 'live' } : {}),
           ...(input.timezone !== undefined ? { timezone: String(input.timezone) } : {}),
           ...(Array.isArray(input.immediate) ? { immediate: input.immediate as EscalationWindow[] } : {}),
           ...(input.delayMinutes !== undefined ? { delayMinutes: Number(input.delayMinutes) } : {}),

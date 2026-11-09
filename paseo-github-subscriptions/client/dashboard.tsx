@@ -462,7 +462,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
     : false;
 
-  const escState = !escalation?.enabled || escalation.status === 'stopped'
+  const escState = escalation?.blockedReason
+    ? { label: '旧插件仍启用', tone: 'danger' as const }
+    : !escalation?.enabled || escalation.status === 'stopped'
     ? { label: '未运行', tone: 'neutral' as const }
     : escalation.status === 'error'
       ? { label: '异常', tone: 'danger' as const }
@@ -610,7 +612,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             ) : (
               <>
                 <Chip label={escState.label} tone={escState.tone} />
-                <Text style={s.small}>{escalation.delivery === 'shadow' ? '影子' : '实际发送'}</Text>
+                {escalation.blockedReason ? <Text style={s.small}>先停用旧插件“会话事件通知”，再重载本插件</Text> : null}
               </>
             )
           }
