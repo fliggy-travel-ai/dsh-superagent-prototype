@@ -348,7 +348,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
           emit({ moduleReloading: false, moduleReloadingId: null, moduleReloadUnverified: timedOut || !value ? id : null });
           void refreshUnify();
         };
-        reloadTimer = setTimeout(() => { void checkReload(); }, options.reloadDelayMs ?? 3000);
+        reloadTimer = setTimeout(() => { void checkReload(); }, options.reloadDelayMs ?? 5000);
         return result;
       } catch (error) {
         emit({ moduleReloading: false, moduleReloadingId: null });

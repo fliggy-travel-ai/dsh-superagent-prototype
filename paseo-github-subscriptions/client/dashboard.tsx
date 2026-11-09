@@ -104,7 +104,7 @@ function ModuleFeatureCard({ moduleId, label, featureEnabled, ...props }: Omit<C
         setError(null);
         void control.toggleModule(moduleId, enabled).catch(e => setError(errorMessage(e)));
       }} trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />}
-    notice={moduleReloading && moduleReloadingId === moduleId ? <Text style={s.small}>正在重新加载，约 3 秒后生效</Text> : <>
+    notice={moduleReloading && moduleReloadingId === moduleId ? <Text style={s.small}>正在重新加载，约 5 秒后生效</Text> : <>
       {error ? <Text style={s.small}>{error}</Text> : null}
       {moduleReloadUnverified === moduleId || (item && item.state !== (item.enabled ? 'running' : 'off')) ? <Text style={s.small}>已保存，未生效，请手动重载插件</Text> : null}
     </>}
