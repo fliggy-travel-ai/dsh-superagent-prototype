@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
@@ -33,6 +34,12 @@ export function startPlugin(server: PluginServerContext, instance: ResolvedInsta
     registerAntigravityRpcs({ server, machinePath: machine.path, services });
     registerProviderQuotasRpcs({ server, machinePath: machine.path, services });
     registerMachineSettingsRpcs({ server, machine, host, services, stateDirectory, baseDirectory, sections });
+    if (
+      !host.status().modules.some(m => m.id === 'answer.browser' && m.state === 'running') &&
+      existsSync(join(stateDirectory, 'browser-state.json'))
+    ) {
+      void main?.readyBrowser().catch(() => {});
+    }
   }
 
   return async () => {

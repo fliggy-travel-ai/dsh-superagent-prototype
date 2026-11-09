@@ -2539,3 +2539,248 @@ test('记住此选择安全取消：等一帧渲染复核、label 与隐藏 inpu
   assert.equal(allowBtn.clicks, 1);
   assert.deepEqual(results, ['dismissed']);
 });
+
+test('关闭网页版 claude.ai 模块并重载插件后最小桥接返回 approvalEnabled:false 使扩展停止点击；已配对连续同步失败超 3 分钟也自动置关', async () => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer } = await import('node:net');
+  const { resolveInstance } = await import('../shared/instances.ts');
+  const { startPlugin } = await import('../server/core/plugin.ts');
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+
+  const getPort = async () => {
+    const srv = createServer();
+    await new Promise<void>(r => srv.listen(0, '127.0.0.1', r));
+    const p = (srv.address() as { port: number }).port;
+    await new Promise<void>(r => srv.close(() => r()));
+    return p;
+  };
+
+  const home = await mkdtemp(join(tmpdir(), 'plugin-browser-off-'));
+  const stateDir = join(home, 'github-subscriptions');
+  const port = await getPort();
+  const savedEnv = {
+    PASEO_HOME: process.env.PASEO_HOME,
+    PASEO_GHSUB_STATE_DIR: process.env.PASEO_GHSUB_STATE_DIR,
+    PASEO_GHSUB_MACHINE_CONFIG: process.env.PASEO_GHSUB_MACHINE_CONFIG,
+  };
+
+  const makeFakeServer = () => {
+    const handlers = new Map<string, (input: any) => Promise<any>>();
+    const ctx = {
+      handle: (contract: { name: string }, fn: (input: any) => Promise<any>) => { handlers.set(contract.name, fn); },
+      registerProvider: () => {},
+      registerUsageSource: () => {},
+      registerSettings: () => ({ read: async () => ({ status: 'invalid', revision: '0', error: 'test' }), subscribe: () => () => {} }),
+      addHook: () => () => {},
+      on: () => () => {},
+      before: () => () => {},
+    };
+    return { ctx: ctx as never, handlers };
+  };
+
+  const mountPlugin = () => {
+    process.env.PASEO_HOME = home;
+    process.env.PASEO_GHSUB_STATE_DIR = stateDir;
+    delete process.env.PASEO_GHSUB_MACHINE_CONFIG;
+    const host = makeFakeServer();
+    try {
+      const cleanup = startPlugin(host.ctx, resolveInstance('main'));
+      return { handlers: host.handlers, cleanup };
+    } finally {
+      for (const [k, v] of Object.entries(savedEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  };
+
+  let cleanup1: (() => Promise<void>) | undefined;
+  let cleanup2: (() => Promise<void>) | undefined;
+  try {
+    const { mkdir } = await import('node:fs/promises');
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, 'machine.json'), JSON.stringify({
+      version: 1,
+      modules: {
+        'answer.browser': true,
+        'answer.presence': false,
+        github: false,
+        todo: false,
+        'todo.stalled': false,
+        'answer.escalation': false,
+        'answer.quietChildren': false,
+        'usage.claudeAccounts': false,
+        'usage.providerQuotas': false,
+        'providers.antigravity': false,
+        'providers.cloudSession': false,
+        'providers.cloudGateway': false,
+        'sessions.defaults': false,
+      },
+    }));
+
+    const first = mountPlugin();
+    cleanup1 = first.cleanup;
+    await first.handlers.get('browser.configure')!({ enabled: true, port });
+    const pairing = await first.handlers.get('browser.pairing')!({});
+
+    // 启动扩展后台 + 内容脚本
+    const body = new DomNode('body', {}, []);
+    const html = new DomNode('html', {}, []);
+    html.appendChild(body);
+
+    let nowMs = 1_700_000_000_000;
+    const FakeDate = Object.assign(
+      function (...args: any[]) { return args.length ? new (Date as any)(...args) : new Date(nowMs); },
+      { now: () => nowMs, parse: Date.parse, UTC: Date.UTC },
+    );
+
+    const bgState: Record<string, any> = { instanceId: 'inst-reload', instanceName: '重载测试浏览器', pairing, approvalAudit: [] };
+    let onContentStorageChanged: (changes: any, area: string) => void = () => {};
+    let startupFn: () => void = () => {};
+    let bgMsgFn: any = null;
+    const extOrigin = `chrome-extension://${'b'.repeat(32)}`;
+    const contentTimers: Array<() => void> = [];
+    let uuid = 0;
+
+    const bgChrome = {
+      storage: {
+        local: {
+          get: async (keys: any) => typeof keys === 'string' ? { [keys]: bgState[keys] } : Array.isArray(keys) ? Object.fromEntries(keys.map(k => [k, bgState[k]])) : { ...bgState },
+          set: async (vals: Record<string, any>) => {
+            Object.assign(bgState, vals);
+            if ('approvalEnabled' in vals) {
+              onContentStorageChanged({ approvalEnabled: { newValue: vals.approvalEnabled } }, 'local');
+            }
+          },
+        },
+        onChanged: { addListener: () => {} },
+      },
+      tabs: {
+        query: async () => [{ id: 1, windowId: 1, groupId: -1, url: 'https://claude.ai/code/session_reload123' }],
+        sendMessage: async () => ({ title: '重载会话' }),
+        group: async () => 1,
+        onUpdated: { addListener: () => {} },
+        onRemoved: { addListener: () => {} },
+      },
+      tabGroups: {
+        get: async () => ({ id: 1, windowId: 1, title: '重载会话' }),
+        update: async () => ({}),
+        onUpdated: { addListener: () => {} },
+        onRemoved: { addListener: () => {} },
+      },
+      runtime: {
+        onStartup: { addListener: (fn: () => void) => { startupFn = fn; } },
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: (fn: any) => { bgMsgFn = fn; } },
+      },
+      alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+      scripting: {},
+    };
+
+    runInNewContext(backgroundSource, {
+      chrome: bgChrome,
+      fetch: (url: string, init: any) => fetch(url, { ...init, headers: { ...init.headers, origin: extOrigin } }),
+      crypto: { randomUUID: () => `rl-bg-${++uuid}` },
+      AbortSignal, Map, Object, String, Number, Array, URL, Date: FakeDate, Promise, JSON, Set,
+      setTimeout: (fn: () => void, d: number) => (d >= 2000 ? 0 : setTimeout(fn, d)),
+      clearTimeout,
+    });
+
+    const contentContext = {
+      document: { documentElement: html, body, activeElement: body, querySelectorAll: (sel: string) => html.querySelectorAll(sel), querySelector: (sel: string) => html.querySelector(sel) },
+      location: { origin: 'https://claude.ai', pathname: '/code/session_reload123' },
+      chrome: {
+        storage: {
+          local: { get: async () => ({ approvalEnabled: bgState.approvalEnabled }) },
+          onChanged: { addListener: (fn: typeof onContentStorageChanged) => { onContentStorageChanged = fn; } },
+        },
+        runtime: {
+          sendMessage: (msg: any) => new Promise(resolve => {
+            if (bgMsgFn(msg, { tab: { id: 1, url: 'https://claude.ai/code/session_reload123' } }, resolve) !== true) resolve(null);
+          }),
+        },
+      },
+      crypto: { randomUUID: () => `rl-ct-${++uuid}`, subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() } },
+      TextEncoder, Uint8Array,
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+      MutationObserver: class { observe() {} },
+      setTimeout: (fn: () => void) => { contentTimers.push(fn); },
+      setInterval: () => {},
+      Date: FakeDate, WeakMap,
+    };
+    runInNewContext(source, contentContext);
+
+    await new Promise(r => setTimeout(r, 80));
+    assert.equal(bgState.approvalEnabled, true, '开启模块时扩展同步到 approvalEnabled===true');
+
+    // 先验证开启时能自动点第一张卡
+    const cardOn = DomNode.fromTuple(directFixture.tree);
+    const allowOn = cardOn.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+    allowOn.onClick = () => { cardOn.parentElement = null; };
+    body.appendChild(cardOn);
+    onContentStorageChanged({ approvalEnabled: { newValue: true } }, 'local');
+    for (let step = 0; step < 25; step++) {
+      while (contentTimers.length) contentTimers.shift()!();
+      await new Promise(r => setImmediate(r));
+    }
+    assert.equal(allowOn.clicks, 1, '模块开启时应自动点击权限卡');
+
+    // 关闭 answer.browser 模块并模拟插件重载（扩展在重载完成前未同步，保留旧值 true）
+    await first.handlers.get('machine.settings.toggle-module')!({ id: 'answer.browser', enabled: false });
+    await Promise.race([cleanup1(), new Promise(r => setTimeout(r, 1000))]);
+    cleanup1 = undefined;
+    assert.equal(bgState.approvalEnabled, true, '重载完成前扩展仍保留旧值 true');
+
+    const second = mountPlugin();
+    cleanup2 = second.cleanup;
+    assert.equal(second.handlers.has('browser.snapshot'), false, '关闭模块重载后 answer.browser 模块不再注册 RPC');
+
+    // 给最小桥接启动留一点时间，随后扩展按周期同步，必须收到 approvalEnabled: false 并停止点击
+    await new Promise(r => setTimeout(r, 80));
+    startupFn();
+    await new Promise(r => setTimeout(r, 80));
+    assert.equal(bgState.approvalEnabled, false, '关闭模块并重载后最小桥接应向扩展返回 approvalEnabled: false');
+
+    const cardAfterReload = DomNode.fromTuple(directFixture.tree);
+    const allowAfterReload = cardAfterReload.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+    body.appendChild(cardAfterReload);
+    for (let step = 0; step < 25; step++) {
+      while (contentTimers.length) contentTimers.shift()!();
+      await new Promise(r => setImmediate(r));
+    }
+    assert.equal(allowAfterReload.clicks, 0, '关闭模块重载同步后扩展不得再点击权限卡');
+
+    // 验证兜底 ②：若已配对且当前 approvalEnabled===true，但桥接彻底停止（连续同步失败），超过 3 分钟后自动置为 false
+    await Promise.race([cleanup2(), new Promise(r => setTimeout(r, 1000))]);
+    cleanup2 = undefined;
+    await bgChrome.storage.local.set({ approvalEnabled: true });
+    assert.equal(bgState.approvalEnabled, true);
+
+    startupFn();
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(bgState.approvalEnabled, true, '首次同步失败未满 3 分钟时暂不置 false');
+
+    nowMs += 60_000;
+    startupFn();
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(bgState.approvalEnabled, true, '连续失败 1 分钟未超 3 分钟');
+
+    nowMs += 121_000;
+    startupFn();
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(bgState.approvalEnabled, false, '已配对但连续同步失败超过 3 分钟后自动置 approvalEnabled 为 false');
+
+    for (let step = 0; step < 25; step++) {
+      while (contentTimers.length) contentTimers.shift()!();
+      await new Promise(r => setImmediate(r));
+    }
+    assert.equal(allowAfterReload.clicks, 0, '超过 3 分钟断连置关后内容脚本不点击权限卡');
+  } finally {
+    await Promise.race([cleanup1?.().catch(() => {}), new Promise(r => setTimeout(r, 1000))]);
+    await Promise.race([cleanup2?.().catch(() => {}), new Promise(r => setTimeout(r, 1000))]);
+    await rm(home, { recursive: true, force: true });
+  }
+});

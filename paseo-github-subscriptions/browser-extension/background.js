@@ -159,12 +159,27 @@ async function dispatchDecisions(decisions, instanceId, reported) {
 let questionPoll = null;
 
 async function reconcile() {
-  const data = await chrome.storage.local.get(['instanceId', 'instanceName', 'pairing', 'groups', 'approvalEnabled']);
+  const SYNC_FAILURE_TIMEOUT_MS = 3 * 60 * 1000;
+  const data = await chrome.storage.local.get(['instanceId', 'instanceName', 'pairing', 'groups', 'approvalEnabled', 'syncFailureSince']);
   let instanceId = data.instanceId;
   if (!instanceId) { instanceId = crypto.randomUUID(); await chrome.storage.local.set({ instanceId }); }
   const pairing = data.pairing;
   const match = typeof pairing?.url === 'string' && pairing.url.match(PAIR_RE);
   if (pairing && (!match || Number(match[1]) > 65535 || !/^[a-f0-9]{64}$/.test(pairing?.token || ''))) return;
+  const noteSyncFailure = async () => {
+    const now = Date.now();
+    const since = typeof data.syncFailureSince === 'number' && Number.isFinite(data.syncFailureSince) ? data.syncFailureSince : now;
+    const updates = {};
+    if (data.syncFailureSince !== since) {
+      updates.syncFailureSince = since;
+      data.syncFailureSince = since;
+    }
+    if (now - since >= SYNC_FAILURE_TIMEOUT_MS && data.approvalEnabled === true) {
+      updates.approvalEnabled = false;
+      data.approvalEnabled = false;
+    }
+    if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+  };
   const tabs = (await chrome.tabs.query({ url: 'https://claude.ai/code/session_*' })).filter(t => sessionId(t.url) && t.id != null);
   const sessions = new Map();
   for (const tab of tabs) {
@@ -206,15 +221,21 @@ async function reconcile() {
     const storedApprovals = (await chrome.storage.local.get('approvalAudit')).approvalAudit;
     const approvals = (Array.isArray(storedApprovals) ? storedApprovals : []).slice(-30).map(({ sessionId, reservationId, digest, button, at, observedAt, status, readGate }) => ({ sessionId, reservationId, digest, button, at, observedAt, status, ...(readGate ? { readGate } : {}) }));
     response = await fetch(pairing.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${pairing.token}` }, body: JSON.stringify({ instanceId, instanceName, sessions: [...sessions.values()].map(({ tabs: _tabs, ...s }) => s), observedSessionIds, approvals, questions: [...reported.values()].map(item => item.question), results: sentResults }), signal: AbortSignal.timeout(5000), redirect: 'error', credentials: 'omit' });
-    if (!response.ok) return;
+    if (!response.ok) { await noteSyncFailure(); return; }
     response = await response.json();
+    const validSessions = Array.isArray(response?.sessions) && response.sessions.length === sessions.size && !response.sessions.some(s => !sessions.has(s.sessionId) || typeof s.groupTitle !== 'string');
+    if (typeof response?.approvalEnabled !== 'boolean' && !validSessions) { await noteSyncFailure(); return; }
+    if (data.syncFailureSince != null) {
+      await chrome.storage.local.set({ syncFailureSince: null });
+      data.syncFailureSince = null;
+    }
     if (typeof response.approvalEnabled === 'boolean' && data.approvalEnabled !== response.approvalEnabled) {
       await chrome.storage.local.set({ approvalEnabled: response.approvalEnabled });
       data.approvalEnabled = response.approvalEnabled;
       if (response.approvalEnabled) schedule();
     }
-    if (!Array.isArray(response.sessions) || response.sessions.length !== sessions.size || response.sessions.some(s => !sessions.has(s.sessionId) || typeof s.groupTitle !== 'string')) return;
-  } catch { return; }
+    if (!validSessions) return;
+  } catch { await noteSyncFailure(); return; }
   if ((await chrome.storage.local.get('instanceId')).instanceId !== instanceId) return;
   if (pairing) {
     if (sentResults.length) { const sent = new Set(sentResults.map(resultKey)); await changeQuestionState(state => { state.results = state.results.filter(item => !sent.has(resultKey(item))); }); }

@@ -37,9 +37,22 @@ export class BrowserBridge {
   private resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>;
   private syncQuestions?: PresenceRuntime['browserSync'];
   private answerWeb?: AnswerWebRequest;
+  private isModuleRunning?: () => boolean;
   private usageRoute?: (body: unknown) => void | Promise<void>;
 
-  constructor(directory: string, resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>, syncQuestions?: PresenceRuntime['browserSync'], answerWeb?: AnswerWebRequest) { this.directory = directory; this.resolveAgent = resolveAgent; this.syncQuestions = syncQuestions; this.answerWeb = answerWeb; }
+  constructor(
+    directory: string,
+    resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>,
+    syncQuestions?: PresenceRuntime['browserSync'],
+    answerWeb?: AnswerWebRequest,
+    isModuleRunning?: () => boolean,
+  ) {
+    this.directory = directory;
+    this.resolveAgent = resolveAgent;
+    this.syncQuestions = syncQuestions;
+    this.answerWeb = answerWeb;
+    this.isModuleRunning = isModuleRunning;
+  }
   setUsageRoute(route: (body: unknown) => void | Promise<void>) { this.usageRoute = route; }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -95,6 +108,16 @@ export class BrowserBridge {
             const url = new URL(s.url);
             if (url.origin !== 'https://claude.ai' || url.pathname !== `/code/session_${s.sessionId}` || url.search || url.hash || ids.has(s.sessionId)) throw new Error('invalid');
             ids.add(s.sessionId);
+          }
+          if (this.isModuleRunning && !this.isModuleRunning()) {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(
+              JSON.stringify({
+                approvalEnabled: false,
+                sessions: input.sessions.map(s => ({ sessionId: s.sessionId, groupTitle: cleanTitle(s.title) })),
+                decisions: [],
+              }),
+            );
+            return;
           }
           const next: BrowserSnapshot['sessions'] = [];
           let bindingsChanged = false;

@@ -177,14 +177,14 @@ export class MainServices {
   readyBrowser(): Promise<BrowserBridge> {
     const stopped = this.guard(); if (stopped) return stopped;
     this.browserInitializing ??= (async () => {
-      const connection = await this.daemon.ready();
       this.browser = new BrowserBridge(this.directory, async agentId => {
+        const connection = await this.daemon.ready();
         const agent = (await connection.paseo.agents.ref(agentId).refresh())?.agent;
         return agent && !agent.archivedAt ? { id: agent.id, title: agent.title || '未命名 Paseo 会话' } : null;
-      }, async (...input) => (await this.readyPresence()).browserSync(...input), async request => {
+      }, async (...input) => this.isModuleRunning('answer.presence') ? (await this.readyPresence()).browserSync(...input) : [], async request => {
         await this.readyPresence();
         return this.webExecutor.answerWebRequest(request);
-      });
+      }, () => this.isModuleRunning('answer.browser'));
       await this.browser.start();
       if (this.stopped) await this.browser.stop();
       return this.browser;
