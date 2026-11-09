@@ -1,6 +1,7 @@
 import type { PluginScreenProps } from '@getpaseo/plugin/client';
 import { useEffect, useState } from 'react';
 import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
+import type { Question, QuestionAnswer, QuestionPrompt } from '../shared/presence.ts';
 import type { TodoItem, TodoType } from '../shared/todo.ts';
 import { DrawerOverlay, type DrawerId } from './drawers.tsx';
 import { ago } from './format.ts';
@@ -8,6 +9,59 @@ import { GitHubSubscriptionsViews } from './screen/index.tsx';
 import { computeHasAlert, computeTodoCount, setLastNonTodoPage } from './sidebar-state.ts';
 import { errorMessage } from './store.ts';
 import { Btn, Card, Chip, FeatureCard, Notice, Segmented, useControlState, useStoreState, useUi } from './ui.tsx';
+
+export interface QuestionDraftState {
+  answers: Record<string, string[]>;
+  otherAnswers: Record<string, string>;
+}
+
+export function pickPromptOption(prompt: QuestionPrompt, current: QuestionDraftState, nextPicked: string[]): QuestionDraftState {
+  const answers = { ...current.answers, [prompt.question]: nextPicked };
+  const otherAnswers = { ...current.otherAnswers };
+  if (!prompt.multiSelect && nextPicked.length > 0) {
+    otherAnswers[prompt.question] = '';
+  }
+  return { answers, otherAnswers };
+}
+
+export function changePromptOther(prompt: QuestionPrompt, current: QuestionDraftState, value: string): QuestionDraftState {
+  const otherAnswers = { ...current.otherAnswers, [prompt.question]: value };
+  const answers = { ...current.answers };
+  if (!prompt.multiSelect && value.length > 0) {
+    answers[prompt.question] = [];
+  }
+  return { answers, otherAnswers };
+}
+
+export function isPromptComplete(prompt: QuestionPrompt, picked: string[], otherText?: string): boolean {
+  const other = (otherText ?? '').trim();
+  if (other.length > 0 && (!prompt.allowOther || other.length > 2000)) return false;
+  const count = picked.length + (other.length > 0 ? 1 : 0);
+  return prompt.multiSelect ? count >= 1 : count === 1;
+}
+
+export function isQuestionAnswerable(question: Question): boolean {
+  return (question.pages ?? 1) <= 1 && question.prompts.length > 0 && question.prompts.every(prompt => prompt.options.length > 0 || Boolean(prompt.allowOther));
+}
+
+export function isQuestionComplete(question: Question, answers: Record<string, string[]>, otherAnswers: Record<string, string>): boolean {
+  return isQuestionAnswerable(question) && question.prompts.every(prompt => isPromptComplete(prompt, answers[prompt.question] ?? [], otherAnswers[prompt.question]));
+}
+
+export function buildQuestionSubmission(question: Question, answers: Record<string, string[]>, otherAnswers: Record<string, string>): QuestionAnswer {
+  const submittedAnswers: Record<string, string[]> = {};
+  const submittedOther: Record<string, string> = {};
+  for (const prompt of question.prompts) {
+    submittedAnswers[prompt.question] = answers[prompt.question] ?? [];
+    const trimmed = (otherAnswers[prompt.question] ?? '').trim();
+    if (trimmed) submittedOther[prompt.question] = trimmed;
+  }
+  return {
+    id: question.id,
+    answers: submittedAnswers,
+    ...(Object.keys(submittedOther).length ? { otherAnswers: submittedOther } : {}),
+  };
+}
 
 export type PageId = 'providers' | 'answer' | 'github' | 'todo';
 
@@ -26,13 +80,19 @@ function ProvidersPage({
   const { s, control, theme } = useUi();
   const {
     browser,
+    browserError,
     defaults,
+    defaultsError,
     providerInstance,
+    providerInstanceError,
     cloudSession,
+    cloudSessionError,
     claudeAccounts,
     claudeAccountsStatus,
+    claudeAccountsError,
     antigravity,
     antigravityStatus,
+    antigravityError,
     machineSettings,
     automation,
     todo,
@@ -45,19 +105,19 @@ function ProvidersPage({
   const lowestClaudePct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
 
-  const browserSettings = browser?.settings ?? { enabled: true, port: 17373 };
   const browserEnvCount =
     browser?.instances?.length ??
     new Set((browser?.sessions ?? []).map(sess => sess.instanceId)).size;
-  const rulesCount = defaults?.rules?.length ?? 0;
   const instanceRunning = providerInstance
     ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
-    : true;
-  const runningSessions = providerInstance?.runningSessionsCount ?? 0;
-  const cloudOnline = cloudSession?.onlineSessions ?? providerInstance?.cloudSession.onlineSessions ?? 0;
-  const cloudUnacked = cloudSession?.unackedMessages ?? providerInstance?.cloudSession.unackedMessages ?? 0;
+    : false;
+  const resolvedCloud = cloudSession ?? providerInstance?.cloudSession ?? null;
   const agCount = antigravity?.accounts.length ?? 0;
   const agRunningSessions = antigravity?.runningSessionsCount ?? 0;
+  const showAntigravityCard =
+    antigravityStatus === 'error' ||
+    Boolean(antigravityError) ||
+    (antigravityStatus === 'ready' && Boolean(antigravity?.enabled || agCount > 0));
 
   return (
     <View style={{ gap: 14 }}>
@@ -123,6 +183,13 @@ function ProvidersPage({
                 <Chip label="未启用" tone="neutral" />
                 <Text style={s.small}>等待模块启用</Text>
               </>
+            ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{claudeAccountsError ?? '无法读取账号状态'}</Text>
+              </>
+            ) : !claudeAccounts ? (
+              <Text style={s.small}>正在读取…</Text>
             ) : (
               <>
                 <Text style={s.small}>{accounts.length} 个账号</Text>
@@ -142,25 +209,36 @@ function ProvidersPage({
           trailing={
             <Switch
               accessibilityLabel="启用网页版 claude.ai"
-              value={browserSettings.enabled}
-              onValueChange={enabled =>
+              disabled={!browser}
+              value={browser?.settings.enabled ?? false}
+              onValueChange={enabled => {
+                if (!browser) return;
                 void control
-                  .configureBrowser({ ...browserSettings, enabled })
-                  .catch(e => setActionError(errorMessage(e)))
-              }
+                  .configureBrowser({ ...browser.settings, enabled })
+                  .catch(e => setActionError(errorMessage(e)));
+              }}
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
           }
           description="连接 AdsPower 浏览器扩展，自动点击 Allow once 并把网页提问转到 Paseo。"
           kv={
-            <>
-              <Text style={s.small}>{browserEnvCount} 个浏览器环境</Text>
-              <Chip
-                label={browser?.connected ? '已连接' : '未连接'}
-                tone={browser?.connected ? 'success' : 'neutral'}
-              />
-            </>
+            browserError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{browserError}</Text>
+              </>
+            ) : !browser ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Text style={s.small}>{browserEnvCount} 个浏览器环境</Text>
+                <Chip
+                  label={browser.connected ? '已连接' : '未连接'}
+                  tone={browser.connected ? 'success' : 'neutral'}
+                />
+              </>
+            )
           }
           actions={
             <>
@@ -172,32 +250,25 @@ function ProvidersPage({
 
         <FeatureCard
           title="Claude 名称带额度"
-          trailing={
-            <Chip
-              label={
-                claudeAccountsStatus === 'disabled'
-                  ? '未启用'
-                  : lowestClaudePct !== null
-                    ? `当前最低 ${lowestClaudePct}%`
-                    : '已开启'
-              }
-              tone={
-                claudeAccountsStatus === 'disabled'
-                  ? 'neutral'
-                  : lowestClaudePct !== null && lowestClaudePct < 20
-                    ? 'warning'
-                    : 'success'
-              }
-            />
-          }
           description="在会话的 Claude 名称后显示 5 小时与 7 天剩余百分比。"
           kv={
             claudeAccountsStatus === 'disabled' ? (
-              <Text style={s.small}>等待模块启用</Text>
+              <>
+                <Chip label="未启用" tone="neutral" />
+                <Text style={s.small}>等待模块启用</Text>
+              </>
+            ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{claudeAccountsError ?? '无法读取额度状态'}</Text>
+              </>
+            ) : !claudeAccounts ? (
+              <Text style={s.small}>正在读取…</Text>
             ) : (
-              <Text style={s.small}>
-                {lowestClaudePct !== null ? `当前最低 ${lowestClaudePct}%` : '按账号显示 5h / 7d 额度'}
-              </Text>
+              <Chip
+                label={lowestClaudePct !== null ? `当前最低 ${lowestClaudePct}%` : '按账号显示 5h / 7d 额度'}
+                tone={lowestClaudePct !== null && lowestClaudePct < 20 ? 'warning' : 'success'}
+              />
             )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('claude-quota')} />}
@@ -208,6 +279,7 @@ function ProvidersPage({
           trailing={
             <Switch
               accessibilityLabel="新建会话默认设置"
+              disabled={!defaults}
               value={defaults?.enabled ?? false}
               onValueChange={enabled =>
                 void control.saveDefaults({ enabled }).catch(e => setActionError(errorMessage(e)))
@@ -217,58 +289,94 @@ function ProvidersPage({
             />
           }
           description="网页没有指定模式、思考强度或自动授权时，按本机规则填入。"
-          kv={<Text style={s.small}>{rulesCount} 条规则</Text>}
+          kv={
+            defaultsError || defaults?.error ? (
+              <Text style={s.small}>读取失败：{defaultsError ?? defaults?.error}</Text>
+            ) : !defaults ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <Text style={s.small}>{defaults.rules.length} 条规则</Text>
+            )
+          }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('session-defaults')} />}
         />
 
         <FeatureCard
           title="Provider 实例"
           trailing={
-            <Chip
-              label={instanceRunning ? '运行中' : '未运行'}
-              tone={instanceRunning ? 'success' : 'danger'}
-            />
+            providerInstanceError ? (
+              <Chip label="读取失败" tone="danger" />
+            ) : !providerInstance ? (
+              <Chip label="正在读取" tone="neutral" />
+            ) : (
+              <Chip
+                label={instanceRunning ? '运行中' : '未运行'}
+                tone={instanceRunning ? 'success' : 'danger'}
+              />
+            )
           }
           description="独立守护进程，重载本插件时不会中断正在运行的会话。"
-          kv={<Text style={s.small}>{runningSessions} 个会话正在运行</Text>}
+          kv={
+            providerInstanceError ? (
+              <Text style={s.small}>读取失败：{providerInstanceError}</Text>
+            ) : !providerInstance ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <Text style={s.small}>{providerInstance.runningSessionsCount} 个会话正在运行</Text>
+            )
+          }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('provider-instance')} />}
         />
 
         <FeatureCard
           title="云端会话"
-          trailing={
-            <Chip
-              label={`${cloudOnline} 个在线`}
-              tone={cloudOnline > 0 ? 'success' : 'neutral'}
-            />
-          }
           description="把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。"
           kv={
-            <>
-              <Text style={s.small}>{cloudOnline} 个在线</Text>
-              {cloudUnacked > 0 ? (
-                <Chip label={`${cloudUnacked} 条未确认`} tone="warning" />
-              ) : null}
-            </>
+            cloudSessionError && !resolvedCloud ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{cloudSessionError}</Text>
+              </>
+            ) : !resolvedCloud ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={`${resolvedCloud.onlineSessions} 个在线`}
+                  tone={resolvedCloud.onlineSessions > 0 ? 'success' : 'neutral'}
+                />
+                {resolvedCloud.unackedMessages > 0 ? (
+                  <Chip label={`${resolvedCloud.unackedMessages} 条未确认`} tone="warning" />
+                ) : null}
+              </>
+            )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
         />
 
-        {antigravityStatus !== 'disabled' || agCount > 0 ? (
+        {showAntigravityCard ? (
           <FeatureCard
             title="Antigravity"
             trailing={
-              <Chip
-                label={antigravity?.reloadRequired ? '待重载' : '运行中'}
-                tone={antigravity?.reloadRequired ? 'warning' : 'success'}
-              />
+              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
+                <Chip label="读取失败" tone="danger" />
+              ) : (
+                <Chip
+                  label={antigravity?.reloadRequired ? '待重载' : '运行中'}
+                  tone={antigravity?.reloadRequired ? 'warning' : 'success'}
+                />
+              )
             }
             description="多账号轮换与模型剩余额度。"
             kv={
-              <>
-                <Text style={s.small}>{agCount} 个账号</Text>
-                <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
-              </>
+              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
+                <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
+              ) : (
+                <>
+                  <Text style={s.small}>{agCount} 个账号</Text>
+                  <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
+                </>
+              )
             }
             actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
           />
@@ -282,20 +390,23 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, control, theme } = useUi();
   const {
     presence,
+    presenceError,
     automation,
+    automationError,
     escalation,
     escalationStatus,
     escalationError,
     quiet,
     quietStatus,
+    quietError,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
-  const observedMode = presence?.observation.mode ?? 'online';
-  const effectiveOnline = settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline');
-  const policiesCount = automation?.policies.filter(p => p.enabled).length ?? 0;
-  const pinnedCount = quiet?.pinnedWorkspaceCount ?? 3;
+  const settings = presence?.settings ?? null;
+  const observedMode = presence?.observation.mode ?? 'unknown';
+  const effectiveOnline = settings
+    ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
+    : false;
 
   const escState = !escalation?.enabled || escalation.status === 'stopped'
     ? { label: '未运行', tone: 'neutral' as const }
@@ -331,31 +442,48 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="问答模式"
           trailing={
-            <Segmented
-              options={[
-                { value: 'online', label: '在线' },
-                { value: 'offline', label: '离线' },
-                { value: 'auto', label: '自动' },
-              ]}
-              value={settings.mode}
-              onChange={mode =>
-                void control
-                  .configurePresence({ ...settings, mode })
-                  .catch(e => setActionError(errorMessage(e)))
-              }
-            />
+            settings ? (
+              <Segmented
+                options={[
+                  { value: 'online', label: '在线' },
+                  { value: 'offline', label: '离线' },
+                  { value: 'auto', label: '自动' },
+                ]}
+                value={settings.mode}
+                onChange={mode =>
+                  void control
+                    .configurePresence({ ...settings, mode })
+                    .catch(e => setActionError(errorMessage(e)))
+                }
+              />
+            ) : (
+              <Chip
+                label={presenceError ? '读取失败' : '正在读取'}
+                tone={presenceError ? 'danger' : 'neutral'}
+              />
+            )
           }
           description="会话向你提问时，等待本人回答或自动选推荐项。"
           kv={
-            <>
-              <Chip
-                label={effectiveOnline ? '判定在线' : '判定离线'}
-                tone={effectiveOnline ? 'success' : 'warning'}
-              />
-              <Text style={s.small}>
-                {settings.mode === 'auto' ? `自动：${presence?.observation.reason ?? '判定在线'}` : settings.mode === 'online' ? '手动在线' : '手动离线'}
-              </Text>
-            </>
+            presenceError ? (
+              <Text style={s.small}>读取失败：{presenceError}</Text>
+            ) : !presence || !settings ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={effectiveOnline ? '判定在线' : '判定离线'}
+                  tone={effectiveOnline ? 'success' : 'warning'}
+                />
+                <Text style={s.small}>
+                  {settings.mode === 'auto'
+                    ? `自动：${presence.observation.reason || '判定未知'}`
+                    : settings.mode === 'online'
+                      ? '手动在线'
+                      : '手动离线'}
+                </Text>
+              </>
+            )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('qa-mode')} />}
         />
@@ -363,19 +491,31 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="蓝牙在场判定"
           trailing={
-            <Chip
-              label={observedMode === 'offline' ? '离开' : '在线'}
-              tone={observedMode === 'offline' ? 'warning' : 'success'}
-            />
+            presenceError ? (
+              <Chip label="读取失败" tone="danger" />
+            ) : !presence ? (
+              <Chip label="正在读取" tone="neutral" />
+            ) : (
+              <Chip
+                label={observedMode === 'offline' ? '离开' : observedMode === 'online' ? '在线' : '未知'}
+                tone={observedMode === 'offline' ? 'warning' : observedMode === 'online' ? 'success' : 'neutral'}
+              />
+            )
           }
           description="按随身蓝牙设备是否在场，自动切换在线或离线。"
           kv={
-            <>
-              <Text style={s.small}>{presence?.observation.reason || '随身手机'}</Text>
-              <Text style={s.small}>
-                {settings.mode === 'auto' ? '问答模式正在跟随蓝牙' : '问答模式当前为手动'}
-              </Text>
-            </>
+            presenceError ? (
+              <Text style={s.small}>读取失败：{presenceError}</Text>
+            ) : !presence || !settings ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Text style={s.small}>{presence.observation.reason || '未配置蓝牙设备'}</Text>
+                <Text style={s.small}>
+                  {settings.mode === 'auto' ? '问答模式正在跟随蓝牙' : '问答模式当前为手动'}
+                </Text>
+              </>
+            )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('bluetooth')} />}
         />
@@ -385,6 +525,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="升级通知"
+              disabled={!escalation || escalationStatus !== 'ready'}
               value={escalation?.enabled ?? false}
               onValueChange={enabled =>
                 void control.configureEscalation({ enabled }).catch(e => setActionError(errorMessage(e)))
@@ -400,10 +541,17 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                 <Chip label="未启用" tone="neutral" />
                 <Text style={s.small}>等待模块启用</Text>
               </>
+            ) : escalationStatus === 'error' || escalationError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{escalationError ?? '无法读取升级通知'}</Text>
+              </>
+            ) : !escalation ? (
+              <Text style={s.small}>正在读取…</Text>
             ) : (
               <>
                 <Chip label={escState.label} tone={escState.tone} />
-                <Text style={s.small}>{escalation?.delivery === 'shadow' ? '影子' : '实际发送'}</Text>
+                <Text style={s.small}>{escalation.delivery === 'shadow' ? '影子' : '实际发送'}</Text>
               </>
             )
           }
@@ -415,7 +563,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="子会话免提醒"
-              value={quiet?.enabled ?? true}
+              disabled={!quiet || quietStatus !== 'ready'}
+              value={quiet?.enabled ?? false}
               onValueChange={enabled =>
                 void control.configureQuiet({ enabled }).catch(e => setActionError(errorMessage(e)))
               }
@@ -430,8 +579,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                 <Chip label="未启用" tone="neutral" />
                 <Text style={s.small}>等待模块启用</Text>
               </>
+            ) : quietStatus === 'error' || quietError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{quietError ?? '无法读取免提醒设置'}</Text>
+              </>
+            ) : !quiet ? (
+              <Text style={s.small}>正在读取…</Text>
             ) : (
-              <Text style={s.small}>主会话：{pinnedCount} 个置顶工作区</Text>
+              <Text style={s.small}>主会话：{quiet.pinnedWorkspaceCount} 个置顶工作区</Text>
             )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('quiet-children')} />}
@@ -442,26 +598,52 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="语音提醒"
-              value={settings.speechEnabled}
-              onValueChange={speechEnabled =>
+              disabled={!settings}
+              value={settings?.speechEnabled ?? false}
+              onValueChange={speechEnabled => {
+                if (!settings) return;
                 void control
                   .configurePresence({ ...settings, speechEnabled })
-                  .catch(e => setActionError(errorMessage(e)))
-              }
+                  .catch(e => setActionError(errorMessage(e)));
+              }}
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
           }
           description="判定在线时，用语音播报新提问和停滞的主会话。"
-          kv={<Text style={s.small}>播报主机 {presence?.hostName ?? 'Mac mini'}</Text>}
+          kv={
+            presenceError ? (
+              <Text style={s.small}>读取失败：{presenceError}</Text>
+            ) : !presence ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <Text style={s.small}>播报主机 {presence.hostName || '本机'}</Text>
+            )
+          }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('speech')} />}
         />
 
         <FeatureCard
           title="精确授权"
-          trailing={<Chip label="已配置" tone="neutral" />}
+          trailing={
+            automationError ? (
+              <Chip label="读取失败" tone="danger" />
+            ) : !automation ? (
+              <Chip label="正在读取" tone="neutral" />
+            ) : (
+              <Chip label="已配置" tone="neutral" />
+            )
+          }
           description="跨重启保留的单会话命令和工作区路径白名单。"
-          kv={<Text style={s.small}>{policiesCount} 条策略</Text>}
+          kv={
+            automationError ? (
+              <Text style={s.small}>读取失败：{automationError}</Text>
+            ) : !automation ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <Text style={s.small}>{automation.policies.filter(p => p.enabled).length} 条策略</Text>
+            )
+          }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('approval')} />}
         />
       </View>
@@ -472,20 +654,20 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, store, openSettings, theme } = useUi();
   const { snapshot, error } = useStoreState();
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const prefs = snapshot?.preferences ?? {
-    enabled: true,
-    shadow: false,
-    organization: 'fliggy-travel-ai',
-    excludedRepos: [],
-    extraRepos: [],
-    providerPolicies: {},
-  };
+  const prefs = snapshot?.preferences ?? null;
   const repoCount = snapshot?.repositories.length ?? 0;
 
   return (
     <View style={{ gap: 14 }}>
       <Text style={s.h1}>GitHub 订阅</Text>
+
+      {actionError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{actionError}</Text>
+        </Notice>
+      ) : null}
 
       {snapshot && !snapshot.token.configured ? (
         <Notice tone="warning">
@@ -510,23 +692,38 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="启用 GitHub 监听"
-              value={prefs.enabled}
-              onValueChange={enabled => void store.savePreferences({ ...prefs, enabled })}
+              disabled={!prefs}
+              value={prefs?.enabled ?? false}
+              onValueChange={enabled => {
+                if (!prefs) return;
+                void store
+                  .savePreferences({ ...prefs, enabled })
+                  .catch(e => setActionError(errorMessage(e)));
+              }}
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
           }
           description="轮询已订阅的仓库与 PR，把新事件直接发到对应会话。"
           kv={
-            <>
-              <Chip
-                label={prefs.shadow ? '影子' : '实际发送'}
-                tone={prefs.shadow ? 'warning' : 'success'}
-              />
-              <Text style={s.small}>
-                {prefs.organization} · {repoCount} 个仓库
-              </Text>
-            </>
+            error ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{error}</Text>
+              </>
+            ) : !prefs ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={prefs.shadow ? '影子' : '实际发送'}
+                  tone={prefs.shadow ? 'warning' : 'success'}
+                />
+                <Text style={s.small}>
+                  {prefs.organization || '未设置组织'} · {repoCount} 个仓库
+                </Text>
+              </>
+            )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('github-config')} />}
         />
@@ -537,20 +734,19 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   );
 }
 
-function TodoItemCard({ item }: { item: TodoItem }) {
+export function TodoItemCard({ item }: { item: TodoItem }) {
   const { s, control, navigation, theme } = useUi();
   const [expanded, setExpanded] = useState(false);
-  const [selected, setSelected] = useState<Record<string, string[]>>({});
-  const [otherText, setOtherText] = useState<Record<string, string>>({});
+  const [draft, setDraft] = useState<QuestionDraftState>({ answers: {}, otherAnswers: {} });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const prompts = item.question?.prompts ?? [];
+  const selected = draft.answers;
+  const otherText = draft.otherAnswers;
   const canSubmit =
     prompts.length > 0 &&
-    prompts.every(
-      p => (selected[p.question]?.length ?? 0) > 0 || Boolean(otherText[p.question]?.trim()),
-    );
+    prompts.every(p => isPromptComplete(p, selected[p.question] ?? [], otherText[p.question]));
 
   const openItemAgent = (agentId: string) => {
     navigation?.openAgent({
@@ -559,14 +755,15 @@ function TodoItemCard({ item }: { item: TodoItem }) {
     });
   };
 
-  const toggleChoice = (question: string, label: string, multi: boolean) => {
-    setSelected(prev => {
-      const current = prev[question] ?? [];
-      if (!multi) return { ...prev, [question]: [label] };
-      return {
-        ...prev,
-        [question]: current.includes(label) ? current.filter(x => x !== label) : [...current, label],
-      };
+  const toggleChoice = (prompt: QuestionPrompt, label: string) => {
+    setDraft(prev => {
+      const current = prev.answers[prompt.question] ?? [];
+      const nextPicked = prompt.multiSelect
+        ? current.includes(label)
+          ? current.filter(x => x !== label)
+          : [...current, label]
+        : [label];
+      return pickPromptOption(prompt, prev, nextPicked);
     });
   };
 
@@ -745,7 +942,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
                         small
                         primary={active}
                         label={opt.label}
-                        onPress={() => toggleChoice(p.question, opt.label, p.multiSelect)}
+                        onPress={() => toggleChoice(p, opt.label)}
                       />
                     );
                   })}
@@ -755,7 +952,7 @@ function TodoItemCard({ item }: { item: TodoItem }) {
                     accessibilityLabel={`其他回答 ${p.question}`}
                     style={s.input}
                     value={otherText[p.question] ?? ''}
-                    onChangeText={val => setOtherText(prev => ({ ...prev, [p.question]: val }))}
+                    onChangeText={val => setDraft(prev => changePromptOther(p, prev, val))}
                     placeholder="其他回答（可选）"
                     placeholderTextColor={theme.colors.foregroundMuted}
                   />

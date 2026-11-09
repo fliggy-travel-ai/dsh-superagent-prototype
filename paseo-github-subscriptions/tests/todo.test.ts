@@ -415,7 +415,7 @@ test('todo.list 按主机 ID 与条目 ID 去重，防止本机当远端时待�
   assert.equal(actions.length, 0);
 });
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
@@ -454,6 +454,41 @@ test('HostRouter：selfHost 从 listHosts.self 获取固定主机标识；invoke
   );
   assert.ok(Date.now() - t0 < 1000, 'invokePlugin 应在给定 timeoutMs 内超时而非等待 20 秒建连');
   assert.equal(routeCancelled, true);
+
+  // 审阅项 9：已建连的共用路由在遇到业务异常时不应被关闭，只有传输层断开时才清理重连
+  let closedCount = 0;
+  let connectedFlag = true;
+  const fakeConnectedClient = {
+    get isConnected() {
+      return connectedFlag;
+    },
+    invokePluginRpc: async (_pluginId: string, method: string) => {
+      if (method === 'business.fail') throw new Error('目标蓝牙设备不存在');
+      if (method === 'transport.fail') {
+        connectedFlag = false;
+        throw new Error('Transport closed');
+      }
+      return { ok: true };
+    },
+    close: async () => {
+      closedCount++;
+    },
+  };
+  (router as any).remote.set('srv-ok', Promise.resolve(fakeConnectedClient));
+  await assert.rejects(() => router.invokePlugin('srv-ok', 'business.fail', {}), /目标蓝牙设备不存在/);
+  assert.equal(closedCount, 0, '业务异常不应断开已建立的共用跨主机路由');
+  assert.equal((router as any).remote.has('srv-ok'), true);
+
+  await assert.rejects(
+    () => router.withHost('srv-ok', async () => { throw new Error('时间线发生变化'); }),
+    /时间线发生变化/,
+  );
+  assert.equal(closedCount, 0, 'withHost 业务异常不应断开已建立的共用跨主机路由');
+
+  await assert.rejects(() => router.invokePlugin('srv-ok', 'transport.fail', {}), /Transport closed/);
+  assert.equal(closedCount, 1, '传输层断开时应关闭并移除失效路由');
+  assert.equal((router as any).remote.has('srv-ok'), false);
+
   await router.stop();
 });
 
@@ -656,15 +691,32 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
     },
   };
 
-  const machine = loadMachineConfig(machinePath, {});
-  const host = startModules([failingMod as never], {
-    server,
-    instance: resolveInstance('main'),
-    machine,
-    services: { home: dir, daemon: {} as never, main: main as never },
-    stateDirectory: dir,
-    baseDirectory: dir,
+  const noopMod = (id: string) => ({
+    id,
+    label: id,
+    defaultEnabled: true,
+    appliesTo: () => true,
+    register() {},
   });
+
+  const machine = loadMachineConfig(machinePath, {});
+  const host = startModules(
+    [
+      failingMod as never,
+      noopMod('answer.automation') as never,
+      noopMod('answer.presence') as never,
+      noopMod('github') as never,
+      noopMod('todo.stalled') as never,
+    ],
+    {
+      server,
+      instance: resolveInstance('main'),
+      machine,
+      services: { home: dir, daemon: {} as never, main: main as never },
+      stateDirectory: dir,
+      baseDirectory: dir,
+    },
+  );
 
   registerMachineSettingsRpcs({
     server,
@@ -709,7 +761,128 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   assert.equal(escalationEnabled, true);
   assert.equal(quietEnabled, true);
 
-  // 当某个已启用模块暂停失败时，应抛错而不是返回成功
+  // 当某个已启用模块暂停失败时，应抛错而不是返回成功，且已暂停的模块应回滚并保留暂停前的值
   shouldFailAutomation = true;
   await assert.rejects(() => handlers.get('machine.settings.pause-all')!({ paused: true }), /授权模块连接失败/);
+  assert.equal(presencePaused, false, '部分失败时已暂停的问答模式应回滚到暂停前的未暂停状态');
+  assert.equal(escalationEnabled, true, '部分失败时已关闭的升级通知应回滚到暂停前的开启状态');
+  assert.equal(quietEnabled, true, '部分失败时已关闭的子会话免提醒应回滚到暂停前的开启状态');
+
+  // 恢复时：若 pause-all.json 中没有保存 escalationEnabled / quietEnabled（例如从旧文件或未保存项恢复），不应把原本关闭的模块打开
+  shouldFailAutomation = false;
+  escalationEnabled = false;
+  quietEnabled = false;
+  writeFileSync(
+    join(dir, 'pause-all.json'),
+    JSON.stringify({ paused: true, saved: { automationPaused: false } }),
+  );
+  await handlers.get('machine.settings.pause-all')!({ paused: false });
+  assert.equal(escalationEnabled, false, '未保存过的 escalationEnabled 在恢复时不应被默认设为 true');
+  assert.equal(quietEnabled, false, '未保存过的 quietEnabled 在恢复时不应被默认设为 true');
+});
+
+test('审阅项 4/7/8c：todo.stalled 与 todo 模块共用同一个 StalledRuntime 实例与缓存，pause-all 覆盖停滞检查，todo 轮询看 host.status running', async () => {
+  const { stalledModule } = await import('../server/modules/todo-stalled/index.ts');
+  const { MainServices } = await import('../server/core/services.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'stalled-shared-test-'));
+  mkdirSync(join(dir, 'projects'), { recursive: true });
+  writeFileSync(join(dir, 'projects', 'workspaces.json'), '[]');
+  const machinePath = join(dir, 'machine.json');
+  writeFileSync(
+    machinePath,
+    JSON.stringify({
+      version: 1,
+      machine: 'macbook',
+      modules: {
+        'todo.stalled': true,
+        todo: true,
+        'answer.presence': true,
+        'answer.browser': true,
+        github: false,
+      },
+    }),
+  );
+
+  let listAgentsCalls = 0;
+  const fakeClient = {
+    getLastServerInfoMessage: () => ({ serverId: 'srv-self' }),
+    listHosts: async () => ({ self: { serverId: 'srv-self', label: 'MacBook' }, hosts: [] }),
+    fetchAgents: async () => {
+      listAgentsCalls++;
+      return { entries: [], pageInfo: { hasMore: false, nextCursor: null } };
+    },
+    scheduleList: async () => ({ schedules: [] }),
+  };
+  const fakePaseo = {
+    agents: {
+      list: async () => {
+        listAgentsCalls++;
+        return { entries: [], pageInfo: { hasMore: false, nextCursor: null } };
+      },
+    },
+  };
+  const fakeDaemon = {
+    ready: async () => ({ client: fakeClient, paseo: fakePaseo, approve: () => {}, respond: () => {} }),
+  };
+  const main = new MainServices(dir, fakeDaemon as never);
+  let presenceCalled = 0;
+  (main as any).readyPresence = async () => {
+    presenceCalled++;
+    return { snapshot: () => ({ settings: { mode: 'online', paused: false, speechEnabled: true, sourceHostId: null }, observation: { mode: 'online', reason: 'ok', updatedAt: new Date().toISOString() }, hosts: [], questions: [] }) };
+  };
+  (main as any).readyBrowser = async () => ({
+    snapshot: () => ({ settings: { enabled: true, port: 17373 }, connected: false, sessions: [], bindings: [], questions: [], approvals: [], extensionPath: dir }),
+  });
+
+  const handlers = new Map<string, (input: any) => Promise<any>>();
+  const server = {
+    handle(contract: { name: string }, handler: (input: any) => Promise<any>) {
+      handlers.set(contract.name, handler);
+    },
+    addHook() {
+      return () => {};
+    },
+  } as unknown as PluginServerContext;
+
+  // 模拟 answer.presence 虽然在 machine.json 中是 true，但注册时出错（state === 'error'）
+  const failingPresenceMod = {
+    id: 'answer.presence',
+    label: '问答模式',
+    defaultEnabled: true,
+    appliesTo: () => true,
+    register(ctx: any) {
+      ctx.fail(new Error('守护进程异常'));
+    },
+  };
+
+  const machine = loadMachineConfig(machinePath, {});
+  const services = { home: dir, daemon: fakeDaemon as never, main };
+  const host = startModules([failingPresenceMod as never, stalledModule, todoModule], {
+    server,
+    instance: resolveInstance('main'),
+    machine,
+    services,
+    stateDirectory: dir,
+    baseDirectory: dir,
+  });
+  registerMachineSettingsRpcs({ server, machine, host, services, stateDirectory: dir, baseDirectory: dir });
+
+  // 1. 先调 todos.stalled，再调 todo.local：共用同一个实例与缓存，agents.list 只跑 1 次！
+  await handlers.get('todos.stalled')!({});
+  assert.equal(listAgentsCalls, 1);
+  await handlers.get('todo.local')!({});
+  assert.equal(listAgentsCalls, 1, 'todos.stalled 与 todo.local 应共用同一实例与缓存');
+
+  // 2. answer.presence 在 host.status() 中为 error，todo.local 不应调用 readyPresence
+  assert.equal(presenceCalled, 0, '模块 state 不为 running 时不应被 todo.local 调用');
+
+  // 3. pause-all 暂停后，todos.stalled 返回空且不触发新的扫描
+  await handlers.get('machine.settings.pause-all')!({ paused: true });
+  main.invalidateStalledCache();
+  const pausedStalled = await handlers.get('todos.stalled')!({});
+  assert.deepEqual(pausedStalled.sessions, []);
+  assert.equal(listAgentsCalls, 1, 'pause-all 暂停期间不应扫描停滞会话');
+
+  await host.dispose();
+  await main.stop();
 });

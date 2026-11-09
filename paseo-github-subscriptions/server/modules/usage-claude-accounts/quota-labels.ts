@@ -55,6 +55,7 @@ export class QuotaLabelService {
         .catch((error) => console.warn("无法更新账号额度显示：", String(error)))
         .finally(() => { this.running = null; this.schedule(INTERVAL_MS); });
     }, delay);
+    this.timer.unref?.();
   }
 
   /** Provider ID to launch environment for the default login and each CLAUDE_CONFIG_DIR login. */

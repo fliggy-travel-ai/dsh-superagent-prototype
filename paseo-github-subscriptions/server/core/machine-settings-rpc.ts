@@ -30,7 +30,7 @@ const MODULE_DEFS = [
   { id: 'answer.browser', label: '网页版 claude.ai', defaultEnabled: true },
   { id: 'answer.escalation', label: '升级通知', defaultEnabled: false },
   { id: 'answer.quietChildren', label: '子会话免提醒', defaultEnabled: false },
-  { id: 'usage.claudeAccounts', label: 'Claude 账号与额度', defaultEnabled: false },
+  { id: 'usage.claudeAccounts', label: 'Claude 账号与额度', defaultEnabled: true },
   { id: 'usage.providerQuotas', label: '其他 Provider 额度', defaultEnabled: false },
   { id: 'providers.antigravity', label: 'Antigravity 多账号', defaultEnabled: false },
   { id: 'github', label: 'GitHub 订阅', defaultEnabled: true },
@@ -45,6 +45,7 @@ interface PauseAllState {
     githubEnabled?: boolean;
     escalationEnabled?: boolean;
     quietEnabled?: boolean;
+    stalledPaused?: boolean;
   };
 }
 
@@ -81,6 +82,12 @@ export function registerMachineSettingsRpcs(options: {
   baseDirectory: string;
 }): void {
   const { server, machine, host, services, stateDirectory, baseDirectory } = options;
+
+  void readPauseAllState(stateDirectory).then(state => {
+    if (services.main && state.paused) {
+      services.main.stalledPaused = true;
+    }
+  });
 
   // 当 providers.defaults 默认关闭而未在启动时注册时，由核心层提供规则读取与保存入口（独立于 todo 模块）
   const defaultsRunning = host.status().modules.some(m => m.id === 'providers.defaults' && m.state === 'running');
@@ -159,93 +166,126 @@ export function registerMachineSettingsRpcs(options: {
 
     const prev = await readPauseAllState(stateDirectory);
     const saved: NonNullable<PauseAllState['saved']> = { ...(prev.saved ?? {}) };
-    const tasks: Array<Promise<void>> = [];
+    const rollbacks: Array<() => Promise<void>> = [];
+    const persistProgress = () =>
+      writePauseAllState(stateDirectory, { paused: prev.paused, saved });
 
-    if (isModuleEnabled(machine, 'answer.automation', true)) {
-      tasks.push(
-        (async () => {
-          const auto = await main.readyAutomation();
-          if (paused) {
-            if (!prev.paused) saved.automationPaused = auto.snapshot().paused;
-            await auto.pause(true);
-          } else {
-            await auto.pause(saved.automationPaused ?? false);
+    const isRunning = (id: string, defaultEnabled: boolean) =>
+      typeof main.isModuleRunning === 'function'
+        ? main.isModuleRunning(id, machine, defaultEnabled)
+        : isModuleEnabled(machine, id, defaultEnabled);
+
+    try {
+      if (isRunning('todo.stalled', true)) {
+        const before = Boolean(main.stalledPaused);
+        if (paused) {
+          if (saved.stalledPaused === undefined) saved.stalledPaused = before;
+          await persistProgress();
+          main.stalledPaused = true;
+          main.invalidateStalledCache?.();
+          rollbacks.push(async () => {
+            main.stalledPaused = saved.stalledPaused ?? before;
+            main.invalidateStalledCache?.();
+          });
+        } else if (saved.stalledPaused !== undefined) {
+          main.stalledPaused = saved.stalledPaused;
+          main.invalidateStalledCache?.();
+        } else {
+          main.stalledPaused = false;
+          main.invalidateStalledCache?.();
+        }
+      }
+
+      if (isRunning('answer.presence', true)) {
+        const pres = await main.readyPresence();
+        const current = pres.snapshot().settings;
+        if (paused) {
+          if (saved.presencePaused === undefined) saved.presencePaused = current.paused;
+          await persistProgress();
+          await pres.configure({ ...current, paused: true });
+          const restorePaused = saved.presencePaused;
+          rollbacks.push(async () => {
+            await pres.configure({ ...pres.snapshot().settings, paused: restorePaused });
+          });
+        } else if (saved.presencePaused !== undefined) {
+          await pres.configure({ ...current, paused: saved.presencePaused });
+        }
+      }
+
+      if (main.escalation) {
+        const esc = main.escalation;
+        const snap = await esc.snapshot();
+        if (paused) {
+          if (saved.escalationEnabled === undefined) saved.escalationEnabled = snap.enabled;
+          await persistProgress();
+          await esc.configure({ enabled: false });
+          const restoreEnabled = saved.escalationEnabled;
+          rollbacks.push(async () => {
+            await esc.configure({ enabled: restoreEnabled });
+          });
+        } else if (saved.escalationEnabled !== undefined) {
+          await esc.configure({ enabled: saved.escalationEnabled });
+        }
+      }
+
+      if (main.quiet) {
+        const quiet = main.quiet;
+        const snap = await quiet.snapshot();
+        if (paused) {
+          if (saved.quietEnabled === undefined) saved.quietEnabled = snap.enabled;
+          await persistProgress();
+          await quiet.configure({ enabled: false });
+          const restoreEnabled = saved.quietEnabled;
+          rollbacks.push(async () => {
+            await quiet.configure({ enabled: restoreEnabled });
+          });
+        } else if (saved.quietEnabled !== undefined) {
+          await quiet.configure({ enabled: saved.quietEnabled });
+        }
+      }
+
+      if (isRunning('github', true)) {
+        const gh = await main.github();
+        const prefs = gh.storage.state.preferences;
+        if (paused) {
+          if (saved.githubEnabled === undefined) saved.githubEnabled = prefs.enabled;
+          await persistProgress();
+          if (prefs.enabled) {
+            await gh.preferences({ ...prefs, enabled: false });
+            rollbacks.push(async () => {
+              const cur = gh.storage.state.preferences;
+              await gh.preferences({ ...cur, enabled: true });
+            });
           }
-        })(),
-      );
-    }
-
-    if (isModuleEnabled(machine, 'answer.presence', true)) {
-      tasks.push(
-        (async () => {
-          const pres = await main.readyPresence();
-          const current = pres.snapshot().settings;
-          if (paused) {
-            if (!prev.paused) saved.presencePaused = current.paused;
-            await pres.configure({ ...current, paused: true });
-          } else {
-            await pres.configure({ ...current, paused: saved.presencePaused ?? false });
+        } else if (saved.githubEnabled !== undefined) {
+          if (prefs.enabled !== saved.githubEnabled) {
+            await gh.preferences({ ...prefs, enabled: saved.githubEnabled });
           }
-        })(),
-      );
-    }
+        }
+      }
 
-    if (isModuleEnabled(machine, 'github', true)) {
-      tasks.push(
-        (async () => {
-          const gh = await main.github();
-          const prefs = gh.storage.state.preferences;
-          if (paused) {
-            if (!prev.paused) saved.githubEnabled = prefs.enabled;
-            if (prefs.enabled) {
-              await gh.preferences({ ...prefs, enabled: false });
-            }
-          } else {
-            const wantEnabled = saved.githubEnabled ?? prefs.enabled;
-            if (prefs.enabled !== wantEnabled) {
-              await gh.preferences({ ...prefs, enabled: wantEnabled });
-            }
-          }
-        })(),
-      );
-    }
-
-    if (main.escalation) {
-      const esc = main.escalation;
-      tasks.push(
-        (async () => {
-          const snap = await esc.snapshot();
-          if (paused) {
-            if (!prev.paused) saved.escalationEnabled = snap.enabled;
-            await esc.configure({ enabled: false });
-          } else {
-            await esc.configure({ enabled: saved.escalationEnabled ?? true });
-          }
-        })(),
-      );
-    }
-
-    if (main.quiet) {
-      const quiet = main.quiet;
-      tasks.push(
-        (async () => {
-          const snap = await quiet.snapshot();
-          if (paused) {
-            if (!prev.paused) saved.quietEnabled = snap.enabled;
-            await quiet.configure({ enabled: false });
-          } else {
-            await quiet.configure({ enabled: saved.quietEnabled ?? true });
-          }
-        })(),
-      );
-    }
-
-    const settled = await Promise.allSettled(tasks);
-    const errors = settled
-      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-      .map(r => (r.reason instanceof Error ? r.reason.message : String(r.reason)));
-    if (errors.length > 0) {
-      throw new Error(`暂停或恢复自动化失败：${errors.join('；')}`);
+      if (isRunning('answer.automation', true)) {
+        const auto = await main.readyAutomation();
+        if (paused) {
+          const before = auto.snapshot().paused;
+          if (saved.automationPaused === undefined) saved.automationPaused = before;
+          await persistProgress();
+          await auto.pause(true);
+          const restorePaused = saved.automationPaused;
+          rollbacks.push(async () => {
+            await auto.pause(restorePaused);
+          });
+        } else if (saved.automationPaused !== undefined) {
+          await auto.pause(saved.automationPaused);
+        }
+      }
+    } catch (error) {
+      if (paused && rollbacks.length > 0) {
+        await Promise.allSettled([...rollbacks].reverse().map(fn => fn()));
+      }
+      await writePauseAllState(stateDirectory, { paused: prev.paused, saved });
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new Error(`暂停或恢复自动化失败：${msg}`);
     }
 
     await writePauseAllState(stateDirectory, paused ? { paused: true, saved } : { paused: false });

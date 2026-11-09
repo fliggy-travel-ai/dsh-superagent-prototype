@@ -31,8 +31,8 @@ export class FakeDaemon {
     connected: true,
     extensionPath: '/Users/demo/.paseo/local-plugins/github-subscriptions/browser-extension',
     instances: [
-      { instanceId: 'env-27', instanceName: '环境 27（主力）', connected: true, lastSeenAt: new Date().toISOString(), sessionCount: 2 },
-      { instanceId: 'env-29', instanceName: '环境 29（备用）', connected: true, lastSeenAt: new Date().toISOString(), sessionCount: 1 },
+      { instanceId: 'env-27', instanceName: '环境 27（主力）', connected: true, lastSeenAt: new Date().toISOString() },
+      { instanceId: 'env-29', instanceName: '环境 29（备用）', connected: true, lastSeenAt: new Date().toISOString() },
     ],
   };
   presence = makePresence();
@@ -469,7 +469,7 @@ export class FakeDaemon {
           enabled: true,
           enabledSources: ['antigravity', 'codex-multi', 'qoder', 'glm'],
           hideBuiltin: ['codex', 'grok', 'cursor', 'kimi', 'zai'],
-          hideBuiltinApplied: true,
+          hideBuiltinApplied: false,
           skippedConflicts: [],
           reloadRequired: false,
           error: null,
@@ -479,7 +479,7 @@ export class FakeDaemon {
           enabled: input.enabled !== undefined ? Boolean(input.enabled) : true,
           enabledSources: Array.isArray(input.enabledSources) ? (input.enabledSources as string[]) : ['antigravity', 'codex-multi', 'qoder', 'glm'],
           hideBuiltin: Array.isArray(input.hideBuiltin) ? (input.hideBuiltin as string[]) : ['codex', 'grok', 'cursor', 'kimi', 'zai'],
-          hideBuiltinApplied: true,
+          hideBuiltinApplied: false,
           skippedConflicts: [],
           reloadRequired: true,
           error: null,

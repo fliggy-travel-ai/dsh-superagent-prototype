@@ -90,6 +90,7 @@ export class ResumeService {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("无法读取已关闭自动继续的会话：", String(error));
     }
     this.timer = setInterval(() => void this.tick(), 30_000);
+    this.timer.unref?.();
     await Promise.all([this.tick(), this.scanExisting()]);
   }
   stop() { this.stopped = true; if (this.timer) clearInterval(this.timer); }

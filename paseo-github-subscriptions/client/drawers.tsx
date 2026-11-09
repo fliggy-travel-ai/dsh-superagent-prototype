@@ -416,7 +416,7 @@ function AddClaudeDrawer({ initialProviderId }: { initialProviderId?: string | n
 
 function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, control } = useUi();
-  const { browser, automation } = useControlState();
+  const { browser, browserError, automation } = useControlState();
   const [pairingText, setPairingText] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -433,7 +433,6 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                 instanceName: sess.instanceName,
                 connected: Boolean(browser?.connected),
                 lastSeenAt: sess.lastSeenAt,
-                sessionCount: 1,
               },
             ]),
           ).values(),
@@ -453,8 +452,17 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 
   return (
     <View style={{ gap: 12 }}>
+      {browserError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{browserError}</Text>
+        </Notice>
+      ) : null}
       <SectionTitle>已连接的浏览器环境</SectionTitle>
-      {instances.length === 0 ? (
+      {browserError ? (
+        <Text style={s.muted}>读取失败：{browserError}</Text>
+      ) : !browser ? (
+        <Text style={s.muted}>正在读取浏览器环境…</Text>
+      ) : instances.length === 0 ? (
         <Text style={s.muted}>当前没有已上报的浏览器环境。</Text>
       ) : (
         <View>
@@ -525,10 +533,12 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 
 function AddBrowserDrawer() {
   const { s, control } = useUi();
-  const { browser } = useControlState();
+  const { browser, browserError } = useControlState();
   const [pairingInfo, setPairingInfo] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
-  const extPath = browser?.extensionPath ?? '正在读取扩展目录…';
+  const extPath = browserError
+    ? `读取失败：${browserError}`
+    : browser?.extensionPath ?? '正在读取扩展目录…';
 
   const getPairing = async () => {
     try {
@@ -541,6 +551,11 @@ function AddBrowserDrawer() {
 
   return (
     <View style={{ gap: 8 }}>
+      {browserError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{browserError}</Text>
+        </Notice>
+      ) : null}
       <StepRow
         num={1}
         title="在 AdsPower 打开目标浏览器环境，进入 chrome://extensions，打开右上角“开发者模式”。"
@@ -548,11 +563,13 @@ function AddBrowserDrawer() {
       <StepRow num={2} title="点“加载已解压的扩展程序”，选择下面目录：">
         <View style={s.wrap}>
           <Text style={s.mono}>{extPath}</Text>
-          <Btn
-            small
-            label={copiedPath ? '已复制路径' : '复制路径'}
-            onPress={() => setCopiedPath(true)}
-          />
+          {browser?.extensionPath ? (
+            <Btn
+              small
+              label={copiedPath ? '已复制路径' : '复制路径'}
+              onPress={() => setCopiedPath(true)}
+            />
+          ) : null}
         </View>
       </StepRow>
       <StepRow num={3} title="复制配对信息：">
@@ -565,8 +582,8 @@ function AddBrowserDrawer() {
       />
       <StepRow num={5} title="等待连接：状态变为“已连接”即完成。">
         <Chip
-          label={browser?.connected ? '已连接' : '等待连接'}
-          tone={browser?.connected ? 'success' : 'neutral'}
+          label={browserError ? '读取失败' : browser?.connected ? '已连接' : '等待连接'}
+          tone={browserError ? 'danger' : browser?.connected ? 'success' : 'neutral'}
         />
       </StepRow>
     </View>
@@ -575,7 +592,8 @@ function AddBrowserDrawer() {
 
 function ClaudeQuotaDrawer() {
   const { s, control, theme } = useUi();
-  const { claudeAccounts, claudeAccountsStatus } = useControlState();
+  const { claudeAccounts, claudeAccountsStatus, claudeAccountsError, providerQuotas, providerQuotasStatus } =
+    useControlState();
   const autoCont = claudeAccounts?.quotaName.autoResumeDefault ?? false;
   const lowestPct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
   const [err, setErr] = useState<string | null>(null);
@@ -595,53 +613,94 @@ function ClaudeQuotaDrawer() {
         <Notice tone="neutral">
           <Text style={s.text}>Claude 额度模块未启用（等待对应服务端模块合并或开启）。</Text>
         </Notice>
+      ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{claudeAccountsError ?? '无法读取 Claude 额度状态'}</Text>
+        </Notice>
       ) : null}
       <TableRow
         first
         cells={[
           '名称显示额度',
-          <Chip
-            key="st"
-            label={lowestPct !== null ? `已开启 · 当前最低 ${lowestPct}%` : '已开启'}
-            tone="success"
-          />,
+          claudeAccountsStatus === 'disabled' ? (
+            <Chip key="st" label="未启用" tone="neutral" />
+          ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
+            <Chip key="st" label="读取失败" tone="danger" />
+          ) : !claudeAccounts ? (
+            <Chip key="st" label="正在读取" tone="neutral" />
+          ) : (
+            <Chip
+              key="st"
+              label={lowestPct !== null ? `已开启 · 当前最低 ${lowestPct}%` : '已开启'}
+              tone="success"
+            />
+          ),
         ]}
       />
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
         <Switch
           accessibilityLabel="新建 Claude 会话默认开启自动继续"
+          disabled={!claudeAccounts || claudeAccountsStatus !== 'ready'}
           value={autoCont}
           onValueChange={val => void update({ autoResumeDefault: val })}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
       </View>
+
+      <SectionTitle>隐藏的内置额度来源</SectionTitle>
+      <TableRow
+        first
+        cells={[
+          '过滤内置单账号来源',
+          providerQuotasStatus === 'disabled' ? (
+            <Chip key="hb" label="未启用" tone="neutral" />
+          ) : !providerQuotas ? (
+            <Chip key="hb" label="未生效" tone="warning" />
+          ) : (
+            <Chip
+              key="hb"
+              label={providerQuotas.hideBuiltinApplied ? '已生效' : '未生效'}
+              tone={providerQuotas.hideBuiltinApplied ? 'success' : 'warning'}
+            />
+          ),
+        ]}
+      />
+      {providerQuotas?.hideBuiltin.length ? (
+        <Text style={s.small}>配置列表：{providerQuotas.hideBuiltin.join(', ')}</Text>
+      ) : null}
+
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
       <RuleNote>
-        在会话的 Claude 名称后始终显示 5 小时与 7 天剩余百分比，并隐藏 Paseo 内置的单账号 Claude 额度来源。
+        在会话的 Claude 名称后始终显示 5 小时与 7 天剩余百分比。内置额度来源过滤仅在客户端支持模块枚举时生效，正式版如不支持将显示“未生效”。
       </RuleNote>
     </View>
   );
 }
 
+const CONFIGURABLE_PROVIDERS = ['claude*', 'codex', 'opencode', 'glm*', 'qoder'] as const;
+
 function SessionDefaultsDrawer() {
   const { s, control, theme } = useUi();
-  const { defaults } = useControlState();
-  const [newProvider, setNewProvider] = useState('');
+  const { defaults, defaultsError } = useControlState();
+  const [newProvider, setNewProvider] = useState('claude*');
   const [newMode, setNewMode] = useState('');
-  const [newAutoApprove, setNewAutoApprove] = useState(true);
+  const [newAutoApprove, setNewAutoApprove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const rules = defaults?.rules ?? [];
   const enabled = defaults?.enabled ?? false;
 
-  const saveRules = async (next: AgentDefaultRule[], nextEnabled = enabled) => {
+  const saveRules = async (next: AgentDefaultRule[], nextEnabled?: boolean) => {
     setBusy(true);
     setErr(null);
     try {
-      await control.saveDefaults({ enabled: nextEnabled, rules: next });
+      await control.saveDefaults({
+        ...(nextEnabled !== undefined ? { enabled: nextEnabled } : {}),
+        rules: next,
+      });
     } catch (failure) {
       setErr(errorMessage(failure));
     } finally {
@@ -659,19 +718,23 @@ function SessionDefaultsDrawer() {
       ...(newAutoApprove ? { features: { autoApprove: true } } : {}),
       enabled: true,
     };
-    setNewProvider('');
     setNewMode('');
-    await saveRules([...rules, rule], true);
+    await saveRules([...rules, rule]);
   };
 
   return (
     <View style={{ gap: 12 }}>
+      {defaultsError || defaults?.error ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{defaultsError ?? defaults?.error}</Text>
+        </Notice>
+      ) : null}
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>启用新建会话默认设置</Text>
         <Switch
           accessibilityLabel="启用新建会话默认设置"
           value={enabled}
-          disabled={busy}
+          disabled={!defaults || busy}
           onValueChange={val => void saveRules(rules, val)}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
@@ -679,7 +742,9 @@ function SessionDefaultsDrawer() {
       </View>
 
       <SectionTitle>本机规则（保存在 machine.json）</SectionTitle>
-      {rules.length === 0 ? (
+      {!defaults ? (
+        <Text style={s.muted}>正在读取默认规则…</Text>
+      ) : rules.length === 0 ? (
         <Text style={s.muted}>没有规则。可在下方添加本机新建会话默认规则。</Text>
       ) : (
         <View>
@@ -724,6 +789,17 @@ function SessionDefaultsDrawer() {
 
       <SectionTitle>添加规则</SectionTitle>
       <View style={s.wrap}>
+        {CONFIGURABLE_PROVIDERS.map(preset => (
+          <Btn
+            key={preset}
+            small
+            primary={newProvider === preset}
+            label={preset}
+            onPress={() => setNewProvider(preset)}
+          />
+        ))}
+      </View>
+      <View style={s.wrap}>
         <TextInput
           accessibilityLabel="Provider 匹配模式"
           style={s.input}
@@ -747,7 +823,7 @@ function SessionDefaultsDrawer() {
           label={newAutoApprove ? '自动授权：开启' : '自动授权：不改'}
           onPress={() => setNewAutoApprove(v => !v)}
         />
-        <Btn primary label="添加规则" disabled={!newProvider.trim() || busy} onPress={() => void addRule()} />
+        <Btn primary label="添加规则" disabled={!defaults || !newProvider.trim() || busy} onPress={() => void addRule()} />
       </View>
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
@@ -761,17 +837,36 @@ function SessionDefaultsDrawer() {
 
 function ProviderInstanceDrawer() {
   const { s } = useUi();
-  const { providerInstance } = useControlState();
-  const running = providerInstance ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy' : true;
-  const providers = providerInstance?.providers.map(p => p.id).join(', ') || 'cloud-session, antigravity';
+  const { providerInstance, providerInstanceError } = useControlState();
+  const running = providerInstance
+    ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
+    : false;
+  const providers = providerInstance ? providerInstance.providers.map(p => p.id).join(', ') || '无' : '—';
   const runningCount = providerInstance?.runningSessionsCount ?? 0;
 
   return (
     <View style={{ gap: 12 }}>
-      <TableRow first cells={['状态', <Chip key="st" label={running ? '运行中' : '未运行'} tone={running ? 'success' : 'danger'} />]} />
+      {providerInstanceError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{providerInstanceError}</Text>
+        </Notice>
+      ) : null}
+      <TableRow
+        first
+        cells={[
+          '状态',
+          providerInstanceError ? (
+            <Chip key="st" label="读取失败" tone="danger" />
+          ) : !providerInstance ? (
+            <Chip key="st" label="正在读取" tone="neutral" />
+          ) : (
+            <Chip key="st" label={running ? '运行中' : '未运行'} tone={running ? 'success' : 'danger'} />
+          ),
+        ]}
+      />
       <TableRow cells={['状态目录', <Text key="dir" style={s.mono}>~/.paseo/providers</Text>]} />
       <TableRow cells={['承载的 Provider', <Text key="p" style={s.mono}>{providers}</Text>]} />
-      <TableRow cells={['运行中的会话', `${runningCount} 个`]} />
+      <TableRow cells={['运行中的会话', providerInstance ? `${runningCount} 个` : '—']} />
       <RuleNote>
         为什么单独开一个实例：重载“开发自动化”插件（改界面、规则、GitHub 订阅）不会重启这个实例，正在跑的
         Antigravity 和云端会话不会中断。只有在更新 Provider 代码后、且当前没有运行中的会话时，才重载该实例。
@@ -782,17 +877,32 @@ function ProviderInstanceDrawer() {
 
 function CloudSessionDrawer() {
   const { s } = useUi();
-  const { cloudSession, providerInstance } = useControlState();
+  const { cloudSession, cloudSessionError, providerInstance } = useControlState();
   const status = cloudSession ?? providerInstance?.cloudSession;
-  const onlineSessions = status?.onlineSessions ?? 0;
-  const unacked = status?.unackedMessages ?? 0;
 
   return (
     <View style={{ gap: 12 }}>
+      {cloudSessionError && !status ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{cloudSessionError}</Text>
+        </Notice>
+      ) : null}
       <SectionTitle>云端会话状态</SectionTitle>
-      <TableRow first cells={['状态', <Chip key="st" label="始终开启" tone="success" />]} />
-      <TableRow cells={['在线云端会话', `${onlineSessions} 个`]} />
-      <TableRow cells={['未确认消息', `${unacked} 条`]} />
+      <TableRow
+        first
+        cells={[
+          '状态',
+          cloudSessionError && !status ? (
+            <Chip key="st" label="读取失败" tone="danger" />
+          ) : !status ? (
+            <Chip key="st" label="正在读取" tone="neutral" />
+          ) : (
+            <Chip key="st" label="始终开启" tone="success" />
+          ),
+        ]}
+      />
+      <TableRow cells={['在线云端会话', status ? `${status.onlineSessions} 个` : '—']} />
+      <TableRow cells={['未确认消息', status ? `${status.unackedMessages} 条` : '—']} />
       <RuleNote>
         把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。由本机 Provider 实例承载；主实例通过跨实例转发收发消息和提问。
       </RuleNote>
@@ -904,6 +1014,15 @@ function AntigravityDrawer() {
           placeholder="显示名称（如 账号 C）"
           placeholderTextColor={theme.colors.foregroundMuted}
         />
+        <TextInput
+          accessibilityLabel="Antigravity 目录"
+          style={s.input}
+          value={homeDir}
+          onChangeText={setHomeDir}
+          placeholder="配置目录（可选，如 ~/.agy-c）"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          autoCapitalize="none"
+        />
         <Btn
           primary
           label="添加账号"
@@ -918,31 +1037,42 @@ function AntigravityDrawer() {
 
 function QaModeDrawer() {
   const { s, control, theme } = useUi();
-  const { presence } = useControlState();
-  const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
+  const { presence, presenceError } = useControlState();
+  const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
 
   return (
     <View style={{ gap: 12 }}>
-      <Segmented
-        options={[
-          { value: 'online', label: '在线' },
-          { value: 'offline', label: '离线' },
-          { value: 'auto', label: '自动' },
-        ]}
-        value={settings.mode}
-        onChange={mode =>
-          void control.configurePresence({ ...settings, mode }).catch(e => setErr(errorMessage(e)))
-        }
-      />
+      {presenceError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{presenceError}</Text>
+        </Notice>
+      ) : null}
+      {settings ? (
+        <Segmented
+          options={[
+            { value: 'online', label: '在线' },
+            { value: 'offline', label: '离线' },
+            { value: 'auto', label: '自动' },
+          ]}
+          value={settings.mode}
+          onChange={mode =>
+            void control.configurePresence({ ...settings, mode }).catch(e => setErr(errorMessage(e)))
+          }
+        />
+      ) : (
+        <Text style={s.muted}>{presenceError ? `读取失败：${presenceError}` : '正在读取问答设置…'}</Text>
+      )}
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>暂停问答代答与转发</Text>
         <Switch
           accessibilityLabel="暂停问答代答与转发"
-          value={settings.paused}
-          onValueChange={paused =>
-            void control.configurePresence({ ...settings, paused }).catch(e => setErr(errorMessage(e)))
-          }
+          disabled={!settings}
+          value={settings?.paused ?? false}
+          onValueChange={paused => {
+            if (!settings) return;
+            void control.configurePresence({ ...settings, paused }).catch(e => setErr(errorMessage(e)));
+          }}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
@@ -969,8 +1099,8 @@ function QaModeDrawer() {
 
 function BluetoothDrawer() {
   const { s, control } = useUi();
-  const { presence } = useControlState();
-  const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
+  const { presence, presenceError } = useControlState();
+  const settings = presence?.settings ?? null;
   const [devices, setDevices] = useState<BluetoothDevice[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -987,29 +1117,42 @@ function BluetoothDrawer() {
   };
 
   useEffect(() => {
-    void loadDevices(settings.sourceHostId ?? null);
-  }, [settings.sourceHostId]);
+    void loadDevices(settings?.sourceHostId ?? null);
+  }, [settings?.sourceHostId]);
 
   const hosts = presence?.hosts ?? [];
 
   return (
     <View style={{ gap: 12 }}>
+      {presenceError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{presenceError}</Text>
+        </Notice>
+      ) : null}
       <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
         <Text style={s.text}>来源主机</Text>
         <View style={s.wrap}>
           <Btn
             small
-            primary={!settings.sourceHostId}
+            disabled={!settings}
+            primary={Boolean(settings && !settings.sourceHostId)}
             label="自动（任一主机在场即在线）"
-            onPress={() => void control.configurePresence({ ...settings, sourceHostId: null })}
+            onPress={() => {
+              if (!settings) return;
+              void control.configurePresence({ ...settings, sourceHostId: null });
+            }}
           />
           {hosts.map(h => (
             <Btn
               key={h.id}
               small
-              primary={settings.sourceHostId === h.id}
+              disabled={!settings}
+              primary={settings?.sourceHostId === h.id}
               label={h.name}
-              onPress={() => void control.configurePresence({ ...settings, sourceHostId: h.id })}
+              onPress={() => {
+                if (!settings) return;
+                void control.configurePresence({ ...settings, sourceHostId: h.id });
+              }}
             />
           ))}
         </View>
@@ -1017,11 +1160,15 @@ function BluetoothDrawer() {
 
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <SectionTitle>锚定设备</SectionTitle>
-        <Btn small label="刷新设备" busy={loading} onPress={() => void loadDevices(settings.sourceHostId ?? null)} />
+        <Btn small label="刷新设备" busy={loading} onPress={() => void loadDevices(settings?.sourceHostId ?? null)} />
       </View>
       {devices.length === 0 ? (
         <Text style={s.small}>
-          当前观测：{presence?.observation.reason ?? '已连接随身手机'}
+          {presenceError
+            ? `读取失败：${presenceError}`
+            : !presence
+              ? '正在读取在场观测…'
+              : `当前观测：${presence.observation.reason || '未配置蓝牙设备'}`}
         </Text>
       ) : (
         devices.map(dev => (
@@ -1032,7 +1179,7 @@ function BluetoothDrawer() {
             <Btn
               small
               label="设为锚定设备"
-              onPress={() => void control.selectBluetooth(settings.sourceHostId ?? null, { name: dev.name, address: dev.address })}
+              onPress={() => void control.selectBluetooth(settings?.sourceHostId ?? null, { name: dev.name, address: dev.address })}
             />
           </View>
         ))
@@ -1045,32 +1192,41 @@ function BluetoothDrawer() {
   );
 }
 
-const DEFAULT_ESCALATION_WINDOWS: ImmediateWindow[] = [
-  { days: 'daily', from: '01:00', to: '09:30' },
-  { days: 'weekdays', from: '12:00', to: '14:00' },
-];
-
 function EscalationDrawer() {
   const { s, control, openSettings, now, theme } = useUi();
-  const { escalation, escalationStatus } = useControlState();
+  const { escalation, escalationStatus, escalationError } = useControlState();
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
   const [newDays, setNewDays] = useState<'daily' | 'weekdays'>('daily');
   const [newFrom, setNewFrom] = useState('01:00');
   const [newTo, setNewTo] = useState('09:30');
   const [delayInput, setDelayInput] = useState(() => String(escalation?.delayMinutes ?? 0));
+  const [prevDelay, setPrevDelay] = useState<number | undefined>(escalation?.delayMinutes);
   const [err, setErr] = useState<string | null>(null);
+
+  if (escalation?.delayMinutes !== prevDelay) {
+    setPrevDelay(escalation?.delayMinutes);
+    if (escalation?.delayMinutes !== undefined) {
+      setDelayInput(String(escalation.delayMinutes));
+    }
+  }
+
+  useEffect(() => {
+    if (escalation?.delayMinutes !== undefined) {
+      setDelayInput(String(escalation.delayMinutes));
+    }
+  }, [escalation?.delayMinutes]);
 
   const delivery = escalation?.delivery ?? 'shadow';
   const delayMinutes = escalation?.delayMinutes ?? 0;
-  const windows = escalation?.immediate ?? DEFAULT_ESCALATION_WINDOWS;
+  const windows = escalation?.immediate ?? [];
   const recentDeliveries = escalation?.recentDeliveries ?? [];
 
   const saveSchedule = async (nextWindows: ImmediateWindow[], nextDelay = delayMinutes) => {
     setErr(null);
     try {
       const normalized = nextWindows.map(w => ({
-        days: Array.isArray(w.days) ? ('weekdays' as const) : w.days,
+        days: w.days,
         from: w.from,
         to: w.to,
       }));
@@ -1081,6 +1237,7 @@ function EscalationDrawer() {
   };
 
   const addWindow = async () => {
+    if (!escalation) return;
     const from = newFrom.trim();
     const to = newTo.trim();
     if (!from || !to) return;
@@ -1088,10 +1245,12 @@ function EscalationDrawer() {
   };
 
   const removeWindow = async (idx: number) => {
+    if (!escalation) return;
     await saveSchedule(windows.filter((_, i) => i !== idx));
   };
 
   const applyDelay = async () => {
+    if (!escalation) return;
     const parsed = Number.parseInt(delayInput, 10);
     if (Number.isNaN(parsed) || parsed < 0) return;
     await saveSchedule(windows, parsed);
@@ -1116,51 +1275,60 @@ function EscalationDrawer() {
         <Notice tone="neutral">
           <Text style={s.text}>升级通知模块未启用（等待对应服务端模块合并或开启）。</Text>
         </Notice>
+      ) : escalationStatus === 'error' || escalationError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{escalationError ?? '无法读取升级通知设置'}</Text>
+        </Notice>
       ) : null}
-      <SectionTitle>时段规则（{escalation?.timezone ?? 'Asia/Singapore'}）</SectionTitle>
-      <View>
-        <TableRow first header cells={['规则', '时间范围', '等待策略', '操作']} />
-        {windows.map((win, idx) => (
+      <SectionTitle>时段规则（{escalation?.timezone ?? '—'}）</SectionTitle>
+      {!escalation ? (
+        <Text style={s.muted}>{escalationError ? `读取失败：${escalationError}` : '正在读取时段规则…'}</Text>
+      ) : (
+        <View>
+          <TableRow first header cells={['规则', '时间范围', '等待策略', '操作']} />
+          {windows.map((win, idx) => (
+            <TableRow
+              key={idx}
+              cells={[
+                win.days === 'daily'
+                  ? '每天免等时段'
+                  : win.days === 'weekdays'
+                    ? '工作日'
+                    : Array.isArray(win.days)
+                      ? `周 ${win.days.join(',')}`
+                      : '周末',
+                <Text key="t" style={s.mono}>
+                  {win.from} – {win.to}
+                </Text>,
+                '立即升级通知',
+                <Btn key="del" small danger label="删除" onPress={() => void removeWindow(idx)} />,
+              ]}
+            />
+          ))}
           <TableRow
-            key={idx}
             cells={[
-              win.days === 'daily'
-                ? '每天免等时段'
-                : win.days === 'weekdays'
-                  ? '工作日'
-                  : Array.isArray(win.days)
-                    ? `周 ${win.days.join(',')}`
-                    : '周末',
-              <Text key="t" style={s.mono}>
-                {win.from} – {win.to}
-              </Text>,
-              '立即升级通知',
-              <Btn key="del" small danger label="删除" onPress={() => void removeWindow(idx)} />,
+              '其余时段',
+              '默认等待',
+              delayMinutes === 0 ? '立即通知（0 分钟）' : `满 ${delayMinutes} 分钟未答后通知`,
+              <View key="delay" style={s.row}>
+                <TextInput
+                  accessibilityLabel="其余时段等待分钟数"
+                  style={[s.input, { width: 56, paddingVertical: 4 }]}
+                  value={delayInput}
+                  onChangeText={setDelayInput}
+                  onSubmitEditing={() => void applyDelay()}
+                />
+                <Btn small label="保存分钟" onPress={() => void applyDelay()} />
+              </View>,
             ]}
           />
-        ))}
-        <TableRow
-          cells={[
-            '其余时段',
-            '默认等待',
-            delayMinutes === 0 ? '立即通知（0 分钟）' : `满 ${delayMinutes} 分钟未答后通知`,
-            <View key="delay" style={s.row}>
-              <TextInput
-                accessibilityLabel="其余时段等待分钟数"
-                style={[s.input, { width: 56, paddingVertical: 4 }]}
-                value={delayInput}
-                onChangeText={setDelayInput}
-                onSubmitEditing={() => void applyDelay()}
-              />
-              <Btn small label="保存分钟" onPress={() => void applyDelay()} />
-            </View>,
-          ]}
-        />
-      </View>
+        </View>
+      )}
 
       <View style={s.wrap}>
         <Btn
           small
+          disabled={!escalation}
           label={newDays === 'daily' ? '范围：每天' : '范围：工作日'}
           onPress={() => setNewDays(d => (d === 'daily' ? 'weekdays' : 'daily'))}
         />
@@ -1180,7 +1348,7 @@ function EscalationDrawer() {
           placeholder="09:30"
           placeholderTextColor={theme.colors.foregroundMuted}
         />
-        <Btn small primary label="添加免等时段" onPress={() => void addWindow()} />
+        <Btn small primary disabled={!escalation} label="添加免等时段" onPress={() => void addWindow()} />
       </View>
 
       <View style={[s.row, { justifyContent: 'space-between' }]}>
@@ -1191,9 +1359,10 @@ function EscalationDrawer() {
             { value: 'shadow', label: '影子（只记日志）' },
           ]}
           value={delivery}
-          onChange={val =>
-            void control.configureEscalation({ delivery: val }).catch(e => setErr(errorMessage(e)))
-          }
+          onChange={val => {
+            if (!escalation) return;
+            void control.configureEscalation({ delivery: val }).catch(e => setErr(errorMessage(e)));
+          }}
         />
       </View>
 
@@ -1258,8 +1427,7 @@ function EscalationDrawer() {
 
 function QuietChildrenDrawer() {
   const { s, control, theme } = useUi();
-  const { quiet, quietStatus } = useControlState();
-  const forwardEvents = quiet?.forwardEvents ?? true;
+  const { quiet, quietStatus, quietError } = useControlState();
   const recent = quiet?.recentHandled ?? [];
   const [err, setErr] = useState<string | null>(null);
 
@@ -1268,6 +1436,10 @@ function QuietChildrenDrawer() {
       {quietStatus === 'disabled' ? (
         <Notice tone="neutral">
           <Text style={s.text}>子会话免提醒模块未启用（等待对应服务端模块合并或开启）。</Text>
+        </Notice>
+      ) : quietStatus === 'error' || quietError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{quietError ?? '无法读取免提醒设置'}</Text>
         </Notice>
       ) : null}
       <RuleNote>
@@ -1278,7 +1450,8 @@ function QuietChildrenDrawer() {
         <Text style={s.text}>将子会话异常与提问归并到主会话</Text>
         <Switch
           accessibilityLabel="将子会话异常与提问归并到主会话"
-          value={forwardEvents}
+          disabled={!quiet || quietStatus !== 'ready'}
+          value={quiet?.forwardEvents ?? false}
           onValueChange={val =>
             void control.configureQuiet({ forwardEvents: val }).catch(e => setErr(errorMessage(e)))
           }
@@ -1289,8 +1462,12 @@ function QuietChildrenDrawer() {
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
       <SectionTitle>最近处理的子会话</SectionTitle>
-      {recent.length === 0 ? (
-        <Text style={s.muted}>暂无最近处理的子会话记录（置顶工作区数：{quiet?.pinnedWorkspaceCount ?? 3}）。</Text>
+      {quietError ? (
+        <Text style={s.muted}>读取失败：{quietError}</Text>
+      ) : !quiet ? (
+        <Text style={s.muted}>正在读取免提醒状态…</Text>
+      ) : recent.length === 0 ? (
+        <Text style={s.muted}>暂无最近处理的子会话记录（置顶工作区数：{quiet.pinnedWorkspaceCount}）。</Text>
       ) : (
         <View>
           <TableRow first header cells={['子会话', '事件', '归并结果']} />
@@ -1316,27 +1493,37 @@ function QuietChildrenDrawer() {
 
 function SpeechDrawer() {
   const { s, control, theme } = useUi();
-  const { presence } = useControlState();
-  const settings = presence?.settings ?? { mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null };
+  const { presence, presenceError } = useControlState();
+  const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
 
   return (
     <View style={{ gap: 12 }}>
+      {presenceError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{presenceError}</Text>
+        </Notice>
+      ) : null}
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>开启语音提醒</Text>
         <Switch
           accessibilityLabel="开启语音提醒"
-          value={settings.speechEnabled}
-          onValueChange={speechEnabled =>
-            void control.configurePresence({ ...settings, speechEnabled }).catch(e => setErr(errorMessage(e)))
-          }
+          disabled={!settings}
+          value={settings?.speechEnabled ?? false}
+          onValueChange={speechEnabled => {
+            if (!settings) return;
+            void control.configurePresence({ ...settings, speechEnabled }).catch(e => setErr(errorMessage(e)));
+          }}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
         />
       </View>
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>播报主机</Text>
-        <Chip label={presence?.hostName || '跟随在场主机'} tone="neutral" />
+        <Chip
+          label={presenceError ? '读取失败' : !presence ? '正在读取' : presence.hostName || '跟随在场主机'}
+          tone={presenceError ? 'danger' : 'neutral'}
+        />
       </View>
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
       <RuleNote>
@@ -1348,14 +1535,23 @@ function SpeechDrawer() {
 
 function ApprovalDrawer() {
   const { s, control } = useUi();
-  const { automation } = useControlState();
+  const { automation, automationError } = useControlState();
   const policies = automation?.policies ?? [];
   const sessions = automation?.sessions ?? [];
 
   return (
     <View style={{ gap: 12 }}>
+      {automationError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{automationError}</Text>
+        </Notice>
+      ) : null}
       <SectionTitle>本机策略</SectionTitle>
-      {policies.length === 0 ? (
+      {automationError ? (
+        <Text style={s.muted}>读取失败：{automationError}</Text>
+      ) : !automation ? (
+        <Text style={s.muted}>正在读取授权策略…</Text>
+      ) : policies.length === 0 ? (
         <Text style={s.muted}>当前没有配置跨重启精确授权策略。</Text>
       ) : (
         <View>
@@ -1428,22 +1624,24 @@ function ApprovalDrawer() {
 
 function GithubConfigDrawer() {
   const { s, store, openSettings, theme } = useUi();
-  const { snapshot } = useStoreState();
-  const base: Preferences = snapshot?.preferences ?? {
-    enabled: true,
-    shadow: false,
-    organization: 'fliggy-travel-ai',
-    excludedRepos: [],
-    extraRepos: [],
-    providerPolicies: { claude: 'interrupt', codex: 'interrupt', opencode: 'skip' },
-  };
-  const [draft, setDraft] = useState<Preferences>(base);
-  const [excludedText, setExcludedText] = useState(base.excludedRepos.join(', '));
-  const [extraText, setExtraText] = useState(base.extraRepos.join(', '));
+  const { snapshot, error } = useStoreState();
+  const prefs = snapshot?.preferences ?? null;
+  const [draft, setDraft] = useState<Preferences | null>(prefs);
+  const [excludedText, setExcludedText] = useState(prefs ? prefs.excludedRepos.join(', ') : '');
+  const [extraText, setExtraText] = useState(prefs ? prefs.extraRepos.join(', ') : '');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (snapshot?.preferences) {
+      setDraft(snapshot.preferences);
+      setExcludedText(snapshot.preferences.excludedRepos.join(', '));
+      setExtraText(snapshot.preferences.extraRepos.join(', '));
+    }
+  }, [snapshot?.preferences]);
+
   const save = async () => {
+    if (!draft) return;
     setSaving(true);
     setMsg(null);
     try {
@@ -1460,12 +1658,22 @@ function GithubConfigDrawer() {
       };
       await store.savePreferences(next);
       setMsg('GitHub 订阅设置已保存');
-    } catch (error) {
-      setMsg(errorMessage(error));
+    } catch (failure) {
+      setMsg(errorMessage(failure));
     } finally {
       setSaving(false);
     }
   };
+
+  if (!draft) {
+    return (
+      <View style={{ gap: 12 }}>
+        <Notice tone={error ? 'danger' : 'neutral'}>
+          <Text style={s.text}>{error ? `读取失败：${error}` : '正在读取 GitHub 订阅设置…'}</Text>
+        </Notice>
+      </View>
+    );
+  }
 
   return (
     <View style={{ gap: 12 }}>
@@ -1477,7 +1685,7 @@ function GithubConfigDrawer() {
             { value: 'shadow', label: '影子（只记日志）' },
           ]}
           value={draft.shadow ? 'shadow' : 'live'}
-          onChange={val => setDraft(prev => ({ ...prev, shadow: val === 'shadow' }))}
+          onChange={val => setDraft(prev => (prev ? { ...prev, shadow: val === 'shadow' } : prev))}
         />
       </View>
       <View style={s.stack}>
@@ -1486,7 +1694,7 @@ function GithubConfigDrawer() {
           accessibilityLabel="GitHub 组织"
           style={s.input}
           value={draft.organization}
-          onChangeText={organization => setDraft(prev => ({ ...prev, organization }))}
+          onChangeText={organization => setDraft(prev => (prev ? { ...prev, organization } : prev))}
           autoCapitalize="none"
         />
       </View>
@@ -1528,10 +1736,14 @@ function GithubConfigDrawer() {
               ]}
               value={current}
               onChange={policy =>
-                setDraft(prev => ({
-                  ...prev,
-                  providerPolicies: { ...prev.providerPolicies, [provider]: policy },
-                }))
+                setDraft(prev =>
+                  prev
+                    ? {
+                        ...prev,
+                        providerPolicies: { ...prev.providerPolicies, [provider]: policy },
+                      }
+                    : prev,
+                )
               }
             />
           </View>

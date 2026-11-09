@@ -55,7 +55,7 @@ import {
 import { quietSnapshot, quietConfigure, type QuietSnapshot } from '../shared/quiet.ts';
 
 export type EscalationWebhookStatus = EscalationSnapshot['webhook'];
-export type EscalationWindow = { days: 'daily' | 'weekdays' | 'weekends'; from: string; to: string };
+export type EscalationWindow = EscalationSnapshot['immediate'][number];
 
 export type OptionalFeatureStatus = 'loading' | 'ready' | 'disabled' | 'error';
 
@@ -70,11 +70,15 @@ export interface ControlState {
   presenceError: string | null;
   modules: ModulesSnapshot | null;
   machineSettings: MachineSettingsSnapshot | null;
+  machineSettingsError?: string | null;
   todo: TodoMergedSnapshot | null;
   todoError: string | null;
   defaults: DefaultsSnapshot | null;
+  defaultsError?: string | null;
   providerInstance: ProvidersInstanceStatus | null;
+  providerInstanceError?: string | null;
   cloudSession: CloudSessionStatus | null;
+  cloudSessionError?: string | null;
   claudeAccounts: ClaudeAccountsSnapshot | null;
   claudeAccountsStatus: OptionalFeatureStatus;
   claudeAccountsError: string | null;
@@ -112,11 +116,15 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     presenceError: null,
     modules: null,
     machineSettings: null,
+    machineSettingsError: null,
     todo: null,
     todoError: null,
     defaults: null,
+    defaultsError: null,
     providerInstance: null,
+    providerInstanceError: null,
     cloudSession: null,
+    cloudSessionError: null,
     claudeAccounts: null,
     claudeAccountsStatus: 'loading',
     claudeAccountsError: null,
@@ -212,10 +220,10 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       let mods = state.modules;
       await client.rpc(modulesStatus, {}).then(value => { mods = value; emit({ modules: value }); }).catch(() => {});
       await Promise.allSettled([
-        client.rpc(machineSettingsSnapshot, {}).then(value => emit({ machineSettings: value })).catch(() => {}),
-        client.rpc(defaultsSnapshot, {}).then(value => emit({ defaults: value })).catch(() => {}),
-        client.rpc(providersInstanceStatus, {}).then(value => emit({ providerInstance: value })).catch(() => {}),
-        client.rpc(cloudSessionStatus, {}).then(value => emit({ cloudSession: value })).catch(() => {}),
+        client.rpc(machineSettingsSnapshot, {}).then(value => emit({ machineSettings: value, machineSettingsError: null })).catch(error => emit({ machineSettingsError: errorMessage(error) })),
+        client.rpc(defaultsSnapshot, {}).then(value => emit({ defaults: value, defaultsError: null })).catch(error => emit({ defaultsError: errorMessage(error) })),
+        client.rpc(providersInstanceStatus, {}).then(value => emit({ providerInstance: value, providerInstanceError: null })).catch(error => emit({ providerInstanceError: errorMessage(error) })),
+        client.rpc(cloudSessionStatus, {}).then(value => emit({ cloudSession: value, cloudSessionError: null })).catch(error => emit({ cloudSessionError: errorMessage(error) })),
         client.rpc(claudeAccountsSnapshot, {}).then(value => {
           emit({ claudeAccounts: value, claudeAccountsStatus: 'ready', claudeAccountsError: null });
         }).catch(error => {

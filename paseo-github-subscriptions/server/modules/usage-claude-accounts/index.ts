@@ -34,7 +34,7 @@ const emptySnapshot = (error: string): rpc.ClaudeAccountsSnapshot => ({
 export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
   id: 'usage.claudeAccounts',
   label: 'Claude 账号额度',
-  defaultEnabled: false,
+  defaultEnabled: true,
   appliesTo: isMainInstance,
   config: { section: 'claudeAccounts', spec: { schema: ClaudeAccountsSectionSchema, fallback: CLAUDE_ACCOUNTS_FALLBACK } },
   register(context) {
@@ -64,7 +64,7 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     // 自带的 Claude 额度插件只读默认账号。它在时本来源只补其他账号；它不在时本来源报告全部账号。
     const includeDefault = !bundledClaudeUsageInstalled();
     const usage = new ContinuousUsage({ home, directory, renewal: config.renewal });
-    server.registerUsageSource({
+    server.registerUsageSource?.({
       id: config.sourceId,
       label: includeDefault ? 'Claude' : 'Claude 其他账号',
       icon: ICON,
@@ -88,11 +88,11 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       service.setEnabled(agentId, enabled);
       return { enabled: service.isEnabled(agentId) };
     });
-    const removeStart = server.on('agent.turn_started', async ({ agent }) => {
+    const removeStart = server.on?.('agent.turn_started', async ({ agent }) => {
       if (isClaudeProvider(agent.provider)) await service.cancel(agent.id);
-    });
-    const removeArchive = server.on('agent.archived', async ({ agent }) => { await service.forget(agent.id); });
-    const removeEnd = server.on('agent.turn_ended', async (event, { paseo }) => {
+    }) ?? (() => {});
+    const removeArchive = server.on?.('agent.archived', async ({ agent }) => { await service.forget(agent.id); }) ?? (() => {});
+    const removeEnd = server.on?.('agent.turn_ended', async (event, { paseo }) => {
       if (!isClaudeProvider(event.agent.provider) || event.outcome.kind === 'canceled') return;
       try {
         const page = await paseo.agents.ref(event.agent.id).timeline.refetch({ direction: 'tail', limit: 100 });

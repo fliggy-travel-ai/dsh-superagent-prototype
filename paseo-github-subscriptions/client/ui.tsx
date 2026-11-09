@@ -164,6 +164,7 @@ export function bind<P extends PluginHostProps>(env: Env, Inner: ComponentType<P
     const [now, setNow] = useState(() => Date.now());
     useEffect(() => {
       const timer = setInterval(() => setNow(Date.now()), 30_000);
+      (timer as { unref?: () => void }).unref?.();
       return () => clearInterval(timer);
     }, []);
     const { theme } = props;

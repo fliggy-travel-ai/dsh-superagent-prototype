@@ -1,9 +1,28 @@
 import '../../resolve-js-to-ts.mjs';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { mock } from 'node:test';
 
 const mode = process.argv[2];
 assert.ok(['cloud-fails', 'github-fails', 'github-runtime-fails', 'automation-fails', 'presence-fails', 'browser-fails'].includes(mode));
+const tempHome = mkdtempSync(join(tmpdir(), 'ghsub-isolation-'));
+process.env.PASEO_HOME = tempHome;
+process.env.PASEO_GHSUB_STATE_DIR = tempHome;
+process.env.PASEO_GHSUB_MACHINE_CONFIG = join(tempHome, 'machine.json');
+writeFileSync(join(tempHome, 'config.json'), JSON.stringify({ plugins: {} }));
+writeFileSync(
+  join(tempHome, 'machine.json'),
+  JSON.stringify({
+    version: 1,
+    modules: {
+      'usage.claudeAccounts': false,
+      'answer.escalation': false,
+      'answer.quietChildren': false,
+    },
+  }),
+);
 class FakeRuntime {
   storage = { state: { preferences: { shadow: true }, subscriptions: [{ agentId: 'agent', id: 'subscription' }] } };
   vault = { redact: error => String(error) };
@@ -73,5 +92,5 @@ try {
     }
   }
 } finally {
-  await cleanup(); console.error = previousError; mock.reset();
+  await cleanup(); console.error = previousError; mock.reset(); rmSync(tempHome, { recursive: true, force: true });
 }

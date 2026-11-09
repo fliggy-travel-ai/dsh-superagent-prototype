@@ -5,6 +5,18 @@ import type { connectDaemon } from '../daemon.ts';
 
 export class DeadlineError extends Error {}
 
+function isTransportFailure(error: unknown, client: { isConnected?: boolean } | null): boolean {
+  if (client && client.isConnected === false) return true;
+  if (error && typeof error === 'object') {
+    const rec = error as { code?: unknown; serverId?: unknown };
+    if (rec.code === 'host_offline' || typeof rec.serverId === 'string') return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  return /(?:transport|connection|disconnected|daemon client is closed|daemon client is disposed|not connected|socket|route closed|host .* is offline)/i.test(
+    msg,
+  );
+}
+
 export async function deadline<T>(operation: Promise<T>, milliseconds: number, cancel = () => {}) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -87,8 +99,8 @@ export class HostRouter {
     ];
   }
 
-  private async client(hostId: string): Promise<DaemonClient> {
-    if (this.stopped) throw new Error('插件已停止');
+  private client(hostId: string): Promise<DaemonClient> {
+    if (this.stopped) return Promise.reject(new Error('插件已停止'));
     let connection = this.remote.get(hostId);
     if (!connection) {
       const created = (async () => {
@@ -139,14 +151,19 @@ export class HostRouter {
   async withHost<T>(hostId: string, operation: (client: DaemonClient) => Promise<T>, keepOnTimeout = true): Promise<T> {
     const connection = this.client(hostId);
     let connected = false;
+    let activeClient: DaemonClient | null = null;
     try {
       const client = await connection;
       connected = true;
+      activeClient = client;
       return await operation(client);
     } catch (error) {
       if (connected && keepOnTimeout && error instanceof DeadlineError) throw error;
       if (!connected && error instanceof DeadlineError) {
         this.pendingCancel.get(hostId)?.();
+        throw error;
+      }
+      if (connected && !(error instanceof DeadlineError) && !isTransportFailure(error, activeClient)) {
         throw error;
       }
       const previous = this.remote.get(hostId);
@@ -160,12 +177,14 @@ export class HostRouter {
 
   async invokePlugin(hostId: string, method: string, input: unknown, timeoutMs = 5000, onTimeout?: () => void, keepOnTimeout = true): Promise<unknown> {
     let connected = false;
+    let activeClient: DaemonClient | null = null;
     const connection = this.client(hostId);
     try {
       return await deadline(
         (async () => {
           const client = await connection;
           connected = true;
+          activeClient = client;
           return await client.invokePluginRpc('github-subscriptions', method, input);
         })(),
         timeoutMs,
@@ -177,6 +196,9 @@ export class HostRouter {
     } catch (error) {
       if (connected && keepOnTimeout && error instanceof DeadlineError) throw error;
       if (!connected && error instanceof DeadlineError) throw error;
+      if (connected && !(error instanceof DeadlineError) && !isTransportFailure(error, activeClient)) {
+        throw error;
+      }
       const previous = this.remote.get(hostId);
       if (previous === connection) {
         this.remote.delete(hostId);

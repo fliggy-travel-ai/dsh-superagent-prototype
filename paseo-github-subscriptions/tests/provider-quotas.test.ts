@@ -409,6 +409,16 @@ test('client/paseo-internal：只在显示计算层过滤，不改写持久化�
     { sourceId: 'codex-multi', windowId: 'effective' },
     { sourceId: 'claude-browser', windowId: '5h' },
   ]);
+
+  // K：当 __r 没有 getModules 时（正式版包），绝不按固定编号调用 __r(id)，如实返回 applied: false
+  const calledIds: number[] = [];
+  const metroWithoutGetModules = (id: number) => {
+    calledIds.push(id);
+    return null;
+  };
+  const noGetModulesRes = syncHideBuiltinUsage(['codex'], { __r: metroWithoutGetModules });
+  assert.equal(noGetModulesRes.applied, false);
+  assert.deepEqual(calledIds, [], '没有 getModules 时不应调用 __r(编号)');
 });
 
 test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：全部来源跳过，模块出错', () => {

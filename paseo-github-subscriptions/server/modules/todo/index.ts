@@ -1,13 +1,7 @@
-import { StalledRuntime } from '../../stalled.ts';
-import { stalledPort } from '../../stalled-port.ts';
-import { sessionRoles } from '../../core/session-roles.ts';
-import { isModuleEnabled } from '../../core/machine-settings-rpc.ts';
 import { TodoRuntime } from '../../todo.ts';
 import { TodoActionOutputSchema, TodoLocalSnapshotSchema, todoAct, todoList, todoLocal } from '../../../shared/todo.ts';
 import type { StalledSnapshot } from '../../../shared/stalled.ts';
 import { isMainInstance, mainOf, type Module } from '../types.ts';
-
-const STALLED_CACHE_MS = 45_000;
 
 /** 待办汇总：本机与跨主机待办合看、处理记录。 */
 export const todoModule: Module = {
@@ -18,44 +12,12 @@ export const todoModule: Module = {
   register(context) {
     const { server, machine } = context;
     const services = mainOf(context);
-    let stalled: StalledRuntime | null = null;
-    let stalledCache: { at: number; value: Promise<StalledSnapshot> } | null = null;
+    const isRunning = (id: string, defaultEnabled: boolean) =>
+      services.isModuleRunning(id, machine, defaultEnabled);
 
     const getStalled = async (): Promise<StalledSnapshot | null> => {
-      if (!isModuleEnabled(machine, 'todo.stalled', true)) return null;
-      const now = Date.now();
-      if (stalledCache && now - stalledCache.at < STALLED_CACHE_MS) {
-        return stalledCache.value;
-      }
-      const promise = (async () => {
-        const githubEnabled = isModuleEnabled(machine, 'github', true);
-        const [hosts, connection] = await Promise.all([
-          services.readyHosts(),
-          context.services.daemon.ready(),
-          ...(githubEnabled ? [services.github().catch(() => null)] : []),
-        ]);
-        stalled ??= new StalledRuntime(
-          stalledPort(
-            connection.client,
-            hosts,
-            () =>
-              githubEnabled &&
-              services.runtime?.storage.state.preferences.enabled &&
-              !services.runtime.storage.state.preferences.shadow
-                ? services.runtime.storage.state.subscriptions
-                    .filter(subscription => !subscription.expiresAt || Date.parse(subscription.expiresAt) > Date.now())
-                    .map(subscription => subscription.agentId)
-                : [],
-            sessionRoles(context.services.home),
-          ),
-        );
-        return stalled.snapshot();
-      })().catch(error => {
-        if (stalledCache?.value === promise) stalledCache = null;
-        throw error;
-      });
-      stalledCache = { at: now, value: promise };
-      return promise;
+      if (!isRunning('todo.stalled', true) || services.stalledPaused) return null;
+      return services.stalledSnapshot(machine, context.services.home);
     };
 
     const runtime = new TodoRuntime({
@@ -68,11 +30,11 @@ export const todoModule: Module = {
         return hosts.hosts();
       },
       async presence() {
-        if (!isModuleEnabled(machine, 'answer.presence', true)) return null;
+        if (!isRunning('answer.presence', true)) return null;
         return (await services.readyPresence()).snapshot();
       },
       async browser() {
-        if (!isModuleEnabled(machine, 'answer.browser', true)) return null;
+        if (!isRunning('answer.browser', true)) return null;
         return (await services.readyBrowser()).snapshot();
       },
       async stalled() {
@@ -97,13 +59,13 @@ export const todoModule: Module = {
         return TodoActionOutputSchema.parse(raw);
       },
       async answerQuestion(input) {
-        if (!isModuleEnabled(machine, 'answer.presence', true)) {
+        if (!isRunning('answer.presence', true)) {
           throw new Error('问答模式模块未启用');
         }
         return (await services.readyPresence()).answer(input);
       },
       async markQuestionRead(input) {
-        if (!isModuleEnabled(machine, 'answer.presence', true)) {
+        if (!isRunning('answer.presence', true)) {
           throw new Error('问答模式模块未启用');
         }
         return (await services.readyPresence()).markRead(input);

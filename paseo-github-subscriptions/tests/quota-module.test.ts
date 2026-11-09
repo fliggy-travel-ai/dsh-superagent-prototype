@@ -174,3 +174,24 @@ test('旧状态目录存在时启动自动复制，旧文件不动', async () =>
     assert.deepEqual(JSON.parse(readFileSync(join(run.state, 'labels.json'), 'utf8')), { 'h@example.test': '真实（Apple 登录）' });
   } finally { await run.done(); }
 });
+
+test('L：machine.json 没有 usage.claudeAccounts 时模块默认启动且 Claude 名称带额度生效；显式设 false 时可关闭', async () => {
+  const defaultRun = setup({ json: { version: 1, modules: {} } });
+  try {
+    assert.equal(defaultRun.host.status().modules[0]!.state, 'running');
+    assert.deepEqual(defaultRun.sources.map(source => source.id), ['claude-accounts']);
+    const snapshot = await defaultRun.handlers.get('claude-accounts.snapshot')!({});
+    assert.equal(snapshot.enabled, true);
+    assert.equal(snapshot.quotaName.enabled, true);
+  } finally {
+    await defaultRun.done();
+  }
+
+  const disabledRun = setup({ json: { version: 1, modules: { 'usage.claudeAccounts': false } } });
+  try {
+    assert.equal(disabledRun.host.status().modules[0]!.state, 'off');
+    assert.deepEqual(disabledRun.sources, []);
+  } finally {
+    await disabledRun.done();
+  }
+});

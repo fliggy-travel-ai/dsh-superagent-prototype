@@ -117,6 +117,27 @@ export function startModules<Services>(definitions: readonly ModuleDefinition<an
   });
   options.server.handle(modulesStatus, async () => snapshot());
 
+  let disposed: Promise<void> | null = null;
+  const host: ModuleHost = {
+    status: snapshot,
+    currentModule,
+    runInModule,
+    dispose() {
+      disposed ??= (async () => {
+        for (const entry of [...entries].reverse()) {
+          if (!entry.cleanup) continue;
+          try { await runInModule(entry.id, entry.cleanup); }
+          catch (error) { log(`${entry.label}清理失败：${entry.redact(error)}`); }
+        }
+        proc.off('unhandledRejection', onRejection);
+        proc.off('uncaughtException', onException);
+      })();
+      return disposed;
+    },
+  };
+  const mainSvc = (options.services as { main?: { host?: ModuleHost | null } } | undefined)?.main;
+  if (mainSvc) mainSvc.host = host;
+
   for (const definition of definitions) {
     if (!definition.appliesTo(options.instance)) continue;
     const entry: Entry = { id: definition.id, label: definition.label, state: 'off', redact: error => definition.redact ? definition.redact(error) : summarizeError(error) };
@@ -150,24 +171,7 @@ export function startModules<Services>(definitions: readonly ModuleDefinition<an
     }
   }
 
-  let disposed: Promise<void> | null = null;
-  return {
-    status: snapshot,
-    currentModule,
-    runInModule,
-    dispose() {
-      disposed ??= (async () => {
-        for (const entry of [...entries].reverse()) {
-          if (!entry.cleanup) continue;
-          try { await runInModule(entry.id, entry.cleanup); }
-          catch (error) { log(`${entry.label}清理失败：${entry.redact(error)}`); }
-        }
-        proc.off('unhandledRejection', onRejection);
-        proc.off('uncaughtException', onException);
-      })();
-      return disposed;
-    },
-  };
+  return host;
 }
 
 type Wrap = <T>(operation: () => T) => T;

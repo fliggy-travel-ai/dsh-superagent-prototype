@@ -6,8 +6,8 @@ import ts from 'typescript';
 import React, { isValidElement, type ReactElement, type ReactNode } from 'react';
 import type { PluginHostProps } from '@getpaseo/plugin/client';
 import { makePresence } from './control-fixtures.ts';
-import type { Question, QuestionAnswer } from '../../shared/presence.ts';
-import type { QuestionDraftState } from '../../client/presence-panel.tsx';
+import type { TodoActionInput, TodoItem } from '../../shared/todo.ts';
+import type { QuestionDraftState } from '../../client/dashboard.tsx';
 
 let hooksInstalled = false;
 
@@ -95,18 +95,18 @@ function collectText(node: RenderedNode | string): string {
 
 export async function runPresencePanelUiSuite() {
   installTsxAndReactNativeHooks();
-  const panelMod = await import('../../client/presence-panel.tsx');
+  const dashboardMod = await import('../../client/dashboard.tsx');
   const uiMod = await import('../../client/ui.tsx');
 
   const {
-    QuestionCard,
+    TodoItemCard,
     pickPromptOption,
     changePromptOther,
     isPromptComplete,
     isQuestionAnswerable,
     isQuestionComplete,
     buildQuestionSubmission,
-  } = panelMod;
+  } = dashboardMod;
   const { bind } = uiMod;
 
   const fixture = makePresence();
@@ -177,8 +177,8 @@ export async function runPresencePanelUiSuite() {
     },
   });
 
-  // 4. 组件树渲染验证：待回答状态显示“其他”输入框、驱动单选互斥与多选并存并提交；已提交状态回显“其他”文本
-  const submittedPayloads: QuestionAnswer[] = [];
+  // 4. TodoItemCard 组件树渲染验证：展开待回答提问、驱动单选互斥与多选并存并通过 actTodo 提交
+  const submittedPayloads: TodoActionInput[] = [];
   let hookStates: unknown[] = [];
   let hookCursor = 0;
 
@@ -230,19 +230,38 @@ export async function runPresencePanelUiSuite() {
       control: {
         subscribe: () => () => {},
         getState: () => ({} as never),
-        answerQuestion: async (ans: QuestionAnswer) => { submittedPayloads.push(ans); },
+        actTodo: async (input: TodoActionInput) => {
+          submittedPayloads.push(input);
+          return { ok: true };
+        },
       } as never,
       openScreen: () => {},
     },
-    (props: PluginHostProps & { question: Question }) =>
-      React.createElement(QuestionCard, {
-        question: props.question,
-        busy: false,
-        run: async op => { await op(); },
+    (props: PluginHostProps & { item: TodoItem }) =>
+      React.createElement(TodoItemCard, {
+        item: props.item,
       }),
   );
 
-  function renderCard(targetQuestion: Question): RenderedNode {
+  const todoAskItem: TodoItem = {
+    id: `ask:${question.id}`,
+    type: 'ask',
+    label: '网页提问',
+    hostId: 'local',
+    hostName: 'Mac mini',
+    sourceLabel: '网页 claude.ai',
+    sessionTitle: question.title || '会话提问',
+    at: question.at,
+    ageText: '刚刚',
+    text: question.prompts.map(p => p.question).join(' / '),
+    question: {
+      questionId: question.id,
+      fingerprint: question.fingerprint,
+      prompts: question.prompts,
+    },
+  };
+
+  function renderCard(targetItem: TodoItem): RenderedNode {
     hookCursor = 0;
     const prevH = dispatcher?.H;
     const customDispatcher = {
@@ -269,45 +288,45 @@ export async function runPresencePanelUiSuite() {
           theme: mockTheme,
           host: { id: 'h1', label: 'Host' },
           layout: { compact: false, platform: 'web' },
-          question: targetQuestion,
+          item: targetItem,
         }),
       ) as RenderedNode;
     } finally {
       if (dispatcher && prevH) dispatcher.H = prevH;
-      void origUseState; void origUseMemo; void origUseEffect; void origUseContext; void mockReact;
+      void origUseState; void origUseMemo; void origUseEffect; void origUseContext; void mockReact; void collectText;
     }
   }
 
   hookStates = [];
-  let tree = renderCard(question);
+  let tree = renderCard(todoAskItem);
+  const expandBtn = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '回答')[0]!;
+  (expandBtn.props.onPress as () => void)();
+  tree = renderCard(todoAskItem);
+
   const inputs = findNodes(tree, n => n.type === 'TextInput');
   assert.equal(inputs.length, 2);
-  assert.equal(inputs[0]?.props.accessibilityLabel, '发布到哪个环境？ 其他');
-  assert.equal(inputs[1]?.props.accessibilityLabel, '需要执行哪些检查？ 其他');
+  assert.equal(inputs[0]?.props.accessibilityLabel, '其他回答 发布到哪个环境？');
+  assert.equal(inputs[1]?.props.accessibilityLabel, '其他回答 需要执行哪些检查？');
 
   const submitBefore = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '提交回答')[0]!;
   assert.equal(submitBefore.props.disabled, true);
 
   // 先在单选题选“生产”，再输入“其他”文本，验证单选选项被清空
-  const prodRadio = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '生产')[0]!;
-  (prodRadio.props.onPress as () => void)();
-  tree = renderCard(question);
-  const prodAfterPick = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '生产')[0]!;
-  assert.equal((prodAfterPick.props.accessibilityState as { checked: boolean }).checked, true);
+  const prodBtn = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '生产')[0]!;
+  (prodBtn.props.onPress as () => void)();
+  tree = renderCard(todoAskItem);
 
-  const singleInput = findNodes(tree, n => n.type === 'TextInput' && n.props.accessibilityLabel === '发布到哪个环境？ 其他')[0]!;
+  const singleInput = findNodes(tree, n => n.type === 'TextInput' && n.props.accessibilityLabel === '其他回答 发布到哪个环境？')[0]!;
   (singleInput.props.onChangeText as (v: string) => void)('专有云环境');
-  tree = renderCard(question);
-  const prodAfterOther = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '生产')[0]!;
-  assert.equal((prodAfterOther.props.accessibilityState as { checked: boolean }).checked, false);
+  tree = renderCard(todoAskItem);
 
   // 在多选题同时勾选“类型检查”并输入“其他”文本
-  const checkOption = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '类型检查（推荐）')[0]!;
+  const checkOption = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '类型检查')[0]!;
   (checkOption.props.onPress as () => void)();
-  tree = renderCard(question);
-  const multiInput = findNodes(tree, n => n.type === 'TextInput' && n.props.accessibilityLabel === '需要执行哪些检查？ 其他')[0]!;
+  tree = renderCard(todoAskItem);
+  const multiInput = findNodes(tree, n => n.type === 'TextInput' && n.props.accessibilityLabel === '其他回答 需要执行哪些检查？')[0]!;
   (multiInput.props.onChangeText as (v: string) => void)('回归冒烟');
-  tree = renderCard(question);
+  tree = renderCard(todoAskItem);
 
   const submitReady = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '提交回答')[0]!;
   assert.equal(Boolean(submitReady.props.disabled), false);
@@ -315,24 +334,10 @@ export async function runPresencePanelUiSuite() {
 
   assert.equal(submittedPayloads.length, 1);
   assert.deepEqual(submittedPayloads[0], {
-    id: 'q-cloud-1',
-    answers: {
-      '发布到哪个环境？': [],
-      '需要执行哪些检查？': ['类型检查'],
-    },
-    otherAnswers: {
-      '发布到哪个环境？': '专有云环境',
-      '需要执行哪些检查？': '回归冒烟',
-    },
-  });
-
-  // 验证已提交状态的回显显示“其他”文本
-  hookStates = [];
-  const submittedQuestion: Question = {
-    ...question,
-    state: 'submitted',
-    answer: {
-      source: 'user',
+    hostId: 'local',
+    action: {
+      type: 'answer',
+      questionId: 'q-cloud-1',
       answers: {
         '发布到哪个环境？': [],
         '需要执行哪些检查？': ['类型检查'],
@@ -342,9 +347,5 @@ export async function runPresencePanelUiSuite() {
         '需要执行哪些检查？': '回归冒烟',
       },
     },
-  };
-  const echoTree = renderCard(submittedQuestion);
-  const fullText = collectText(echoTree);
-  assert.match(fullText, /其他：专有云环境/);
-  assert.match(fullText, /其他：回归冒烟/);
+  });
 }

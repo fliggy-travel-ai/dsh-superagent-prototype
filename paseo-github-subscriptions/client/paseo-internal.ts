@@ -8,8 +8,9 @@ import { normalizeHideBuiltinId, normalizeUsagePins } from '../shared/provider-q
  * 1. 只在显示计算层过滤（`settleReports` / `upsertReport` / `resolveUsageView` / `effectiveUsagePins`），
  *    绝不改写持久化的 `localStorage['@paseo:app-settings']` 或调用 `persistAppSettings`，
  *    确保清空 `hideBuiltin` 后用户原本固定的内置额度项可立即恢复。
- * 2. 通过 `metroRequire.getModules()` 遍历已初始化模块并按导出函数特征匹配，不依赖硬编码模块编号；
- *    特征校验失败时立即安全降级并返回 `{ applied: false }`。
+ * 2. 只在 `metroRequire.getModules` 存在时遍历已初始化模块并按导出函数特征匹配，绝不按固定编号调用 `__r(id)`；
+ *    正式版 Paseo 客户端未暴露 `getModules`，因此 `hideBuiltin` 在正式版不生效并如实返回 `{ applied: false }`，
+ *    页面据此明确显示“未生效”。
  * 3. 不注入自定义图标，不修改 `providerSnapshotIcons` 等无关状态。
  */
 
@@ -86,15 +87,6 @@ function collectCandidateExports(metroRequire: ((id: number) => any) & { getModu
       }
     } catch {
       // 忽略 getModules 读取异常
-    }
-  }
-
-  // 若宿主未暴露 getModules，按历史候选模块号回退探测并校验导出签名
-  for (const fallbackId of [3273, 3353, 3563, 3663]) {
-    try {
-      add(metroRequire(fallbackId));
-    } catch {
-      // 忽略未定义模块
     }
   }
 

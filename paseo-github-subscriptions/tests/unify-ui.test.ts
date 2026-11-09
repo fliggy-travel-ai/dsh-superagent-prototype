@@ -659,3 +659,302 @@ test('审阅项 5/7/14：待办“打开会话”传递 serverId，网页提问�
   );
   assert.match(collectText(errTree), /模拟子组件渲染崩溃/);
 });
+
+test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const React = (await import('react')).default;
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { browserSnapshot } = await import('../shared/browser-contracts.ts');
+  const { claudeAccountsSnapshot } = await import('../shared/claude-accounts.ts');
+  const { escalationSnapshot } = await import('../shared/escalation.ts');
+  const { quietSnapshot } = await import('../shared/quiet.ts');
+  const { providerQuotasSnapshot } = await import('../shared/provider-quotas.ts');
+  const { antigravitySnapshot } = await import('../shared/antigravity.ts');
+  const { todoList } = await import('../shared/todo.ts');
+  const { modulesStatus } = await import('../shared/modules.ts');
+  const { defaultsSnapshot } = await import('../shared/defaults.ts');
+  const { providersInstanceStatus, cloudSessionStatus } = await import('../shared/provider-instance.ts');
+  const { machineSettingsSnapshot } = await import('../shared/machine-settings.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const { bind } = await import('../client/ui.tsx');
+  const { SubscriptionsTab } = await import('../client/screen/subscriptions.tsx');
+
+  const emptyAgentsList = async () => ({ entries: [], pageInfo: { hasMore: false, nextCursor: null } });
+
+  // G: FakeDaemon 所有 RPC 输出过合约校验，且浏览器实例不含 sessionCount
+  const fake = new FakeDaemon('shadow');
+  fake.latencyMs = 0;
+  for (const inst of fake.browser.instances as Array<Record<string, unknown>>) {
+    assert.equal('sessionCount' in inst, false, 'FakeDaemon.browser.instances 不应含合约外字段 sessionCount');
+  }
+  const parsedBrowser = (await fake.rpc(browserSnapshot, {})) as { instances: Array<Record<string, unknown>> };
+  for (const inst of parsedBrowser.instances) {
+    assert.equal('sessionCount' in inst, false, '浏览器实例不应含合约外字段 sessionCount');
+  }
+  assert.ok(await fake.rpc(claudeAccountsSnapshot, {}));
+  assert.ok(await fake.rpc(escalationSnapshot, {}));
+  assert.ok(await fake.rpc(quietSnapshot, {}));
+  assert.ok(await fake.rpc(providerQuotasSnapshot, {}));
+  assert.ok(await fake.rpc(antigravitySnapshot, {}));
+  assert.ok(await fake.rpc(todoList, {}));
+  assert.ok(await fake.rpc(modulesStatus, {}));
+  assert.ok(await fake.rpc(defaultsSnapshot, {}));
+  assert.ok(await fake.rpc(providersInstanceStatus, {}));
+  assert.ok(await fake.rpc(cloudSessionStatus, {}));
+  assert.ok(await fake.rpc(machineSettingsSnapshot, {}));
+
+  const mockTheme = {
+    colors: {
+      surface0: '#151517',
+      surface1: '#1c1c1f',
+      surface2: '#2b2b2f',
+      border: '#303035',
+      foreground: '#ececef',
+      foregroundMuted: '#8e8e95',
+      accent: '#5b8cff',
+      accentForeground: '#ffffff',
+      statusSuccess: '#4cc274',
+      statusWarning: '#e3a33b',
+      statusDanger: '#ff6b66',
+    },
+  };
+
+  // H & 第 3 项：RPC 报错时卡片与抽屉显示“读取失败”，不伪装为正常/0个账号/运行中，也不出现 ?? 3 或 ?? 'Mac mini' 占位值
+  const failingDaemon = {
+    rpc: async (contract: { name: string }) => {
+      throw new Error(`RPC 失败: ${contract.name}`);
+    },
+  };
+  const errControl = createControlStore(failingDaemon as never, emptyAgentsList as never);
+  await Promise.all([errControl.refresh(), errControl.refreshUnify()]);
+  const errControlState = errControl.getState();
+  assert.ok(errControlState.browserError);
+  assert.ok(errControlState.providerInstanceError);
+
+  const BoundErrMain = bind(
+    {
+      store: {
+        subscribe: () => () => {},
+        getState: () => ({ snapshot: null, error: 'GitHub 订阅读取失败', loaded: true }),
+      } as never,
+      control: errControl,
+      openScreen: () => {},
+      openSettings: () => {},
+    },
+    MainScreen,
+  );
+  const renderer = createTestRenderer();
+  let tree = renderer.render(() =>
+    React.createElement(BoundErrMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'browser' },
+    } as never),
+  );
+  const errProvidersText = collectText(tree);
+  assert.match(errProvidersText, /读取失败/);
+  assert.doesNotMatch(errProvidersText, /0 个账号/);
+  assert.doesNotMatch(errProvidersText, /0 个浏览器环境/);
+  assert.doesNotMatch(errProvidersText, /正在读取扩展目录/);
+
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundErrMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'answer' },
+    } as never),
+  );
+  const errAnswerText = collectText(tree);
+  assert.doesNotMatch(errAnswerText, /3 个对话/);
+  assert.doesNotMatch(errAnswerText, /Mac mini/);
+
+  // J: 正常状态下“Claude 名称带额度”和“云端会话”卡片不重复显示“运行中 / 已开启”与“始终开启（默认功能）”
+  const okFake = new FakeDaemon('shadow');
+  okFake.latencyMs = 0;
+  const okControl = createControlStore(okFake as never, emptyAgentsList as never);
+  await Promise.all([okControl.refresh(), okControl.refreshUnify()]);
+  const BoundOkMain = bind(
+    {
+      store: {
+        subscribe: () => () => {},
+        getState: () => ({ snapshot: okFake.state, error: null, loaded: true }),
+      } as never,
+      control: okControl,
+      openScreen: () => {},
+      openSettings: () => {},
+    },
+    MainScreen,
+  );
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundOkMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers' },
+    } as never),
+  );
+  const okProvidersText = collectText(tree);
+  assert.doesNotMatch(okProvidersText, /始终开启（默认功能）/);
+
+  // K: ClaudeQuotaDrawer 在 hideBuiltinApplied=false 时显示“未生效”
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundOkMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'claude-quota' },
+    } as never),
+  );
+  assert.match(collectText(tree), /未生效/);
+
+  // 第 5 项：SessionDefaultsDrawer 添加规则默认 newAutoApprove=false，五类 Provider 可选，调用 saveRules 不强制启用总开关
+  let savedDefaultsCall: unknown = null;
+  const defaultsDaemon = new FakeDaemon('shadow');
+  defaultsDaemon.latencyMs = 0;
+  const origRpc = defaultsDaemon.rpc.bind(defaultsDaemon);
+  defaultsDaemon.rpc = async <I, O>(contract: { name: string }, input: I): Promise<O> => {
+    if (contract.name === 'defaults.save') {
+      savedDefaultsCall = input;
+    }
+    return origRpc(contract as never, input);
+  };
+  const defaultsControl = createControlStore(defaultsDaemon as never, emptyAgentsList as never);
+  await Promise.all([defaultsControl.refresh(), defaultsControl.refreshUnify()]);
+  const BoundDefaultsMain = bind(
+    {
+      store: {
+        subscribe: () => () => {},
+        getState: () => ({ snapshot: defaultsDaemon.state, error: null, loaded: true }),
+      } as never,
+      control: defaultsControl,
+      openScreen: () => {},
+      openSettings: () => {},
+    },
+    MainScreen,
+  );
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundDefaultsMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'session-defaults' },
+    } as never),
+  );
+  const defaultsText = collectText(tree);
+  for (const p of ['claude*', 'codex', 'opencode', 'glm*', 'qoder']) {
+    assert.ok(defaultsText.includes(p), `默认规则抽屉应提供 ${p} 选择`);
+  }
+  const providerInput = findNodes(tree, (el) => el.props.accessibilityLabel === 'Provider 匹配模式')[0];
+  assert.ok(providerInput);
+  (providerInput.props.onChangeText as (v: string) => void)('glm*');
+  tree = renderer.render(() =>
+    React.createElement(BoundDefaultsMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'session-defaults' },
+    } as never),
+  );
+  const addRuleBtn = findNodes(tree, (el) => collectText(el).trim() === '添加规则' && typeof el.props.onPress === 'function')[0];
+  assert.ok(addRuleBtn);
+  await (addRuleBtn.props.onPress as () => Promise<void>)();
+  assert.ok(savedDefaultsCall);
+  const rulesSent = (savedDefaultsCall as { rules: Array<{ provider: string | string[]; features?: { autoApprove?: boolean } }> }).rules;
+  const addedRule = rulesSent.find((r) => r.provider === 'glm*');
+  assert.ok(addedRule);
+  assert.equal(Boolean(addedRule.features?.autoApprove), false, '新规则默认不应开启 autoApprove');
+  assert.equal('enabled' in (savedDefaultsCall as Record<string, unknown>), false, '添加规则不应偷偷把总开关 enabled 设为 true');
+
+  // 第 6 项：EscalationDrawer 保留自定义星期数组（不改写成 weekdays），且快照加载后同步更新等待分钟输入框
+  let savedEscConfig: unknown = null;
+  const escDaemon = new FakeDaemon('shadow');
+  escDaemon.latencyMs = 0;
+  escDaemon.escalation = {
+    ...escDaemon.escalation,
+    delayMinutes: 15,
+    immediate: [{ days: [1, 3, 5] as never, from: '10:00', to: '19:00' }],
+  };
+  const origEscRpc = escDaemon.rpc.bind(escDaemon);
+  escDaemon.rpc = async <I, O>(contract: { name: string }, input: I): Promise<O> => {
+    if (contract.name === 'escalation.configure') {
+      savedEscConfig = input;
+    }
+    return origEscRpc(contract as never, input);
+  };
+  const escControl = createControlStore(escDaemon as never, emptyAgentsList as never);
+  await Promise.all([escControl.refresh(), escControl.refreshUnify()]);
+  const BoundEscMain = bind(
+    {
+      store: {
+        subscribe: () => () => {},
+        getState: () => ({ snapshot: escDaemon.state, error: null, loaded: true }),
+      } as never,
+      control: escControl,
+      openScreen: () => {},
+      openSettings: () => {},
+    },
+    MainScreen,
+  );
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundEscMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'answer', drawer: 'escalation' },
+    } as never),
+  );
+  const delayInput = findNodes(tree, (el) => el.props.accessibilityLabel === '其余时段等待分钟数')[0];
+  assert.equal(delayInput?.props.value, '15');
+  const saveScheduleBtn = findNodes(tree, (el) => collectText(el).trim() === '保存分钟' && typeof el.props.onPress === 'function')[0];
+  assert.ok(saveScheduleBtn);
+  await (saveScheduleBtn.props.onPress as () => Promise<void>)();
+  assert.ok(savedEscConfig);
+  const immediateSent = (savedEscConfig as { immediate: Array<{ days: unknown }> }).immediate;
+  assert.deepEqual(immediateSent[0]?.days, [1, 3, 5], '自定义星期数组不应被改写为 weekdays');
+
+  // 第 8b 项：AntigravityDrawer 含 homeDir 输入框
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundOkMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'antigravity' },
+    } as never),
+  );
+  const homeDirInput = findNodes(tree, (el) => el.props.accessibilityLabel === 'Antigravity 目录')[0];
+  assert.ok(homeDirInput, 'Antigravity 抽屉应包含 homeDir 输入框');
+
+  // I: GitHub 订阅页会话列允许显示两行会话标题（numberOfLines=2）
+  const BoundSubs = bind(
+    {
+      store: {
+        subscribe: () => () => {},
+        getState: () => ({ snapshot: okFake.state, error: null, loaded: true }),
+      } as never,
+      control: okControl,
+      openScreen: () => {},
+      openSettings: () => {},
+    },
+    () => React.createElement(SubscriptionsTab),
+  );
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundSubs, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+    } as never),
+  );
+  const sessionTitleNodes = findNodes(tree, (el) => el.type === 'Text' && el.props.numberOfLines === 2);
+  assert.ok(sessionTitleNodes.length > 0, 'GitHub 订阅页会话名应允许 2 行显示');
+});
