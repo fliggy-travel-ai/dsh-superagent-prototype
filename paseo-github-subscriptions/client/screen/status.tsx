@@ -61,7 +61,7 @@ export function StatusTab({ onEditConfig }: { onEditConfig?: () => void } = {}) 
       </View>
       <Card title="监听的仓库" flush trailing={<Text style={s.muted}>组织 {preferences.organization}</Text>}>
         {repositories.length === 0 ? (
-          <Text style={[s.muted, { padding: 16 }]}>暂无监听的仓库。请先在设置页保存 GitHub 令牌。</Text>
+          <Text style={[s.muted, { padding: 16 }]}>暂无监听的仓库。请先在 GitHub 订阅设置的编辑面板保存 GitHub 令牌。</Text>
         ) : (
           repositories.map((repo, index) => (
             <View key={repo.repo} style={[s.item, index === 0 ? s.firstItem : null]}>

@@ -1586,7 +1586,6 @@ function EscalationDrawer() {
               spellCheck={false}
             />
             {webhookMsg ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{webhookMsg}</Text> : null}
-            {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
             <View style={s.wrap}>
               <Btn
                 primary
@@ -1648,6 +1647,8 @@ function EscalationDrawer() {
           ))}
         </View>
       )}
+
+      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
       <RuleNote>
         主会话有提问未回答时，按时段规则通知 Grok（不代答）。同一问题只通知一次。

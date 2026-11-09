@@ -449,12 +449,23 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     ghDrawerTree = renderMain({ page: 'github', drawer: 'github-config' });
     assert.match(collectText(ghDrawerTree), /还没有保存令牌/);
 
-    // GitHub 页未配置令牌时的提示不再指向“设置 → 开发自动化”，而是打开编辑面板
+    // GitHub 页未配置令牌时的提示不再指向“设置 → 开发自动化”，而是打开编辑面板；监听状态页空仓库提示也不再写“设置页”
+    daemon.state = { ...daemon.state, repositories: [] };
+    await store.refresh();
     renderer.reset();
-    const ghPageNoToken = renderMain({ page: 'github' });
+    let ghPageNoToken = renderMain({ page: 'github' });
+    const ghStatusTabBtn = findNodes(
+      ghPageNoToken,
+      n => n.props.accessibilityRole === 'tab' && collectText(n) === '监听状态',
+    )[0];
+    assert.ok(ghStatusTabBtn, '应能切换到监听状态标签页');
+    (ghStatusTabBtn.props.onPress as () => void)();
+    ghPageNoToken = renderMain({ page: 'github' });
     const ghPageNoTokenText = collectText(ghPageNoToken);
     assert.equal(ghPageNoTokenText.includes('设置 → 开发自动化'), false);
+    assert.equal(ghPageNoTokenText.includes('请先在设置页保存 GitHub 令牌'), false, '监听状态空仓库提示不应再指向设置页');
     assert.match(ghPageNoTokenText, /去编辑面板填写/);
+    assert.match(ghPageNoTokenText, /暂无监听的仓库。请先在 GitHub 订阅设置的编辑面板保存 GitHub 令牌。/);
 
     // 4. 网页版 claude.ai 编辑面板（browser）：可设置、可移除 AdsPower API key，且不显示原文
     renderer.reset();
@@ -503,7 +514,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     );
     assert.ok(answerOpenMachineBtns.length >= 2, '升级通知和子会话免提醒未启用时均应有“去本机配置开启”按钮');
 
-    // 5b. 升级通知模块默认未启用时，Webhook 凭据卡片只显示说明，不显示填写框和“发测试通知”按钮
+    // 5b. 升级通知模块默认未启用时，Webhook 凭据卡片只显示说明，不显示填写框和“发测试通知”按钮；且模块关闭时操作报错仍显示在面板底部
     renderer.reset();
     let escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     assert.equal(
@@ -515,6 +526,18 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       findNodes(escDrawerTree, n => n.props.accessibilityLabel === '发测试通知').length,
       0,
       '升级通知模块未启用时，不应显示发测试通知按钮',
+    );
+    daemon.down = true;
+    const saveDelayBtnWhileOff = findNodes(escDrawerTree, n => n.props.accessibilityLabel === '保存分钟')[0];
+    assert.ok(saveDelayBtnWhileOff);
+    (saveDelayBtnWhileOff.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    daemon.down = false;
+    escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
+    assert.match(
+      collectText(escDrawerTree),
+      /插件服务未响应/,
+      '升级通知模块关闭时，EscalationDrawer 的错误文字也应显示在面板底部',
     );
 
     // 5c. 在本机配置面板开启“模块 升级通知”与“模块 子会话免提醒”后，卡片开关控制功能内部状态；Webhook 未配置时不显示“发测试通知”，保存后才显示
@@ -647,9 +670,9 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
     modules: null,
     machineSettings: {
       ...daemon.machineSettings,
-      modules: daemon.machineSettings.modules.map(m =>
-        m.id === 'answer.escalation' ? { ...m, enabled: true, state: 'running' as const } : m,
-      ),
+      modules: daemon.machineSettings.modules
+        .filter(m => m.id !== 'providers.antigravity')
+        .map(m => (m.id === 'answer.escalation' ? { ...m, enabled: true, state: 'running' as const } : m)),
     },
     todo: daemon.todo,
     todoError: null,
@@ -735,6 +758,11 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   assert.equal(quotaCardSwitch.length, 0, 'Claude 名称带额度卡片不应有开关');
   assert.match(text, /当前最低 48%/);
   assert.match(text, /1 个在线/);
+  assert.equal(
+    text.includes('多个 Antigravity 账号分别作为 Provider'),
+    false,
+    '主实例查不到 Antigravity 模块且 antigravityStatus=disabled 时，不应把 Antigravity 当未启用显示，而应按基线隐藏卡片',
+  );
 
   // 1b. 新增项 E：Claude 名称带额度抽屉（claude-quota）不显示“在名称后显示剩余额度”开关，只保留自动继续默认开关
   renderer.reset();
