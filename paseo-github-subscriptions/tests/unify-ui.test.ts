@@ -16,7 +16,8 @@ test('第二期客户端入口：只注册 1 个主屏幕、1 个开发自动化
   try {
     assert.deepEqual([...handle.registry.screens.keys()], ['main']);
     assert.deepEqual([...handle.registry.sidebar.keys()], ['main']);
-    assert.deepEqual([...handle.registry.settingsScreens.keys()], []);
+    assert.equal('settingsScreens' in handle.registry, false);
+    assert.equal('addSettingsScreen' in handle.registry, false);
     assert.deepEqual(
       [...handle.registry.commands.keys()],
       ['open-todo', 'qa-mode-online', 'qa-mode-offline', 'qa-mode-auto', 'pause-all'],
@@ -266,9 +267,33 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
   const { FakeDaemon } = await import('./ui/fake-daemon.ts');
   const { createSnapshotStore } = await import('../client/store.ts');
   const { createControlStore } = await import('../client/control-store.ts');
+  const { escalationSnapshot } = await import('../shared/escalation.ts');
+  const { quietSnapshot } = await import('../shared/quiet.ts');
 
   const daemon = new FakeDaemon('shadow');
   daemon.latencyMs = 0;
+
+  // 审阅项 2：FakeDaemon 模块清单与服务端 MODULE_DEFS 一致（不含 todo，升级通知/子会话免提醒/Antigravity/默认设置/其他额度默认关）
+  assert.deepEqual(
+    daemon.machineSettings.modules.map(m => ({ id: m.id, enabled: m.enabled })),
+    [
+      { id: 'providers.defaults', enabled: false },
+      { id: 'answer.presence', enabled: true },
+      { id: 'answer.automation', enabled: true },
+      { id: 'answer.browser', enabled: true },
+      { id: 'answer.escalation', enabled: false },
+      { id: 'answer.quietChildren', enabled: false },
+      { id: 'usage.claudeAccounts', enabled: true },
+      { id: 'usage.providerQuotas', enabled: false },
+      { id: 'providers.antigravity', enabled: false },
+      { id: 'github', enabled: true },
+      { id: 'todo.stalled', enabled: true },
+    ],
+  );
+  // 模块默认关闭时接口未注册
+  await assert.rejects(() => daemon.rpc(escalationSnapshot, {}), /未知调用/);
+  await assert.rejects(() => daemon.rpc(quietSnapshot, {}), /未知调用/);
+
   const fakeClient = {
     rpc: (contract: Parameters<(typeof daemon)['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
     paseo: {
@@ -300,7 +325,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
   };
 
   try {
-    // 1. Provider 与账号页：展示“本机配置”卡片（路径、校验结果、导出备份），且无“设置 → 开发自动化”引导
+    // 1. Provider 与账号页：展示“本机配置”卡片（路径、校验结果、导出备份），且 Antigravity 模块默认关闭时卡片照常显示
     const renderer = createTestRenderer();
     const renderMain = (params: Record<string, string>) => {
       const Bound = bind(
@@ -322,13 +347,26 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       );
     };
 
-    const providersTree = renderMain({ page: 'providers' });
+    let providersTree = renderMain({ page: 'providers' });
     const providersText = collectText(providersTree);
     assert.equal(providersText.includes('设置 → 开发自动化'), false, '主页面不应再出现“设置 → 开发自动化”引导');
     assert.match(providersText, /本机配置/);
     assert.match(providersText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
     assert.match(providersText, /校验通过/);
     assert.match(providersText, /导出配置备份/);
+    assert.match(providersText, /Antigravity/, 'Antigravity 模块关闭时卡片照常显示');
+    const agSwitch = findNodes(providersTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '启用 Antigravity')[0];
+    assert.ok(agSwitch, 'Antigravity 卡片应有启用开关');
+    assert.equal(agSwitch.props.value, false, 'Antigravity 默认关闭时卡片开关为关');
+    assert.equal(Boolean(agSwitch.props.disabled), false, 'Antigravity 模块未启用时卡片开关可点击');
+
+    // 打开 Antigravity 卡片开关 → 写入模块开关并启用
+    (agSwitch.props.onValueChange as (v: boolean) => void)(true);
+    await new Promise(r => setTimeout(r, 20));
+    providersTree = renderMain({ page: 'providers' });
+    const agSwitchAfter = findNodes(providersTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '启用 Antigravity')[0];
+    assert.equal(agSwitchAfter?.props.value, true, '打开 Antigravity 开关后应变为开启');
+    assert.equal(daemon.antigravity.enabled, true);
 
     // 点击卡片上的“导出配置备份”
     const backupBtn = findNodes(providersTree, n => n.props.accessibilityLabel === '导出配置备份')[0];
@@ -338,28 +376,38 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     const afterBackupText = collectText(renderMain({ page: 'providers' }));
     assert.match(afterBackupText, /backups\/backup-demo/);
 
-    // 2. 打开“本机配置”编辑面板（machine-config）：只显示没有对应卡片开关的模块（如待办汇总、停滞会话检查），不重复已有卡片的模块开关
+    // 2. 打开“本机配置”编辑面板（machine-config）：只显示确实没有卡片的模块（停滞会话检查、其他 Provider 额度），不含 todo 或已有卡片的模块
     renderer.reset();
     const machineDrawerTree = renderMain({ page: 'providers', drawer: 'machine-config' });
     const machineDrawerText = collectText(machineDrawerTree);
     assert.match(machineDrawerText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
     assert.match(machineDrawerText, /配置文件格式校验通过/);
-    const todoSwitch = findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 待办汇总');
-    assert.equal(todoSwitch.length, 1, '本机配置抽屉应包含“待办汇总”模块开关');
+    assert.equal(machineDrawerText.includes('待办汇总'), false, '说明与列表均不应出现不存在的“待办汇总”模块开关');
+    assert.equal(machineDrawerText.includes('网关'), false, '说明不应出现不存在的“网关”模块开关');
+    assert.equal(
+      findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 停滞会话检查').length,
+      1,
+      '本机配置抽屉应包含“停滞会话检查”模块开关',
+    );
+    assert.equal(
+      findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 其他 Provider 额度').length,
+      1,
+      '本机配置抽屉应包含“其他 Provider 额度”模块开关',
+    );
     for (const dupLabel of [
+      '模块 待办汇总',
       '模块 网页版 claude.ai',
       '模块 新建会话默认设置',
       '模块 升级通知',
       '模块 子会话免提醒',
       '模块 精确授权',
       '模块 GitHub 订阅',
-      '模块 问答模式与蓝牙在场',
-      '模块 云端会话',
-      '模块 Claude 账号与名称带额度',
-      '模块 Antigravity',
+      '模块 问答模式与蓝牙',
+      '模块 Claude 账号与额度',
+      '模块 Antigravity 多账号',
     ]) {
       const dup = findNodes(machineDrawerTree, n => n.props.accessibilityLabel === dupLabel);
-      assert.equal(dup.length, 0, `不应在“本机配置”抽屉中重复出现已有卡片的模块开关：${dupLabel}`);
+      assert.equal(dup.length, 0, `不应在“本机配置”抽屉中出现：${dupLabel}`);
     }
 
     // 3. GitHub 订阅“监听”编辑面板（github-config）：可设置、可移除 GitHub 令牌，且不显示令牌原文
@@ -432,16 +480,72 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     const addBrowserText = collectText(renderMain({ page: 'providers', drawer: 'add-browser' }));
     assert.equal(addBrowserText.includes('设置 → 开发自动化'), false);
 
-    // 5. 升级通知编辑面板（escalation）：可设置、可移除 Webhook 凭据，展示 8 位指纹说明且不显示原文
+    // 5. 审阅项 1 & 3：
+    // 5a. 升级通知模块默认未启用时，Webhook 凭据卡片只显示说明，不显示填写框和“发测试通知”按钮
     renderer.reset();
     let escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
+    assert.equal(
+      findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 地址').length,
+      0,
+      '升级通知模块未启用时，Webhook 凭据卡片不应显示填写框',
+    );
+    assert.equal(
+      findNodes(escDrawerTree, n => n.props.accessibilityLabel === '发测试通知').length,
+      0,
+      '升级通知模块未启用时，不应显示发测试通知按钮',
+    );
+
+    // 5b. 问题答复页：升级通知与子会话免提醒默认未启用时，卡片开关为关且可点击；打开开关后先写模块开关再启用功能，接口随之注册
+    renderer.reset();
+    let answerTree = renderMain({ page: 'answer' });
+    const escCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '升级通知')[0];
+    const quietCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0];
+    assert.ok(escCardSwitch, '升级通知卡片应有开关');
+    assert.equal(escCardSwitch.props.value, false);
+    assert.equal(Boolean(escCardSwitch.props.disabled), false, '升级通知模块未启用时卡片开关不能禁用');
+    assert.ok(quietCardSwitch, '子会话免提醒卡片应有开关');
+    assert.equal(quietCardSwitch.props.value, false);
+    assert.equal(Boolean(quietCardSwitch.props.disabled), false, '子会话免提醒模块未启用时卡片开关不能禁用');
+
+    // 先将 webhook 设为未配置，验证启用模块但未配置凭据时不显示“发测试通知”
+    daemon.escalation = {
+      ...daemon.escalation,
+      webhook: { configured: false, hostname: null, fingerprint: null },
+    };
+    const logLenBeforeEsc = daemon.log.length;
+    (escCardSwitch.props.onValueChange as (v: boolean) => void)(true);
+    await new Promise(r => setTimeout(r, 20));
+    const escRpcCalls = daemon.log.slice(logLenBeforeEsc).map(e => e.name);
+    assert.ok(
+      escRpcCalls.indexOf('machine.settings.toggle-module') !== -1 &&
+        escRpcCalls.indexOf('escalation.configure') > escRpcCalls.indexOf('machine.settings.toggle-module'),
+      `打开升级通知开关应先写模块开关再启用功能，实际调用：${escRpcCalls.join(' -> ')}`,
+    );
+    // 此时升级通知接口已注册可用
+    const escSnapLive = (await daemon.rpc(escalationSnapshot, {})) as { enabled: boolean };
+    assert.equal(escSnapLive.enabled, true);
+
+    // 打开子会话免提醒开关 → 先写模块开关再启用功能，接口注册
+    (quietCardSwitch.props.onValueChange as (v: boolean) => void)(true);
+    await new Promise(r => setTimeout(r, 20));
+    const quietSnapLive = (await daemon.rpc(quietSnapshot, {})) as { enabled: boolean };
+    assert.equal(quietSnapLive.enabled, true);
+
+    // 5c. 升级通知已启用、但 Webhook 未配置时：显示填写框，但不显示“发测试通知”按钮；保存后才显示“发测试通知”
+    renderer.reset();
+    escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     const escText = collectText(escDrawerTree);
     assert.equal(escText.includes('去设置更换'), false);
     assert.match(escText, /8 位指纹/);
     const urlInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 地址')[0];
     const authInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 认证头')[0];
-    assert.ok(urlInput, '升级通知编辑面板应有 Webhook 地址输入框');
-    assert.ok(authInput, '升级通知编辑面板应有 Webhook 认证头输入框');
+    assert.ok(urlInput, '升级通知模块启用后编辑面板应有 Webhook 地址输入框');
+    assert.ok(authInput, '升级通知模块启用后编辑面板应有 Webhook 认证头输入框');
+    assert.equal(
+      findNodes(escDrawerTree, n => n.props.accessibilityLabel === '发测试通知').length,
+      0,
+      'Webhook 未配置时不应显示“发测试通知”按钮',
+    );
     (urlInput.props.onChangeText as (v: string) => void)('https://hooks.example.com/secret-webhook-path');
     (authInput.props.onChangeText as (v: string) => void)('Bearer super-secret-webhook-auth');
     escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
@@ -458,11 +562,47 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     assert.equal(escAfterSave.includes('super-secret-webhook-auth'), false, '界面绝不能显示 Webhook 认证头原文');
     assert.match(escAfterSave, /hooks\.example\.net/);
     const testWebhookBtn = findNodes(escDrawerTree, n => n.props.accessibilityLabel === '发测试通知')[0];
-    assert.ok(testWebhookBtn, '升级通知编辑面板应有发测试通知按钮');
+    assert.ok(testWebhookBtn, 'Webhook 已配置后升级通知编辑面板应有发测试通知按钮');
     (testWebhookBtn.props.onPress as () => void)();
     await new Promise(r => setTimeout(r, 20));
     escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     assert.match(collectText(escDrawerTree), /测试/);
+
+    // 5d. 其他卡片开关（网页版 claude.ai、精确授权、问答模式、Claude 账号与额度、GitHub 订阅）关闭后仍可在卡片上重新打开
+    for (const item of [
+      { page: 'providers', label: '启用网页版 claude.ai', modId: 'answer.browser' },
+      { page: 'providers', label: '启用 Claude 账号与额度', modId: 'usage.claudeAccounts' },
+      { page: 'answer', label: '精确授权', modId: 'answer.automation' },
+      { page: 'answer', label: '问答模式', modId: 'answer.presence' },
+      { page: 'github', label: '启用 GitHub 监听', modId: 'github' },
+    ]) {
+      renderer.reset();
+      let pageTree = renderMain({ page: item.page });
+      let sw = findNodes(pageTree, n => n.type === 'Switch' && n.props.accessibilityLabel === item.label)[0];
+      assert.ok(sw, `卡片应有开关：${item.label}`);
+      assert.equal(sw.props.value, true, `${item.label} 初始应为开启`);
+      // 关闭
+      (sw.props.onValueChange as (v: boolean) => void)(false);
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(
+        daemon.machineSettings.modules.find(m => m.id === item.modId)?.enabled,
+        false,
+        `关闭 ${item.label} 后模块 ${item.modId} 应为已关闭`,
+      );
+      pageTree = renderMain({ page: item.page });
+      sw = findNodes(pageTree, n => n.type === 'Switch' && n.props.accessibilityLabel === item.label)[0];
+      assert.ok(sw, `关闭 ${item.label} 后开关仍应显示`);
+      assert.equal(sw.props.value, false);
+      assert.equal(Boolean(sw.props.disabled), false, `关闭 ${item.label} 后开关不应被禁用，必须能重新打开`);
+      // 重新打开
+      (sw.props.onValueChange as (v: boolean) => void)(true);
+      await new Promise(r => setTimeout(r, 20));
+      assert.equal(
+        daemon.machineSettings.modules.find(m => m.id === item.modId)?.enabled,
+        true,
+        `重新打开 ${item.label} 后模块 ${item.modId} 应恢复开启`,
+      );
+    }
   } finally {
     store.dispose();
     control.dispose();
@@ -512,7 +652,12 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
     browserError: null,
     presenceError: null,
     modules: null,
-    machineSettings: daemon.machineSettings,
+    machineSettings: {
+      ...daemon.machineSettings,
+      modules: daemon.machineSettings.modules.map(m =>
+        m.id === 'answer.escalation' ? { ...m, enabled: true, state: 'running' as const } : m,
+      ),
+    },
     todo: daemon.todo,
     todoError: null,
     defaults: { enabled: false, rules: [], error: null },
@@ -569,7 +714,6 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
         bluetoothDevices: async () => ({ target: null, devices: [], error: null }),
       } as never,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );
@@ -783,7 +927,6 @@ test('审阅项 5/7/14：待办“打开会话”传递 serverId，网页提问�
         actTodo: async () => ({ ok: false, message: '远端主机拒绝了该操作' }),
       } as never,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );
@@ -874,7 +1017,7 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   const { modulesStatus } = await import('../shared/modules.ts');
   const { defaultsSnapshot } = await import('../shared/defaults.ts');
   const { providersInstanceStatus, cloudSessionStatus } = await import('../shared/provider-instance.ts');
-  const { machineSettingsSnapshot } = await import('../shared/machine-settings.ts');
+  const { machineSettingsSnapshot, machineSettingsToggleModule } = await import('../shared/machine-settings.ts');
   const { createControlStore } = await import('../client/control-store.ts');
   const { MainScreen } = await import('../client/dashboard.tsx');
   const { bind } = await import('../client/ui.tsx');
@@ -893,6 +1036,9 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
     assert.equal('sessionCount' in inst, false, '浏览器实例不应含合约外字段 sessionCount');
   }
   assert.ok(await fake.rpc(claudeAccountsSnapshot, {}));
+  // answer.escalation / answer.quietChildren 默认关闭，打开模块开关后可调用
+  await fake.rpc(machineSettingsToggleModule, { id: 'answer.escalation', enabled: true });
+  await fake.rpc(machineSettingsToggleModule, { id: 'answer.quietChildren', enabled: true });
   assert.ok(await fake.rpc(escalationSnapshot, {}));
   assert.ok(await fake.rpc(quietSnapshot, {}));
   assert.ok(await fake.rpc(providerQuotasSnapshot, {}));
@@ -940,7 +1086,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
       } as never,
       control: errControl,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );
@@ -985,7 +1130,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
       } as never,
       control: okControl,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );
@@ -1034,7 +1178,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
       } as never,
       control: defaultsControl,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );
@@ -1076,8 +1219,11 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   let savedEscConfig: unknown = null;
   const escDaemon = new FakeDaemon('shadow');
   escDaemon.latencyMs = 0;
+  await escDaemon.rpc(machineSettingsToggleModule, { id: 'answer.escalation', enabled: true });
   escDaemon.escalation = {
     ...escDaemon.escalation,
+    enabled: true,
+    status: 'running',
     delayMinutes: 15,
     immediate: [{ days: [1, 3, 5] as never, from: '10:00', to: '19:00' }],
   };
@@ -1098,7 +1244,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
       } as never,
       control: escControl,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );
@@ -1142,7 +1287,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
       } as never,
       control: okControl,
       openScreen: () => {},
-      openSettings: () => {},
     },
     () => React.createElement(SubscriptionsTab),
   );
@@ -1222,7 +1366,6 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
       } as never,
       control,
       openScreen: () => {},
-      openSettings: () => {},
     },
     MainScreen,
   );

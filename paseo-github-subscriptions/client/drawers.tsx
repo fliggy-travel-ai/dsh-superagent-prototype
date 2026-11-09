@@ -1329,7 +1329,12 @@ function BluetoothDrawer() {
 
 function EscalationDrawer() {
   const { s, control, now, theme } = useUi();
-  const { escalation, escalationStatus, escalationError } = useControlState();
+  const { escalation, escalationStatus, escalationError, machineSettings, modules } = useControlState();
+  const escMsMod = machineSettings?.modules.find(m => m.id === 'answer.escalation');
+  const escLiveMod = modules?.modules.find(m => m.id === 'answer.escalation');
+  const escModOff =
+    escalationStatus === 'disabled' ||
+    (escMsMod ? !escMsMod.enabled || escMsMod.state === 'off' : escLiveMod ? escLiveMod.state === 'off' : false);
   const [webhookUrl, setWebhookUrl] = useState('');
   const [webhookSecret, setWebhookSecret] = useState('');
   const [webhookBusy, setWebhookBusy] = useState<'save' | 'test' | null>(null);
@@ -1431,9 +1436,9 @@ function EscalationDrawer() {
 
   return (
     <View style={{ gap: 12 }}>
-      {escalationStatus === 'disabled' ? (
+      {escModOff ? (
         <Notice tone="neutral">
-          <Text style={s.text}>升级通知模块未启用（等待对应服务端模块合并或开启）。</Text>
+          <Text style={s.text}>升级通知模块未启用。可直接在“升级通知”卡片上开启模块。</Text>
         </Notice>
       ) : escalationStatus === 'error' || escalationError ? (
         <Notice tone="danger">
@@ -1529,7 +1534,7 @@ function EscalationDrawer() {
       <Card
         title="Webhook 凭据状态（升级通知）"
         trailing={
-          escalationStatus === 'disabled' ? (
+          escModOff ? (
             <Chip label="模块未启用" tone="neutral" />
           ) : (
             <Chip
@@ -1539,61 +1544,71 @@ function EscalationDrawer() {
           )
         }
       >
-        <View style={{ gap: 4 }}>
-          <Text style={s.text}>
-            凭据文件：{webhook?.configured ? '已存在（0600 权限）' : '未创建'} · 目标域名：
-            {webhook?.hostname ?? '—'}
+        {escModOff ? (
+          <Text style={s.muted}>
+            升级通知模块未启用。请先在“升级通知”卡片上开启模块，再配置或更换 Webhook 凭据。
           </Text>
-          <Text style={s.text}>
-            指纹：<Text style={s.mono}>{webhook?.fingerprint ?? '未配置'}</Text>
-          </Text>
-        </View>
-        <TextInput
-          accessibilityLabel="Webhook 地址"
-          style={s.input}
-          value={webhookUrl}
-          onChangeText={setWebhookUrl}
-          placeholder={webhook?.configured ? '填写新的 Webhook 地址以更换' : '填写 Webhook 地址'}
-          placeholderTextColor={theme.colors.foregroundMuted}
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <TextInput
-          accessibilityLabel="Webhook 认证头"
-          style={s.input}
-          value={webhookSecret}
-          onChangeText={setWebhookSecret}
-          placeholder="可选：签名密钥或认证头（保存后不回显）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-          autoComplete="off"
-          spellCheck={false}
-        />
-        {webhookMsg ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{webhookMsg}</Text> : null}
-        {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
-        <View style={s.wrap}>
-          <Btn
-            primary
-            label={webhook?.configured ? '更换 Webhook 凭据' : '保存 Webhook 凭据'}
-            disabled={!webhookUrl.trim() || webhookBusy !== null}
-            busy={webhookBusy === 'save'}
-            onPress={() => void saveWebhook()}
-          />
-          <Btn
-            label="发测试通知"
-            disabled={webhookBusy !== null}
-            busy={webhookBusy === 'test'}
-            onPress={() => void runTest()}
-          />
-        </View>
-        <Text style={s.small}>
-          Webhook 完整地址和密钥只保存在本机 0600 凭据文件中，界面与日志只显示域名和 8 位指纹。
-        </Text>
+        ) : (
+          <>
+            <View style={{ gap: 4 }}>
+              <Text style={s.text}>
+                凭据文件：{webhook?.configured ? '已存在（0600 权限）' : '未创建'} · 目标域名：
+                {webhook?.hostname ?? '—'}
+              </Text>
+              <Text style={s.text}>
+                指纹：<Text style={s.mono}>{webhook?.fingerprint ?? '未配置'}</Text>
+              </Text>
+            </View>
+            <TextInput
+              accessibilityLabel="Webhook 地址"
+              style={s.input}
+              value={webhookUrl}
+              onChangeText={setWebhookUrl}
+              placeholder={webhook?.configured ? '填写新的 Webhook 地址以更换' : '填写 Webhook 地址'}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <TextInput
+              accessibilityLabel="Webhook 认证头"
+              style={s.input}
+              value={webhookSecret}
+              onChangeText={setWebhookSecret}
+              placeholder="可选：签名密钥或认证头（保存后不回显）"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {webhookMsg ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{webhookMsg}</Text> : null}
+            {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
+            <View style={s.wrap}>
+              <Btn
+                primary
+                label={webhook?.configured ? '更换 Webhook 凭据' : '保存 Webhook 凭据'}
+                disabled={!webhookUrl.trim() || webhookBusy !== null}
+                busy={webhookBusy === 'save'}
+                onPress={() => void saveWebhook()}
+              />
+              {webhook?.configured ? (
+                <Btn
+                  label="发测试通知"
+                  disabled={webhookBusy !== null}
+                  busy={webhookBusy === 'test'}
+                  onPress={() => void runTest()}
+                />
+              ) : null}
+            </View>
+            <Text style={s.small}>
+              Webhook 完整地址和密钥只保存在本机 0600 凭据文件中，界面与日志只显示域名和 8 位指纹。
+            </Text>
+          </>
+        )}
       </Card>
 
       <SectionTitle>最近投递记录</SectionTitle>
@@ -2107,9 +2122,8 @@ function GithubConfigDrawer() {
 }
 
 const CARD_CONTROLLED_MODULES = new Set([
-  'providers.cloudSession',
-  'providers.antigravity',
   'providers.defaults',
+  'providers.antigravity',
   'usage.claudeAccounts',
   'answer.browser',
   'answer.presence',
@@ -2244,7 +2258,7 @@ function MachineConfigDrawer() {
         ) : null}
       </View>
       <RuleNote>
-        已有专属功能卡片的模块直接在对应卡片开启或关闭，此处只集中管理没有独立卡片的后台模块（如待办汇总、停滞会话检查、额度面板与网关）。
+        已有专属功能卡片的模块直接在对应卡片开启或关闭，此处只集中管理没有独立卡片的后台模块（如停滞会话检查、其他 Provider 额度）。
       </RuleNote>
     </View>
   );

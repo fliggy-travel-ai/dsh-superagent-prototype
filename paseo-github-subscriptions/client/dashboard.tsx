@@ -72,6 +72,18 @@ const NAV_ITEMS: readonly { id: PageId; num: string; label: string }[] = [
   { id: 'todo', num: '4', label: '待办总览' },
 ];
 
+function isModuleOff(
+  id: string,
+  machineSettings: { modules: ReadonlyArray<{ id: string; enabled: boolean; state: string }> } | null,
+  modules: { modules: ReadonlyArray<{ id: string; state: string }> } | null,
+): boolean {
+  const msMod = machineSettings?.modules.find(m => m.id === id);
+  if (msMod) return !msMod.enabled || msMod.state === 'off';
+  const liveMod = modules?.modules.find(m => m.id === id);
+  if (liveMod) return liveMod.state === 'off';
+  return false;
+}
+
 function ProvidersPage({
   onOpenDrawer,
 }: {
@@ -124,11 +136,19 @@ function ProvidersPage({
   const pausedAll = machineSettings?.pausedAll ?? false;
   const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
   const claudeAccountsDisabled =
-    claudeAccountsStatus === 'disabled' || Boolean(claudeAccounts && !claudeAccounts.enabled);
+    isModuleOff('usage.claudeAccounts', machineSettings, modules) ||
+    claudeAccountsStatus === 'disabled' ||
+    Boolean(claudeAccounts && !claudeAccounts.enabled);
   const claudeQuotaDisabled =
     claudeAccountsDisabled || Boolean(claudeAccounts && !claudeAccounts.quotaName.enabled);
+  const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
+  const defaultsModOff = isModuleOff('providers.defaults', machineSettings, modules);
+  const agModOff =
+    isModuleOff('providers.antigravity', machineSettings, modules) ||
+    antigravityStatus === 'disabled' ||
+    Boolean(antigravity && !antigravity.enabled);
   const accounts = claudeAccounts?.accounts ?? [];
-  const reloginAccounts = accounts.filter(acc => acc.needsRelogin);
+  const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
   const lowestClaudePct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
 
@@ -141,10 +161,6 @@ function ProvidersPage({
   const resolvedCloud = cloudSession ?? providerInstance?.cloudSession ?? null;
   const agCount = antigravity?.accounts.length ?? 0;
   const agRunningSessions = antigravity?.runningSessionsCount ?? 0;
-  const showAntigravityCard =
-    antigravityStatus === 'error' ||
-    Boolean(antigravityError) ||
-    (antigravityStatus === 'ready' && Boolean(antigravity?.enabled || agCount > 0));
 
   return (
     <View style={{ gap: 14 }}>
@@ -216,7 +232,21 @@ function ProvidersPage({
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
         <FeatureCard
           title="Claude 账号"
-          trailing={<Btn small primary label="添加账号" onPress={() => onOpenDrawer('add-claude')} />}
+          trailing={
+            <Switch
+              accessibilityLabel="启用 Claude 账号与额度"
+              disabled={false}
+              value={!claudeAccountsDisabled && Boolean(claudeAccounts?.enabled ?? true)}
+              onValueChange={enabled =>
+                void control
+                  .toggleModule('usage.claudeAccounts', enabled)
+                  .then(() => control.refreshUnify())
+                  .catch(e => setActionError(errorMessage(e)))
+              }
+              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+              thumbColor={theme.colors.accentForeground}
+            />
+          }
           description="添加本机 Claude 账号，查看登录状态并改名。"
           kv={
             claudeAccountsStatus === 'error' || Boolean(claudeError) ? (
@@ -225,10 +255,7 @@ function ProvidersPage({
                 <Text style={s.small}>读取失败：{claudeError ?? '无法读取账号状态'}</Text>
               </>
             ) : claudeAccountsDisabled ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+              <Chip label="未启用" tone="neutral" />
             ) : !claudeAccounts ? (
               <Text style={s.small}>正在读取…</Text>
             ) : (
@@ -242,7 +269,12 @@ function ProvidersPage({
               </>
             )
           }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('claude-accounts')} />}
+          actions={
+            <>
+              <Btn small primary label="添加账号" onPress={() => onOpenDrawer('add-claude')} />
+              <Btn small label="编辑" onPress={() => onOpenDrawer('claude-accounts')} />
+            </>
+          }
         />
 
         <FeatureCard
@@ -250,13 +282,23 @@ function ProvidersPage({
           trailing={
             <Switch
               accessibilityLabel="启用网页版 claude.ai"
-              disabled={!browser}
-              value={browser?.settings.enabled ?? false}
+              disabled={!browser && !browserModOff}
+              value={!browserModOff && (browser?.settings.enabled ?? false)}
               onValueChange={enabled => {
-                if (!browser) return;
-                void control
-                  .configureBrowser({ ...browser.settings, enabled })
-                  .catch(e => setActionError(errorMessage(e)));
+                void (async () => {
+                  if (enabled) {
+                    await control.toggleModule('answer.browser', true);
+                    await control.refresh();
+                    const latest = control.getState().browser ?? browser;
+                    await control.configureBrowser({ port: latest?.settings.port ?? 17373, enabled: true });
+                  } else {
+                    if (browser && !browserModOff) {
+                      await control.configureBrowser({ ...browser.settings, enabled: false }).catch(() => {});
+                    }
+                    await control.toggleModule('answer.browser', false);
+                    await control.refreshUnify();
+                  }
+                })().catch(e => setActionError(errorMessage(e)));
               }}
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
@@ -264,7 +306,9 @@ function ProvidersPage({
           }
           description="连接 AdsPower 浏览器扩展，自动点击 Allow once 并把网页提问转到 Paseo。"
           kv={
-            browserError ? (
+            browserModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : browserError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
                 <Text style={s.small}>读取失败：{browserError}</Text>
@@ -299,10 +343,7 @@ function ProvidersPage({
                 <Text style={s.small}>读取失败：{claudeError ?? '无法读取额度状态'}</Text>
               </>
             ) : claudeQuotaDisabled ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+              <Chip label="未启用" tone="neutral" />
             ) : !claudeAccounts ? (
               <Text style={s.small}>正在读取…</Text>
             ) : (
@@ -319,8 +360,8 @@ function ProvidersPage({
           trailing={
             <Switch
               accessibilityLabel="新建会话默认设置"
-              disabled={!defaults || Boolean(defaultsError || defaults.error)}
-              value={defaults?.enabled ?? false}
+              disabled={Boolean(defaultsError || defaults?.error)}
+              value={!defaultsModOff && (defaults?.enabled ?? false)}
               onValueChange={enabled =>
                 void control.saveDefaults({ enabled }).catch(e => setActionError(errorMessage(e)))
               }
@@ -394,33 +435,48 @@ function ProvidersPage({
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
         />
 
-        {showAntigravityCard ? (
-          <FeatureCard
-            title="Antigravity"
-            trailing={
-              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
+        <FeatureCard
+          title="Antigravity"
+          trailing={
+            <Switch
+              accessibilityLabel="启用 Antigravity"
+              disabled={false}
+              value={!agModOff && Boolean(antigravity?.enabled ?? false)}
+              onValueChange={enabled =>
+                void control
+                  .toggleModule('providers.antigravity', enabled)
+                  .then(() => control.refreshUnify())
+                  .catch(e => setActionError(errorMessage(e)))
+              }
+              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+              thumbColor={theme.colors.accentForeground}
+            />
+          }
+          description="多个 Antigravity 账号分别作为 Provider。"
+          kv={
+            antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
+              <>
                 <Chip label="读取失败" tone="danger" />
-              ) : (
+                <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
+              </>
+            ) : agModOff ? (
+              <>
+                <Chip label="未启用" tone="neutral" />
+                <Text style={s.small}>{agCount} 个账号</Text>
+              </>
+            ) : (
+              <>
                 <Chip
                   label={antigravity?.reloadRequired ? '待重载' : '运行中'}
                   tone={antigravity?.reloadRequired ? 'warning' : 'success'}
                 />
-              )
-            }
-            description="多账号轮换与模型剩余额度。"
-            kv={
-              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
-                <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
-              ) : (
-                <>
-                  <Text style={s.small}>{agCount} 个账号</Text>
-                  <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
-                </>
-              )
-            }
-            actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
-          />
-        ) : null}
+                <Text style={s.small}>{agCount} 个账号</Text>
+                <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
+        />
 
         <FeatureCard
           title="本机配置"
@@ -469,8 +525,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     quiet,
     quietStatus,
     quietError,
+    machineSettings,
+    modules,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const presenceModOff = isModuleOff('answer.presence', machineSettings, modules);
+  const autoModOff = isModuleOff('answer.automation', machineSettings, modules);
+  const escModOff = isModuleOff('answer.escalation', machineSettings, modules) || escalationStatus === 'disabled';
+  const quietModOff = isModuleOff('answer.quietChildren', machineSettings, modules) || quietStatus === 'disabled';
 
   const settings = presence?.settings ?? null;
   const observedMode = presence?.observation.mode ?? 'unknown';
@@ -499,7 +562,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         </Notice>
       ) : null}
 
-      {escalationError || escalation?.error ? (
+      {!escModOff && (escalationError || escalation?.error) ? (
         <Notice tone="danger">
           <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
             <Text style={s.text}>升级通知异常：{escalationError ?? escalation?.error}</Text>
@@ -512,30 +575,59 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="问答模式"
           trailing={
-            settings ? (
-              <Segmented
-                options={[
-                  { value: 'online', label: '在线' },
-                  { value: 'offline', label: '离线' },
-                  { value: 'auto', label: '自动' },
-                ]}
-                value={settings.mode}
-                onChange={mode =>
-                  void control
-                    .configurePresence({ ...settings, mode })
-                    .catch(e => setActionError(errorMessage(e)))
-                }
+            <View style={s.row}>
+              {!presenceModOff && settings ? (
+                <Segmented
+                  options={[
+                    { value: 'online', label: '在线' },
+                    { value: 'offline', label: '离线' },
+                    { value: 'auto', label: '自动' },
+                  ]}
+                  value={settings.mode}
+                  onChange={mode =>
+                    void control
+                      .configurePresence({ ...settings, mode })
+                      .catch(e => setActionError(errorMessage(e)))
+                  }
+                />
+              ) : !presenceModOff ? (
+                <Chip
+                  label={presenceError ? '读取失败' : '正在读取'}
+                  tone={presenceError ? 'danger' : 'neutral'}
+                />
+              ) : null}
+              <Switch
+                accessibilityLabel="问答模式"
+                disabled={!settings && !presenceModOff}
+                value={!presenceModOff && Boolean(settings && !settings.paused)}
+                onValueChange={enabled => {
+                  void (async () => {
+                    if (enabled) {
+                      await control.toggleModule('answer.presence', true);
+                      await control.refresh();
+                      const latest = control.getState().presence?.settings ?? settings;
+                      if (latest) {
+                        await control.configurePresence({ ...latest, paused: false });
+                      }
+                    } else {
+                      if (settings && !presenceModOff) {
+                        await control.configurePresence({ ...settings, paused: true }).catch(() => {});
+                      }
+                      await control.toggleModule('answer.presence', false);
+                      await control.refreshUnify();
+                    }
+                  })().catch(e => setActionError(errorMessage(e)));
+                }}
+                trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+                thumbColor={theme.colors.accentForeground}
               />
-            ) : (
-              <Chip
-                label={presenceError ? '读取失败' : '正在读取'}
-                tone={presenceError ? 'danger' : 'neutral'}
-              />
-            )
+            </View>
           }
           description="会话向你提问时，等待本人回答或自动选推荐项。"
           kv={
-            presenceError ? (
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence || !settings ? (
               <Text style={s.small}>正在读取…</Text>
@@ -561,7 +653,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="蓝牙在场判定"
           trailing={
-            presenceError ? (
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : presenceError ? (
               <Chip label="读取失败" tone="danger" />
             ) : !presence ? (
               <Chip label="正在读取" tone="neutral" />
@@ -574,7 +668,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="按随身蓝牙设备是否在场，自动切换在线或离线。"
           kv={
-            presenceError ? (
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence || !settings ? (
               <Text style={s.small}>正在读取…</Text>
@@ -595,8 +691,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="升级通知"
-              disabled={!escalation || escalationStatus !== 'ready'}
-              value={escalation?.enabled ?? false}
+              disabled={escalationStatus === 'error'}
+              value={!escModOff && (escalation?.enabled ?? false)}
               onValueChange={enabled =>
                 void control.configureEscalation({ enabled }).catch(e => setActionError(errorMessage(e)))
               }
@@ -606,11 +702,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
           kv={
-            escalationStatus === 'disabled' ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+            escModOff ? (
+              <Chip label="未启用" tone="neutral" />
             ) : escalationStatus === 'error' || escalationError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -633,8 +726,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="子会话免提醒"
-              disabled={!quiet || quietStatus !== 'ready'}
-              value={quiet?.enabled ?? false}
+              disabled={quietStatus === 'error'}
+              value={!quietModOff && (quiet?.enabled ?? false)}
               onValueChange={enabled =>
                 void control.configureQuiet({ enabled }).catch(e => setActionError(errorMessage(e)))
               }
@@ -644,11 +737,8 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="子会话和未置顶工作区的会话不直接提醒你，异常归并到主会话。"
           kv={
-            quietStatus === 'disabled' ? (
-              <>
-                <Chip label="未启用" tone="neutral" />
-                <Text style={s.small}>等待模块启用</Text>
-              </>
+            quietModOff ? (
+              <Chip label="未启用" tone="neutral" />
             ) : quietStatus === 'error' || quietError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -668,10 +758,10 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="语音提醒"
-              disabled={!settings}
-              value={settings?.speechEnabled ?? false}
+              disabled={!settings || presenceModOff}
+              value={!presenceModOff && (settings?.speechEnabled ?? false)}
               onValueChange={speechEnabled => {
-                if (!settings) return;
+                if (!settings || presenceModOff) return;
                 void control
                   .configurePresence({ ...settings, speechEnabled })
                   .catch(e => setActionError(errorMessage(e)));
@@ -682,7 +772,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="判定在线时，用语音播报新提问和停滞的主会话。"
           kv={
-            presenceError ? (
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence ? (
               <Text style={s.small}>正在读取…</Text>
@@ -696,17 +788,34 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <FeatureCard
           title="精确授权"
           trailing={
-            automationError ? (
-              <Chip label="读取失败" tone="danger" />
-            ) : !automation ? (
-              <Chip label="正在读取" tone="neutral" />
-            ) : (
-              <Chip label="已配置" tone="neutral" />
-            )
+            <Switch
+              accessibilityLabel="精确授权"
+              disabled={!automation && !autoModOff}
+              value={!autoModOff && Boolean(automation && !automation.paused)}
+              onValueChange={enabled => {
+                void (async () => {
+                  if (enabled) {
+                    await control.toggleModule('answer.automation', true);
+                    await control.refresh();
+                    await control.pause(false);
+                  } else {
+                    if (automation && !autoModOff) {
+                      await control.pause(true).catch(() => {});
+                    }
+                    await control.toggleModule('answer.automation', false);
+                    await control.refreshUnify();
+                  }
+                })().catch(e => setActionError(errorMessage(e)));
+              }}
+              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+              thumbColor={theme.colors.accentForeground}
+            />
           }
           description="跨重启保留的单会话命令和工作区路径白名单。"
           kv={
-            automationError ? (
+            autoModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : automationError ? (
               <Text style={s.small}>读取失败：{automationError}</Text>
             ) : !automation ? (
               <Text style={s.small}>正在读取…</Text>
@@ -722,10 +831,12 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 }
 
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
-  const { s, store, theme } = useUi();
+  const { s, store, control, theme } = useUi();
   const { snapshot, error } = useStoreState();
+  const { machineSettings, modules } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const githubModOff = isModuleOff('github', machineSettings, modules);
   const prefs = snapshot?.preferences ?? null;
   const repoCount = snapshot?.repositories.length ?? 0;
 
@@ -739,7 +850,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         </Notice>
       ) : null}
 
-      {snapshot && !snapshot.token.configured ? (
+      {!githubModOff && snapshot && !snapshot.token.configured ? (
         <Notice tone="warning">
           <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
             <Text style={s.text}>未保存 GitHub 令牌，无法轮询事件。</Text>
@@ -748,7 +859,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         </Notice>
       ) : null}
 
-      {error || snapshot?.error ? (
+      {!githubModOff && (error || snapshot?.error) ? (
         <Notice tone="danger">
           <Text style={s.text}>{error ?? snapshot?.error}</Text>
         </Notice>
@@ -760,13 +871,25 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="启用 GitHub 监听"
-              disabled={!prefs}
-              value={prefs?.enabled ?? false}
+              disabled={!prefs && !githubModOff}
+              value={!githubModOff && (prefs?.enabled ?? false)}
               onValueChange={enabled => {
-                if (!prefs) return;
-                void store
-                  .savePreferences({ ...prefs, enabled })
-                  .catch(e => setActionError(errorMessage(e)));
+                void (async () => {
+                  if (enabled) {
+                    await control.toggleModule('github', true);
+                    await store.refresh();
+                    const latestPrefs = store.getState().snapshot?.preferences ?? prefs;
+                    if (latestPrefs) {
+                      await store.savePreferences({ ...latestPrefs, enabled: true });
+                    }
+                  } else {
+                    if (prefs && !githubModOff) {
+                      await store.savePreferences({ ...prefs, enabled: false }).catch(() => {});
+                    }
+                    await control.toggleModule('github', false);
+                    await control.refreshUnify();
+                  }
+                })().catch(e => setActionError(errorMessage(e)));
               }}
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
@@ -774,7 +897,9 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           }
           description="轮询已订阅的仓库与 PR，把新事件直接发到对应会话。"
           kv={
-            error ? (
+            githubModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : error ? (
               <>
                 <Chip label="读取失败" tone="danger" />
                 <Text style={s.small}>读取失败：{error}</Text>

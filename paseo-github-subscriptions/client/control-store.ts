@@ -315,8 +315,18 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       return result;
     }),
     saveDefaults: (input: { enabled?: boolean; rules?: AgentDefaultRule[] }) => write(async () => {
+      if (input.enabled === true) {
+        await client.rpc(machineSettingsToggleModule, { id: 'providers.defaults', enabled: true })
+          .then(ms => emit({ machineSettings: ms }))
+          .catch(() => {});
+      }
       const result = await client.rpc(defaultsSave, input);
       emit({ defaults: result });
+      if (input.enabled === false) {
+        await client.rpc(machineSettingsToggleModule, { id: 'providers.defaults', enabled: false })
+          .then(ms => emit({ machineSettings: ms }))
+          .catch(() => {});
+      }
       return result;
     }),
     toggleModule: (id: string, enabled: boolean) => write(async () => {
@@ -382,6 +392,23 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       immediate?: EscalationWindow[];
       delayMinutes?: number;
     }) => write(async () => {
+      if (input.enabled === true) {
+        const ms = await client.rpc(machineSettingsToggleModule, { id: 'answer.escalation', enabled: true });
+        emit({ machineSettings: ms });
+      }
+      if (input.enabled === false) {
+        const result = await client.rpc(escalationConfigure, input).catch(() =>
+          state.escalation ? { ...state.escalation, enabled: false, status: 'stopped' as const } : null,
+        );
+        const ms = await client.rpc(machineSettingsToggleModule, { id: 'answer.escalation', enabled: false });
+        emit({
+          machineSettings: ms,
+          ...(result ? { escalation: result } : {}),
+          escalationStatus: 'disabled',
+          escalationError: null,
+        });
+        return result!;
+      }
       const result = await client.rpc(escalationConfigure, input);
       emit({ escalation: result, escalationStatus: 'ready', escalationError: null });
       return result;
@@ -399,6 +426,23 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       return result;
     }),
     configureQuiet: (input: { enabled?: boolean; forwardEvents?: boolean }) => write(async () => {
+      if (input.enabled === true) {
+        const ms = await client.rpc(machineSettingsToggleModule, { id: 'answer.quietChildren', enabled: true });
+        emit({ machineSettings: ms });
+      }
+      if (input.enabled === false) {
+        const result = await client.rpc(quietConfigure, input).catch(() =>
+          state.quiet ? { ...state.quiet, enabled: false } : null,
+        );
+        const ms = await client.rpc(machineSettingsToggleModule, { id: 'answer.quietChildren', enabled: false });
+        emit({
+          machineSettings: ms,
+          ...(result ? { quiet: result } : {}),
+          quietStatus: 'disabled',
+          quietError: null,
+        });
+        return result!;
+      }
       const result = await client.rpc(quietConfigure, input);
       emit({ quiet: result, quietStatus: 'ready', quietError: null });
       return result;

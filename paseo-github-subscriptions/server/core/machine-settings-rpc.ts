@@ -91,34 +91,45 @@ export function registerMachineSettingsRpcs(options: {
     }
   });
 
-  // 当 providers.defaults 默认关闭而未在启动时注册时，由核心层提供规则读取与保存入口（独立于 todo 模块）
-  const defaultsRunning = host.status().modules.some(m => m.id === 'providers.defaults' && m.state === 'running');
-  if (!defaultsRunning) {
-    let enabled = Boolean(machine.modules['providers.defaults']);
-    const section = machine.section<AgentDefaultRule[]>('agentDefaults');
-    let rules: AgentDefaultRule[] = section.ok ? [...section.value] : [];
-    server.handle(defaultsSnapshot, async () => ({
-      enabled,
-      rules,
+  // 核心层始终提供默认规则读取与保存兜底入口；当 providers.defaults 模块启用时由模块自身处理器接管
+  let fallbackDefaultsEnabled = Boolean(machine.modules['providers.defaults']);
+  const section = machine.section<AgentDefaultRule[]>('agentDefaults');
+  let fallbackRules: AgentDefaultRule[] = section.ok ? [...section.value] : [];
+  server.handle(defaultsSnapshot, async () => {
+    const raw = await readRawMachineConfig(machine.path).catch(() => null);
+    if (raw && Array.isArray(raw.agentDefaults)) {
+      const parsed = AgentDefaultsSchema.safeParse(raw.agentDefaults);
+      if (parsed.success) fallbackRules = parsed.data;
+    }
+    const rawMods = raw?.modules && typeof raw.modules === 'object' ? (raw.modules as Record<string, unknown>) : null;
+    if (rawMods && typeof rawMods['providers.defaults'] === 'boolean') {
+      fallbackDefaultsEnabled = rawMods['providers.defaults'];
+    }
+    return {
+      enabled: fallbackDefaultsEnabled,
+      rules: fallbackRules,
       error: section.ok ? null : section.error,
+    };
+  });
+  server.handle(defaultsSave, async input => {
+    if (!section.ok) {
+      throw new Error(`默认规则配置段读取失败，拒绝覆盖保存：${section.error}`);
+    }
+    if (input.enabled !== undefined) fallbackDefaultsEnabled = input.enabled;
+    if (input.rules !== undefined) fallbackRules = AgentDefaultsSchema.parse(input.rules);
+    await patchMachineConfig(machine.path, raw => ({
+      ...raw,
+      modules: {
+        ...(raw.modules && typeof raw.modules === 'object' ? (raw.modules as Record<string, unknown>) : {}),
+        'providers.defaults': fallbackDefaultsEnabled,
+      },
+      agentDefaults: fallbackRules,
     }));
-    server.handle(defaultsSave, async input => {
-      if (!section.ok) {
-        throw new Error(`默认规则配置段读取失败，拒绝覆盖保存：${section.error}`);
-      }
-      if (input.enabled !== undefined) enabled = input.enabled;
-      if (input.rules !== undefined) rules = AgentDefaultsSchema.parse(input.rules);
-      await patchMachineConfig(machine.path, raw => ({
-        ...raw,
-        modules: {
-          ...(raw.modules && typeof raw.modules === 'object' ? (raw.modules as Record<string, unknown>) : {}),
-          'providers.defaults': enabled,
-        },
-        agentDefaults: rules,
-      }));
-      return { enabled, rules, error: null };
-    });
-  }
+    if (input.enabled !== undefined) {
+      await host.setEnabled?.('providers.defaults', fallbackDefaultsEnabled);
+    }
+    return { enabled: fallbackDefaultsEnabled, rules: fallbackRules, error: null };
+  });
 
   const buildSettingsSnapshot = async () => {
     const [raw, pauseState] = await Promise.all([
@@ -155,6 +166,9 @@ export function registerMachineSettingsRpcs(options: {
   server.handle(machineSettingsSnapshot, () => buildSettingsSnapshot());
 
   server.handle(machineSettingsToggleModule, async ({ id, enabled }) => {
+    if (id === 'providers.defaults') {
+      fallbackDefaultsEnabled = enabled;
+    }
     await patchMachineConfig(machine.path, raw => ({
       ...raw,
       modules: {
@@ -162,6 +176,7 @@ export function registerMachineSettingsRpcs(options: {
         [id]: enabled,
       },
     }));
+    await host.setEnabled?.(id, enabled);
     return buildSettingsSnapshot();
   });
 
