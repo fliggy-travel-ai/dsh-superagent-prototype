@@ -292,3 +292,37 @@ test('待办操作成功后重新读取列表，不沿用操作前发出的旧�
     assert.deepEqual(store.getState().todo?.items, []);
   } finally { store.dispose(); }
 });
+
+test('模块切换和重载期间全局锁住开关，结束后刷新状态并解锁', async () => {
+  const pending = deferred<any>();
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'machine.settings.toggle-module') return pending.promise;
+    throw new Error('离线');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { reloadDelayMs: 10 } as never);
+  try {
+    const first = store.toggleModule('answer.browser', true);
+    assert.equal((store.getState() as any).moduleReloading, true);
+    await assert.rejects(store.toggleModule('answer.presence', false), /正在重新加载/);
+    pending.resolve({ modules: [] }); await first;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal((store.getState() as any).moduleReloading, false);
+    assert.equal((store.getState() as any).moduleReloadUnverified, 'answer.browser');
+  } finally { store.dispose(); }
+});
+
+test('服务器仍在重载时超过提示时间仍锁住开关，直到服务器确认结束', async () => {
+  let pending = true;
+  const snapshot = () => ({ configPath: '/tmp/machine', source: 'file', machine: null, errors: [], modules: [], pausedAll: false, reloadInProgress: pending });
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'machine.settings.toggle-module' || contract.name === 'machine.settings.snapshot') return snapshot();
+    throw new Error('offline');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { reloadDelayMs: 10, reloadPollMs: 15 } as never);
+  try {
+    await store.toggleModule('answer.browser', true);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal((store.getState() as any).moduleReloading, true);
+    pending = false;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal((store.getState() as any).moduleReloading, false);
+  } finally { store.dispose(); }
+});

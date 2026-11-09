@@ -110,7 +110,7 @@ function StepRow(props: { num: number; title: string; children?: ReactNode }) {
 
 function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, control, theme } = useUi();
-  const { browser, browserError, automation, claudeAccounts, claudeAccountsStatus, claudeAccountsError } = useControlState();
+  const { browser, browserError, automation, claudeAccounts, claudeAccountsStatus, claudeAccountsError, moduleReloading } = useControlState();
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [pairingText, setPairingText] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -155,7 +155,7 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
       <View style={[s.row, { justifyContent: 'space-between' }]}>
         <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
         <Switch accessibilityLabel="新建 Claude 会话默认开启自动继续"
-          disabled={claudeAccountsStatus !== 'ready' || !claudeAccounts?.enabled || Boolean(claudeAccountsError || claudeAccounts?.error)}
+          disabled={moduleReloading || claudeAccountsStatus !== 'ready' || !claudeAccounts?.enabled || Boolean(claudeAccountsError || claudeAccounts?.error)}
           value={claudeAccounts?.quotaName.autoResumeDefault ?? false}
           onValueChange={autoResumeDefault => void control.configureClaudeAccounts({ autoResumeDefault }).catch(e => setResumeError(errorMessage(e)))}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />
@@ -412,7 +412,6 @@ function AddBrowserDrawer() {
   );
 }
 
-const CONFIGURABLE_PROVIDERS = ['claude*', 'codex', 'opencode', 'glm*', 'qoder'] as const;
 
 function CloudSessionDrawer() {
   const { s } = useUi();
@@ -451,7 +450,7 @@ function CloudSessionDrawer() {
 
 function QaModeDrawer() {
   const { s, control, theme } = useUi();
-  const { presence, presenceError } = useControlState();
+  const { presence, presenceError, moduleReloading } = useControlState();
   const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
 
@@ -481,7 +480,7 @@ function QaModeDrawer() {
         <Text style={s.text}>暂停问答代答与转发</Text>
         <Switch
           accessibilityLabel="暂停问答代答与转发"
-          disabled={!settings}
+          disabled={moduleReloading || !settings}
           value={settings?.paused ?? false}
           onValueChange={paused => {
             if (!settings) return;
@@ -959,7 +958,7 @@ type ScheduleTarget = 'delay' | 'window' | 'remove';
 
 function QuietChildrenDrawer() {
   const { s, control, theme } = useUi();
-  const { quiet, quietStatus, quietError } = useControlState();
+  const { quiet, quietStatus, quietError, moduleReloading } = useControlState();
   const recent = quiet?.recentHandled ?? [];
   const [err, setErr] = useState<string | null>(null);
 
@@ -982,7 +981,7 @@ function QuietChildrenDrawer() {
         <Text style={s.text}>将子会话异常与提问归并到主会话</Text>
         <Switch
           accessibilityLabel="将子会话异常与提问归并到主会话"
-          disabled={!quiet || quietStatus !== 'ready'}
+          disabled={moduleReloading || !quiet || quietStatus !== 'ready'}
           value={quiet?.forwardEvents ?? false}
           onValueChange={val =>
             void control.configureQuiet({ forwardEvents: val }).catch(e => setErr(errorMessage(e)))
@@ -1025,7 +1024,7 @@ function QuietChildrenDrawer() {
 
 function SpeechDrawer() {
   const { s, control, theme } = useUi();
-  const { presence, presenceError } = useControlState();
+  const { presence, presenceError, moduleReloading } = useControlState();
   const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
 
@@ -1040,7 +1039,7 @@ function SpeechDrawer() {
         <Text style={s.text}>开启语音提醒</Text>
         <Switch
           accessibilityLabel="开启语音提醒"
-          disabled={!settings}
+          disabled={moduleReloading || !settings}
           value={settings?.speechEnabled ?? false}
           onValueChange={speechEnabled => {
             if (!settings) return;

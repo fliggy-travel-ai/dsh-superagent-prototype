@@ -156,6 +156,7 @@ export class FakeDaemon {
     machine: 'macbook',
     errors: [],
     pausedAll: false,
+    reloadInProgress: false,
     modules: [
       { id: 'providers.defaults', label: '新建会话默认设置', enabled: false, state: 'off', reloadRequired: true },
       { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: true },

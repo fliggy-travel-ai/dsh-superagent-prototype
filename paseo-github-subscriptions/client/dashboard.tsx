@@ -94,20 +94,20 @@ function ModuleFeatureCard({ moduleId, label, featureEnabled, ...props }: Omit<C
   featureEnabled?: boolean;
 }) {
   const { s, control, theme } = useUi();
-  const { machineSettings, machineSettingsError } = useControlState();
-  const [busy, setBusy] = useState(false);
+  const { machineSettings, machineSettingsError, moduleReloading, moduleReloadingId, moduleReloadUnverified } = useControlState();
   const [error, setError] = useState<string | null>(null);
   const item = machineSettings?.modules.find(m => m.id === moduleId);
   return <FeatureCard {...props}
-    trailing={<Switch accessibilityLabel={label} disabled={!item || !!machineSettingsError || busy}
+    trailing={<Switch accessibilityLabel={label} disabled={!item || !!machineSettingsError || moduleReloading}
       value={Boolean(item?.enabled && (featureEnabled ?? true))}
       onValueChange={enabled => {
-        setBusy(true); setError(null);
-        void control.toggleModule(moduleId, enabled).then(() => {
-          setTimeout(() => { void Promise.allSettled([control.refresh(), control.refreshUnify()]).finally(() => setBusy(false)); }, 3000);
-        }).catch(e => { setError(errorMessage(e)); setBusy(false); });
+        setError(null);
+        void control.toggleModule(moduleId, enabled).catch(e => setError(errorMessage(e)));
       }} trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />}
-    notice={busy ? <Text style={s.small}>正在重新加载，约 3 秒后生效</Text> : error ? <Text style={s.small}>{error}</Text> : null}
+    notice={moduleReloading && moduleReloadingId === moduleId ? <Text style={s.small}>正在重新加载，约 3 秒后生效</Text> : <>
+      {error ? <Text style={s.small}>{error}</Text> : null}
+      {moduleReloadUnverified === moduleId || (item && item.state !== (item.enabled ? 'running' : 'off')) ? <Text style={s.small}>已保存，未生效，请手动重载插件</Text> : null}
+    </>}
   />;
 }
 
@@ -127,6 +127,7 @@ function ProvidersPage({
     claudeAccountsStatus,
     machineSettings,
     machineSettingsError,
+    moduleReloading,
     modules,
     todo,
   } = useControlState();
@@ -157,7 +158,7 @@ function ProvidersPage({
         <Btn
           danger={!pausedAll}
           primary={pausedAll}
-          disabled={!machineSettings || Boolean(machineSettingsError)}
+          disabled={moduleReloading || !machineSettings || Boolean(machineSettingsError)}
           busy={pauseBusy}
           label={pausedAll ? '恢复自动化' : '暂停全部自动化'}
           onPress={() => {
@@ -171,12 +172,6 @@ function ProvidersPage({
           }}
         />
       </View>
-
-      {machineSettingsError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取本机设置失败：{machineSettingsError}</Text>
-        </Notice>
-      ) : null}
 
       {actionError ? (
         <Notice tone="danger">
@@ -289,6 +284,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     quietStatus,
     quietError,
     machineSettings,
+    moduleReloading,
     modules,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
@@ -473,7 +469,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="语音提醒"
-              disabled={!settings || presenceModOff}
+              disabled={moduleReloading || !settings || presenceModOff}
               value={!presenceModOff && (settings?.speechEnabled ?? false)}
               onValueChange={speechEnabled => {
                 if (!settings || presenceModOff) return;
@@ -526,7 +522,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, store, theme } = useUi();
   const { snapshot, error } = useStoreState();
-  const { machineSettings, modules } = useControlState();
+  const { machineSettings, modules, moduleReloading } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
 
   const githubModOff = isModuleOff('github', machineSettings, modules);
@@ -564,7 +560,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="启用 GitHub 监听"
-              disabled={!prefs || githubModOff}
+              disabled={moduleReloading || !prefs || githubModOff}
               value={!githubModOff && (prefs?.enabled ?? false)}
               onValueChange={enabled => {
                 if (!prefs) return;
@@ -1074,6 +1070,11 @@ export function MainScreen(props: PluginScreenProps) {
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={[s.pageContent, { maxWidth: 980 }]}>
+        {controlState.machineSettingsError || controlState.machineSettings?.errors.length ? (
+          <Notice tone="danger">
+            <Text style={s.text}>读取本机设置失败：{[controlState.machineSettingsError, ...(controlState.machineSettings?.errors ?? [])].filter(Boolean).join('；')}</Text>
+          </Notice>
+        ) : null}
         {page === 'providers' ? <ProvidersPage onOpenDrawer={openDrawer} /> : null}
         {page === 'answer' ? <AnswerPage onOpenDrawer={openDrawer} /> : null}
         {page === 'github' ? <GithubPage onOpenDrawer={openDrawer} /> : null}

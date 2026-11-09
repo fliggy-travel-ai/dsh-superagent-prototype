@@ -11,11 +11,9 @@ import {
   machineSettingsSnapshot,
   machineSettingsToggleModule,
   machineSettingsPauseAll,
-  machineSettingsExportBackup,
   type MachineSettingsSnapshot,
 } from '../shared/machine-settings.ts';
 import { todoList, todoAct, type TodoMergedSnapshot, type TodoActionInput, type TodoActionOutput } from '../shared/todo.ts';
-import { defaultsSnapshot, defaultsSave, type DefaultsSnapshot, type AgentDefaultRule } from '../shared/defaults.ts';
 import {
   providersInstanceStatus,
   cloudSessionStatus,
@@ -61,10 +59,11 @@ export interface ControlState {
   modules: ModulesSnapshot | null;
   machineSettings: MachineSettingsSnapshot | null;
   machineSettingsError?: string | null;
+  moduleReloading: boolean;
+  moduleReloadingId: string | null;
+  moduleReloadUnverified: string | null;
   todo: TodoMergedSnapshot | null;
   todoError: string | null;
-  defaults: DefaultsSnapshot | null;
-  defaultsError?: string | null;
   providerInstance: ProvidersInstanceStatus | null;
   providerInstanceError?: string | null;
   cloudSession: CloudSessionStatus | null;
@@ -95,7 +94,7 @@ export function isRpcDisabledError(error: unknown, moduleId?: string, modules?: 
 const ACT_TIMEOUT_MS = 15_000;
 const ACT_REFRESH_WAIT_MS = 3_000;
 
-export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list'], options: { actTimeoutMs?: number } = {}) {
+export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list'], options: { actTimeoutMs?: number; reloadDelayMs?: number; reloadPollMs?: number } = {}) {
   const actTimeoutMs = options.actTimeoutMs ?? ACT_TIMEOUT_MS;
   let state: ControlState = {
     automation: null,
@@ -109,10 +108,11 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     modules: null,
     machineSettings: null,
     machineSettingsError: null,
+    moduleReloading: false,
+    moduleReloadingId: null,
+    moduleReloadUnverified: null,
     todo: null,
     todoError: null,
-    defaults: null,
-    defaultsError: null,
     providerInstance: null,
     providerInstanceError: null,
     cloudSession: null,
@@ -138,10 +138,11 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
   let liveError: string | null = null;
   let scanError: string | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
   let inflight: Promise<void> | null = null;
   let disposed = false;
   let mutating = 0;
-  const sequence = { automation: 0, browser: 0, presence: 0 };
+  const sequence = { automation: 0, browser: 0, presence: 0, machine: 0 };
   const listeners = new Set<() => void>();
   const emit = (patch: Partial<ControlState>) => {
     if (disposed) return;
@@ -202,6 +203,21 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     });
     return todoInflight;
   };
+  const fetchMachineSettings = async () => {
+    const version = ++sequence.machine;
+    try {
+      const value = await client.rpc(machineSettingsSnapshot, {});
+      if (version === sequence.machine) {
+        const tracked = value.modules.find(m => m.id === state.moduleReloadUnverified);
+        emit({ machineSettings: value, machineSettingsError: null,
+          ...(tracked && tracked.state === (tracked.enabled ? 'running' : 'off') ? { moduleReloadUnverified: null } : {}) });
+      }
+      return value;
+    } catch (error) {
+      if (version === sequence.machine) emit({ machineSettingsError: errorMessage(error) });
+      throw error;
+    }
+  };
   const refreshUnify = () => {
     if (disposed) return Promise.resolve();
     const todoTask = refreshTodo();
@@ -209,8 +225,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       let mods = state.modules;
       await client.rpc(modulesStatus, {}).then(value => { mods = value; emit({ modules: value }); }).catch(() => {});
       await Promise.allSettled([
-        client.rpc(machineSettingsSnapshot, {}).then(value => emit({ machineSettings: value, machineSettingsError: null })).catch(error => emit({ machineSettingsError: errorMessage(error) })),
-        client.rpc(defaultsSnapshot, {}).then(value => emit({ defaults: value, defaultsError: null })).catch(error => emit({ defaultsError: errorMessage(error) })),
+        fetchMachineSettings(),
         client.rpc(providersInstanceStatus, {}).then(value => emit({ providerInstance: value, providerInstanceError: null })).catch(error => emit({ providerInstanceError: errorMessage(error) })),
         client.rpc(cloudSessionStatus, {}).then(value => emit({ cloudSession: value, cloudSessionError: null })).catch(error => emit({ cloudSessionError: errorMessage(error) })),
         client.rpc(claudeAccountsSnapshot, {}).then(value => {
@@ -308,15 +323,38 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
         clearTimeout(wait);
       }
     }),
-    saveDefaults: (input: { enabled?: boolean; rules?: AgentDefaultRule[] }) => write(async () => {
-      const result = await client.rpc(defaultsSave, input);
-      emit({ defaults: result });
-      return result;
-    }),
     toggleModule: (id: string, enabled: boolean) => write(async () => {
-      const result = await client.rpc(machineSettingsToggleModule, { id, enabled });
-      emit({ machineSettings: result });
-      return result;
+      if (state.moduleReloading) throw new Error('插件正在重新加载，请稍后再试');
+      emit({ moduleReloading: true, moduleReloadingId: id, moduleReloadUnverified: null });
+      try {
+        const result = await client.rpc(machineSettingsToggleModule, { id, enabled });
+        emit({ machineSettings: result });
+        const checkReload = async () => {
+          if (disposed) return;
+          reloadTimer = null;
+          void refresh();
+          let timedOut = false;
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const value = await Promise.race([
+            fetchMachineSettings().catch(() => null),
+            new Promise<null>(resolve => { timeout = setTimeout(() => { timedOut = true; resolve(null); }, 3000); }),
+          ]);
+          clearTimeout(timeout);
+          if (disposed) return;
+          if (value?.reloadInProgress) {
+            reloadTimer = setTimeout(() => { void checkReload(); }, options.reloadPollMs ?? 1000);
+            return;
+          }
+          emit({ moduleReloading: false, moduleReloadingId: null, moduleReloadUnverified: timedOut || !value ? id : null });
+          void refreshUnify();
+        };
+        reloadTimer = setTimeout(() => { void checkReload(); }, options.reloadDelayMs ?? 3000);
+        return result;
+      } catch (error) {
+        emit({ moduleReloading: false, moduleReloadingId: null });
+        void fetchMachineSettings().catch(() => {});
+        throw error;
+      }
     }),
     pauseAll: (paused: boolean) => write(async () => {
       const result = await client.rpc(machineSettingsPauseAll, { paused });
@@ -324,7 +362,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       await Promise.allSettled([refresh(), refreshUnify()]);
       return result;
     }),
-    exportBackup: () => write(() => client.rpc(machineSettingsExportBackup, {})),
     configureClaudeAccounts: (input: { autoResumeDefault?: boolean }) => write(async () => {
       const result = await client.rpc(claudeAccountsConfigure, input);
       emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
@@ -381,7 +418,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
         }, REFRESH_INTERVAL_MS);
       }
     },
-    dispose() { disposed = true; if (timer) clearInterval(timer); timer = null; listeners.clear(); },
+    dispose() { disposed = true; if (reloadTimer) clearTimeout(reloadTimer); if (timer) clearInterval(timer); timer = null; listeners.clear(); },
   };
 }
 

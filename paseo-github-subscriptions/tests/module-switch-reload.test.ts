@@ -51,11 +51,70 @@ test('浏览器模块关闭时更新内部开关，不提前启动桥接；损�
     await handlers.get('machine.settings.toggle-module')!({ id: 'answer.browser', enabled: true });
     assert.equal(started, false);
     assert.equal(JSON.parse(await readFile(browserPath, 'utf8')).settings.enabled, true);
+    assert.equal('version' in JSON.parse(await readFile(browserPath, 'utf8')), false);
     assert.equal(JSON.parse(await readFile(path, 'utf8')).modules['answer.browser'], true);
+    await new Promise(resolve => setTimeout(resolve, 650));
     await writeFile(browserPath, '[]');
     await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'answer.browser', enabled: false }));
     assert.equal(await readFile(browserPath, 'utf8'), '[]');
     assert.equal(JSON.parse(await readFile(path, 'utf8')).modules['answer.browser'], true);
     await new Promise(resolve => setTimeout(resolve, 600));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('重载已排期时拒绝其他模块切换，重载失败后可再次操作', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'module-lock-'));
+  try {
+    const path = join(dir, 'machine.json'); await writeFile(path, JSON.stringify({ version: 1, modules: {} }));
+    const handlers = new Map<string, (input: any) => Promise<any>>();
+    const server = { handle: (contract: { name: string }, handler: (input: any) => Promise<any>) => handlers.set(contract.name, handler) };
+    registerMachineSettingsRpcs({ server: server as never, machine: loadMachineConfig(path, {}), host: { status: () => ({ modules: [] }) } as never,
+      services: { main: null } as never, stateDirectory: dir, baseDirectory: dir, reload: async () => { throw new Error('离线'); } });
+    await handlers.get('machine.settings.toggle-module')!({ id: 'answer.presence', enabled: false });
+    assert.equal((await handlers.get('machine.settings.snapshot')!({})).reloadInProgress, true);
+    await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'answer.automation', enabled: false }), /正在重新加载/);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).modules['answer.automation'], undefined);
+    await new Promise(resolve => setTimeout(resolve, 650));
+    assert.equal((await handlers.get('machine.settings.snapshot')!({})).reloadInProgress, false);
+    await handlers.get('machine.settings.toggle-module')!({ id: 'answer.automation', enabled: false });
+    await new Promise(resolve => setTimeout(resolve, 650));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('无关区块损坏时允许切换，目标区块或 modules 损坏时拒绝', async () => {
+  const { z } = await import('zod');
+  const dir = await mkdtemp(join(tmpdir(), 'module-validation-'));
+  try {
+    const path = join(dir, 'machine.json');
+    const sections = { quietChildren: { schema: z.object({ enabled: z.boolean() }), fallback: { enabled: true } }, agentDefaults: { schema: z.array(z.string()), fallback: [] } };
+    const handlers = new Map<string, (input: any) => Promise<any>>();
+    const server = { handle: (contract: { name: string }, handler: (input: any) => Promise<any>) => handlers.set(contract.name, handler) };
+    await writeFile(path, JSON.stringify({ version: 1, modules: {}, agentDefaults: 'broken', quietChildren: { enabled: true } }));
+    registerMachineSettingsRpcs({ server: server as never, machine: loadMachineConfig(path, sections), host: { status: () => ({ modules: [] }) } as never,
+      services: { main: null } as never, stateDirectory: dir, baseDirectory: dir, sections, reload: async () => {} });
+    await handlers.get('machine.settings.toggle-module')!({ id: 'answer.quietChildren', enabled: true });
+    await new Promise(resolve => setTimeout(resolve, 650));
+    await writeFile(path, JSON.stringify({ version: 1, modules: {}, quietChildren: { enabled: 'bad' } }));
+    await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'answer.quietChildren', enabled: true }), /quietChildren/);
+    await writeFile(path, JSON.stringify({ version: 1, modules: { github: 'bad' } }));
+    await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'answer.presence', enabled: true }), /modules/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('模块配置写入失败时回滚已变更的浏览器内部开关', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'module-rollback-'));
+  try {
+    const path = join(dir, 'machine.json'); await writeFile(path, JSON.stringify({ version: 1, modules: { 'answer.browser': true } }));
+    const handlers = new Map<string, (input: any) => Promise<any>>();
+    const server = { handle: (contract: { name: string }, handler: (input: any) => Promise<any>) => handlers.set(contract.name, handler) };
+    let enabled = true;
+    const browser = { snapshot: () => ({ settings: { enabled, port: 17373 } }), configure: async (settings: { enabled: boolean }) => {
+      enabled = settings.enabled;
+      if (!enabled) await writeFile(path, '{invalid');
+    } };
+    registerMachineSettingsRpcs({ server: server as never, machine: loadMachineConfig(path, {}), host: { status: () => ({ modules: [{ id: 'answer.browser', state: 'running' }] }) } as never,
+      services: { main: { readyBrowser: async () => browser } } as never, stateDirectory: dir, baseDirectory: dir, reload: async () => {} });
+    await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'answer.browser', enabled: false }));
+    assert.equal(enabled, true);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

@@ -51,6 +51,9 @@ test('第二期侧栏状态计算：待办只计插件待办，异常存在时�
     presenceError: null,
     modules: null,
     machineSettings: null,
+    moduleReloading: false,
+    moduleReloadingId: null,
+    moduleReloadUnverified: null,
     todo: {
       items: [
         {
@@ -300,7 +303,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     },
   };
   const store = createSnapshotStore(fakeClient as never);
-  const control = createControlStore(fakeClient as never, fakeClient.paseo.agents.list as never);
+  const control = createControlStore(fakeClient as never, fakeClient.paseo.agents.list as never, { reloadDelayMs: 10 });
   await store.refresh();
   await control.refresh();
   await control.refreshUnify();
@@ -345,6 +348,14 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     };
 
     let providersTree = renderMain({ page: 'providers' });
+    daemon.machineSettings = { ...daemon.machineSettings, errors: ['agentDefaults 无效'], modules: daemon.machineSettings.modules.map(m => m.id === 'answer.browser' ? { ...m, enabled: true, state: 'off' as const } : m) };
+    await control.refreshUnify();
+    providersTree = renderMain({ page: 'providers' });
+    assert.match(collectText(providersTree), /agentDefaults 无效/);
+    assert.match(collectText(providersTree), /已保存，未生效，请手动重载插件/);
+    daemon.machineSettings = { ...daemon.machineSettings, errors: [], modules: daemon.machineSettings.modules.map(m => m.id === 'answer.browser' ? { ...m, state: 'running' as const } : m) };
+    await control.refreshUnify();
+    renderer.reset(); providersTree = renderMain({ page: 'providers' });
     const providersText = collectText(providersTree);
     assert.equal(providersText.includes('设置 → 开发自动化'), false, '主页面不应再出现“设置 → 开发自动化”引导');
     assert.doesNotMatch(providersText, /本机配置|新建会话默认设置|多个 Antigravity 账号分别作为 Provider/);
@@ -481,8 +492,13 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     const quietCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0];
     assert.ok(escCardSwitch && quietCardSwitch);
     (escCardSwitch.props.onValueChange as (v: boolean) => void)(true);
-    (quietCardSwitch.props.onValueChange as (v: boolean) => void)(true);
-    await new Promise(r => setTimeout(r, 20));
+    answerTree = renderMain({ page: 'answer' });
+    assert.equal(findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0]?.props.disabled, true);
+    await new Promise(r => setTimeout(r, 50));
+    answerTree = renderMain({ page: 'answer' });
+    const unlockedQuietSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0];
+    (unlockedQuietSwitch.props.onValueChange as (v: boolean) => void)(true);
+    await new Promise(r => setTimeout(r, 50));
     assert.equal(daemon.machineSettings.modules.find(m => m.id === 'answer.escalation')?.enabled, true);
     assert.equal(daemon.machineSettings.modules.find(m => m.id === 'answer.quietChildren')?.enabled, true);
     await control.refreshUnify();

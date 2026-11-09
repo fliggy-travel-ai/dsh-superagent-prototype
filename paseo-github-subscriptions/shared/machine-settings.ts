@@ -19,6 +19,7 @@ export const MachineSettingsSnapshotSchema = z.strictObject({
   errors: z.array(z.string()),
   modules: z.array(MachineModuleSettingSchema),
   pausedAll: z.boolean(),
+  reloadInProgress: z.boolean().default(false),
 });
 export type MachineSettingsSnapshot = z.infer<typeof MachineSettingsSnapshotSchema>;
 
