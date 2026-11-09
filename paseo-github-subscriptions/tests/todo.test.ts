@@ -1238,3 +1238,31 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
 
   await host.dispose();
 });
+
+test('自动结束的升级事件不在待办中，处理记录写明结束原因', async () => {
+  const escalation: EscalationSnapshot = {
+    enabled: true, status: 'running', error: null, delivery: 'live', timezone: 'Asia/Singapore', immediate: [], delayMinutes: 0,
+    webhook: { configured: true, hostname: null, fingerprint: null },
+    pendingEvents: [],
+    recentDeliveries: [],
+    recentClosures: [{ id: 'esc-9', agentId: 'main', sessionTitle: '【插件整合】主会话', summary: '提问：是否合并？', at: '2026-11-09T12:07:00Z', reason: '提问已回答或已取消' }],
+  };
+  const runtime = new TodoRuntime({
+    now: () => Date.parse('2026-11-09T12:10:00Z'),
+    selfHost: async () => ({ id: 'srv-mini', name: 'Mac mini' }),
+    hosts: async () => [],
+    presence: async () => null,
+    browser: async () => null,
+    stalled: async () => null,
+    escalation: async () => escalation,
+    remoteLocal: async () => { throw new Error('unused'); },
+    remoteAct: async () => { throw new Error('unused'); },
+    answerQuestion: async () => ({}),
+    markQuestionRead: async () => ({}),
+  });
+  const local = await runtime.local();
+  assert.deepEqual(local.items, []);
+  assert.deepEqual(local.logs.map(log => [log.id, log.label, log.detail]), [
+    ['esc-closed:esc-9', '升级投递', '已自动结束（提问已回答或已取消） · 【插件整合】主会话 · 提问：是否合并？'],
+  ]);
+});

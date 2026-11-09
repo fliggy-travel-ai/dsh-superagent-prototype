@@ -100,7 +100,12 @@ export function isRpcDisabledError(error: unknown, moduleId?: string, modules?: 
   return /未知调用|未知接口|unknown|not found|unregistered|no handler|method not found|未注册|未启用|未实现/i.test(msg);
 }
 
-export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list']) {
+/** 待办操作的等待上限：超过就提示失败并恢复按钮；操作后刷新列表最多再等这么久。 */
+const ACT_TIMEOUT_MS = 15_000;
+const ACT_REFRESH_WAIT_MS = 3_000;
+
+export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list'], options: { actTimeoutMs?: number } = {}) {
+  const actTimeoutMs = options.actTimeoutMs ?? ACT_TIMEOUT_MS;
   let state: ControlState = {
     automation: null,
     browser: null,
@@ -306,9 +311,23 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       return result;
     }),
     actTodo: (input: TodoActionInput): Promise<TodoActionOutput> => write(async () => {
-      const result = await client.rpc(todoAct, input);
-      await Promise.allSettled([refreshUnify(), asking(() => client.rpc(presenceSnapshot, {}))]);
-      return result;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<TodoActionOutput>(done => {
+        timer = setTimeout(() => done({ ok: false, message: `处理超时（${Math.round(actTimeoutMs / 1000)} 秒没有响应），列表已重新读取；仍在列表中可以再试` }), actTimeoutMs);
+      });
+      try {
+        return await Promise.race([client.rpc(todoAct, input), timeout]);
+      } finally {
+        clearTimeout(timer);
+        // 操作前发出的列表请求可能还带着这条待办：等它结束后重新读取。只短暂等待刷新，不让按钮跟着慢请求卡住。
+        const refreshed = Promise.allSettled([
+          Promise.resolve(todoInflight).then(() => refreshUnify()),
+          asking(() => client.rpc(presenceSnapshot, {})),
+        ]);
+        let wait: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([refreshed, new Promise(done => { wait = setTimeout(done, ACT_REFRESH_WAIT_MS); })]);
+        clearTimeout(wait);
+      }
     }),
     saveDefaults: (input: { enabled?: boolean; rules?: AgentDefaultRule[] }) => write(async () => {
       const result = await client.rpc(defaultsSave, input);
