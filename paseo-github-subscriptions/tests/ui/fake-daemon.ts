@@ -315,6 +315,9 @@ export class FakeDaemon {
         const id = String(input.id);
         const enabled = Boolean(input.enabled);
         this.setModuleState(id, enabled);
+        if (id === 'answer.escalation') this.escalation = { ...this.escalation, enabled };
+        if (id === 'answer.quietChildren') this.quiet = { ...this.quiet, enabled };
+        if (id === 'answer.browser') this.browser = { ...this.browser, settings: { ...this.browser.settings, enabled } };
         return this.machineSettings;
       }
       case 'machine.settings.pause-all':

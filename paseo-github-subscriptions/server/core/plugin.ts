@@ -32,7 +32,7 @@ export function startPlugin(server: PluginServerContext, instance: ResolvedInsta
     // 设置页要用这两组 RPC。模块启用时已由模块注册（在模块上下文里），这里只在模块没注册时兜底，不会重复。
     registerAntigravityRpcs({ server, machinePath: machine.path, services });
     registerProviderQuotasRpcs({ server, machinePath: machine.path, services });
-    registerMachineSettingsRpcs({ server, machine, host, services, stateDirectory, baseDirectory });
+    registerMachineSettingsRpcs({ server, machine, host, services, stateDirectory, baseDirectory, sections });
   }
 
   return async () => {

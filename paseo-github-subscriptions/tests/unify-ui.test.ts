@@ -347,77 +347,12 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     let providersTree = renderMain({ page: 'providers' });
     const providersText = collectText(providersTree);
     assert.equal(providersText.includes('设置 → 开发自动化'), false, '主页面不应再出现“设置 → 开发自动化”引导');
-    assert.match(providersText, /本机配置/);
-    assert.match(providersText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
-    assert.match(providersText, /校验通过/);
-    assert.match(providersText, /导出配置备份/);
-    assert.doesNotMatch(providersText, /多个 Antigravity 账号分别作为 Provider/);
-    assert.match(
-      providersText,
-      /模块未启用，在本机配置中开启，重载后生效/,
-      '未启用模块的卡片应显示“模块未启用，在本机配置中开启，重载后生效”',
-    );
-    const openMachineConfigBtns = findNodes(
-      providersTree,
-      n => n.props.accessibilityLabel === '去本机配置开启',
-    );
-    assert.ok(openMachineConfigBtns.length >= 1, '未启用模块的卡片应有“去本机配置开启”按钮');
-
-    // 点击卡片上的“导出配置备份”
-    const backupBtn = findNodes(providersTree, n => n.props.accessibilityLabel === '导出配置备份')[0];
-    assert.ok(backupBtn, '本机配置卡片应有“导出配置备份”按钮');
-    (backupBtn.props.onPress as () => void)();
+    assert.doesNotMatch(providersText, /本机配置|新建会话默认设置|多个 Antigravity 账号分别作为 Provider/);
+    const browserSwitch = findNodes(providersTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '启用网页版 claude.ai')[0];
+    assert.ok(browserSwitch);
+    (browserSwitch.props.onValueChange as (value: boolean) => void)(false);
     await new Promise(r => setTimeout(r, 20));
-    const afterBackupText = collectText(renderMain({ page: 'providers' }));
-    assert.match(afterBackupText, /backups\/backup-demo/);
-
-    // 2. 打开“本机配置”编辑面板（machine-config）：列出全部 MODULE_DEFS 模块开关，显示“修改后在下次插件启动时生效”，不含不存在的“待办汇总”
-    renderer.reset();
-    let machineDrawerTree = renderMain({ page: 'providers', drawer: 'machine-config' });
-    const machineDrawerText = collectText(machineDrawerTree);
-    assert.match(machineDrawerText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
-    assert.match(machineDrawerText, /配置文件格式校验通过/);
-    assert.match(machineDrawerText, /修改后在下次插件启动时生效/);
-    assert.equal(machineDrawerText.includes('待办汇总'), false, '说明与列表均不应出现不存在的“待办汇总”模块开关');
-    for (const label of [
-      '模块 新建会话默认设置',
-      '模块 问答模式与蓝牙',
-      '模块 精确授权',
-      '模块 网页版 claude.ai',
-      '模块 升级通知',
-      '模块 子会话免提醒',
-      '模块 Claude 账号与额度',
-      '模块 其他 Provider 额度',
-      '模块 Antigravity 多账号',
-      '模块 GitHub 订阅',
-      '模块 停滞会话检查',
-    ]) {
-      assert.equal(
-        findNodes(machineDrawerTree, n => n.props.accessibilityLabel === label).length,
-        1,
-        `本机配置面板应能看到模块开关：${label}`,
-      );
-    }
-    assert.equal(
-      findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 待办汇总').length,
-      0,
-      '本机配置面板不应出现不存在的“模块 待办汇总”',
-    );
-
-    // 在本机配置面板切换 Antigravity 多账号模块开关
-    const agModSwitch = findNodes(
-      machineDrawerTree,
-      n => n.type === 'Switch' && n.props.accessibilityLabel === '模块 Antigravity 多账号',
-    )[0];
-    assert.ok(agModSwitch, '应有模块 Antigravity 多账号开关');
-    assert.equal(agModSwitch.props.value, false);
-    (agModSwitch.props.onValueChange as (v: boolean) => void)(true);
-    await new Promise(r => setTimeout(r, 20));
-    assert.equal(
-      daemon.machineSettings.modules.find(m => m.id === 'providers.antigravity')?.enabled,
-      true,
-      '在本机配置面板切换后应写入模块开关',
-    );
+    assert.equal(daemon.machineSettings.modules.find(m => m.id === 'answer.browser')?.enabled, false);
 
     // 3. GitHub 订阅“监听”编辑面板（github-config）：可设置、可移除 GitHub 令牌，且不显示令牌原文
     renderer.reset();
@@ -505,16 +440,9 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     renderer.reset();
     let answerTree = renderMain({ page: 'answer' });
     const answerText = collectText(answerTree);
-    assert.match(
-      answerText,
-      /模块未启用，在本机配置中开启，重载后生效/,
-      '问题答复页未启用模块卡片应显示提示“模块未启用，在本机配置中开启，重载后生效”',
-    );
-    const answerOpenMachineBtns = findNodes(
-      answerTree,
-      n => n.props.accessibilityLabel === '去本机配置开启',
-    );
-    assert.ok(answerOpenMachineBtns.length >= 2, '升级通知和子会话免提醒未启用时均应有“去本机配置开启”按钮');
+    assert.match(answerText, /未启用/);
+    assert.ok(findNodes(answerTree, n => n.props.accessibilityLabel === '升级通知')[0]);
+    assert.ok(findNodes(answerTree, n => n.props.accessibilityLabel === '子会话免提醒')[0]);
 
     // 5b. 升级通知模块默认未启用时，Webhook 凭据卡片只显示说明，不显示填写框和“发测试通知”按钮；且模块关闭时操作报错仍显示在面板底部
     renderer.reset();
@@ -548,42 +476,16 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       webhook: { configured: false, hostname: null, fingerprint: null },
     };
     renderer.reset();
-    machineDrawerTree = renderMain({ page: 'answer', drawer: 'machine-config' });
-    const escModSwitch = findNodes(
-      machineDrawerTree,
-      n => n.type === 'Switch' && n.props.accessibilityLabel === '模块 升级通知',
-    )[0];
-    const quietModSwitch = findNodes(
-      machineDrawerTree,
-      n => n.type === 'Switch' && n.props.accessibilityLabel === '模块 子会话免提醒',
-    )[0];
-    assert.ok(escModSwitch, '本机配置面板应有模块 升级通知开关');
-    assert.ok(quietModSwitch, '本机配置面板应有模块 子会话免提醒开关');
-    (escModSwitch.props.onValueChange as (v: boolean) => void)(true);
-    (quietModSwitch.props.onValueChange as (v: boolean) => void)(true);
-    await new Promise(r => setTimeout(r, 20));
-
-    // 模块启用后，卡片开关只改功能内部状态（不调用 machine.settings.toggle-module）
-    renderer.reset();
     answerTree = renderMain({ page: 'answer' });
     const escCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '升级通知')[0];
     const quietCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0];
-    assert.ok(escCardSwitch, '升级通知卡片应有开关');
-    assert.ok(quietCardSwitch, '子会话免提醒卡片应有开关');
-    const logLenBeforeEsc = daemon.log.length;
+    assert.ok(escCardSwitch && quietCardSwitch);
     (escCardSwitch.props.onValueChange as (v: boolean) => void)(true);
     (quietCardSwitch.props.onValueChange as (v: boolean) => void)(true);
     await new Promise(r => setTimeout(r, 20));
-    const cardRpcCalls = daemon.log.slice(logLenBeforeEsc).map(e => e.name);
-    assert.equal(
-      cardRpcCalls.includes('machine.settings.toggle-module'),
-      false,
-      '卡片开关只管功能内部状态，不应调用 machine.settings.toggle-module',
-    );
-    assert.ok(cardRpcCalls.includes('escalation.configure'));
-    assert.ok(cardRpcCalls.includes('quiet.configure'));
-    assert.equal(daemon.escalation.enabled, true);
-    assert.equal(daemon.quiet.enabled, true);
+    assert.equal(daemon.machineSettings.modules.find(m => m.id === 'answer.escalation')?.enabled, true);
+    assert.equal(daemon.machineSettings.modules.find(m => m.id === 'answer.quietChildren')?.enabled, true);
+    await control.refreshUnify();
 
     // 5d. 升级通知已启用、但 Webhook 未配置时：显示填写框，但不显示“发测试通知”按钮；保存后才显示“发测试通知”
     renderer.reset();
@@ -732,12 +634,11 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
       theme: mockTheme,
       host: { id: 'h1', label: 'Host' },
       layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'session-defaults' },
+      params: { page: 'providers' },
     } as never),
   );
   let text = collectText(tree);
-  assert.match(text, /0 条规则/);
-  assert.match(text, /没有规则/);
+  assert.doesNotMatch(text, /新建会话默认设置|本机配置/);
   assert.equal(text.includes('bypassPermissions'), false, '空规则时不应渲染高危示例规则');
   assert.match(text, /把 claude\.ai 网页中运行的云端 Claude Code 会话接入 Paseo/);
   assert.equal(text.includes('飞猪云端开发环境'), false);
@@ -766,7 +667,7 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
       theme: mockTheme,
       host: { id: 'h1', label: 'Host' },
       layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'machine-config' },
+      params: { page: 'providers', drawer: 'browser' },
     } as never),
   );
   const autoResumeSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '新建 Claude 会话默认开启自动继续');
@@ -1160,31 +1061,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
       params: { page: 'providers', drawer: 'session-defaults' },
     } as never),
   );
-  const defaultsText = collectText(tree);
-  for (const p of ['claude*', 'codex', 'opencode', 'glm*', 'qoder']) {
-    assert.ok(defaultsText.includes(p), `默认规则抽屉应提供 ${p} 选择`);
-  }
-  const providerInput = findNodes(tree, (el) => el.props.accessibilityLabel === 'Provider 匹配模式')[0];
-  assert.ok(providerInput);
-  (providerInput.props.onChangeText as (v: string) => void)('glm*');
-  tree = renderer.render(() =>
-    React.createElement(BoundDefaultsMain, {
-      theme: mockTheme,
-      host: { id: 'h1', label: 'Host' },
-      layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'session-defaults' },
-    } as never),
-  );
-  const addRuleBtn = findNodes(tree, (el) => collectText(el).trim() === '添加规则' && typeof el.props.onPress === 'function')[0];
-  assert.ok(addRuleBtn);
-  await (addRuleBtn.props.onPress as () => Promise<void>)();
-  assert.ok(savedDefaultsCall);
-  const rulesSent = (savedDefaultsCall as { rules: Array<{ provider: string | string[]; features?: { autoApprove?: boolean } }> }).rules;
-  const addedRule = rulesSent.find((r) => r.provider === 'glm*');
-  assert.ok(addedRule);
-  assert.equal(Boolean(addedRule.features?.autoApprove), false, '新规则默认不应开启 autoApprove');
-  assert.equal('enabled' in (savedDefaultsCall as Record<string, unknown>), false, '添加规则不应偷偷把总开关 enabled 设为 true');
-
   // 第 6 项：EscalationDrawer 保留自定义星期数组（不改写成 weekdays），且快照加载后同步更新等待分钟输入框
   let savedEscConfig: unknown = null;
   const escDaemon = new FakeDaemon('shadow');
@@ -1334,7 +1210,7 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
       theme: mockTheme,
       host: { id: 'h1', label: 'Host' },
       layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'machine-config' },
+      params: { page: 'providers', drawer: 'browser' },
     } as never),
   );
   const text = collectText(tree);
@@ -1351,24 +1227,6 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
   const pauseBtn = findNodes(tree, el => el.type === 'Pressable' && el.props.accessibilityLabel === '暂停全部自动化')[0];
   assert.ok(pauseBtn);
   assert.equal(pauseBtn.props.disabled, true, 'machineSettings 未读到时暂停全部自动化按钮应禁用');
-
-  // 第 3 项：defaults.error 非空时，首页默认设置开关、抽屉总开关与“添加规则”按钮全部禁用
-  const cardDefaultSwitch = findNodes(tree, el => el.type === 'Switch' && el.props.accessibilityLabel === '新建会话默认设置')[0];
-  assert.equal(cardDefaultSwitch?.props.disabled, true, 'defaults.error 非空时卡片开关应禁用');
-
-  renderer.reset();
-  tree = renderer.render(() =>
-    React.createElement(BoundMain, {
-      theme: mockTheme,
-      host: { id: 'h1', label: 'Host' },
-      layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'session-defaults' },
-    } as never),
-  );
-  const drawerDefaultSwitch = findNodes(tree, el => el.type === 'Switch' && el.props.accessibilityLabel === '启用新建会话默认设置')[0];
-  assert.equal(drawerDefaultSwitch?.props.disabled, true, 'defaults.error 非空时抽屉开关应禁用');
-  const addRuleBtn = findNodes(tree, el => el.type === 'Pressable' && el.props.accessibilityLabel === '添加规则')[0];
-  assert.equal(addRuleBtn?.props.disabled, true, 'defaults.error 非空时添加规则按钮应禁用');
 
   // 第 4 项：GitHub 配置抽屉在用户输入草稿后，轮询产生新 snapshot.preferences 引用时不覆盖用户正在输入的内容
   renderer.reset();

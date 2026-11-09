@@ -9,7 +9,12 @@ import {
   machineSettingsSnapshot,
   machineSettingsToggleModule,
 } from '../../shared/machine-settings.ts';
-import type { LoadedMachineConfig } from './machine-config.ts';
+import { loadMachineConfig, type LoadedMachineConfig, type SectionSpec } from './machine-config.ts';
+import { MAIN_PLUGIN_ID } from '../../shared/instances.ts';
+import { BrowserSettingsSchema, BrowserBindingInputSchema, BrowserApprovalEventSchema } from '../../shared/browser.ts';
+import { createSettingsStore } from './settings-store.ts';
+import { RuntimeSettingsSchema, ESCALATION_FALLBACK, runtimeDefaults } from '../modules/answer-escalation/config.ts';
+import { QuietSettingsSchema, QUIET_FALLBACK, quietDefaults } from '../modules/answer-quiet-children/config.ts';
 import { exportMachineBackup, patchMachineConfig, readRawMachineConfig } from './machine-writer.ts';
 import type { ModuleHost } from './modules.ts';
 import type { Services } from '../modules/types.ts';
@@ -82,6 +87,8 @@ export function registerMachineSettingsRpcs(options: {
   services: Services;
   stateDirectory: string;
   baseDirectory: string;
+  sections?: Readonly<Record<string, SectionSpec>>;
+  reload?: () => Promise<unknown>;
 }): void {
   const { server, machine, host, services, stateDirectory, baseDirectory } = options;
 
@@ -154,15 +161,66 @@ export function registerMachineSettingsRpcs(options: {
 
   server.handle(machineSettingsSnapshot, () => buildSettingsSnapshot());
 
-  server.handle(machineSettingsToggleModule, async ({ id, enabled }) => {
-    await patchMachineConfig(machine.path, raw => ({
-      ...raw,
-      modules: {
-        ...(raw.modules && typeof raw.modules === 'object' ? (raw.modules as Record<string, unknown>) : {}),
-        [id]: enabled,
-      },
-    }));
-    return buildSettingsSnapshot();
+  let toggleQueue: Promise<unknown> = Promise.resolve();
+  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  server.handle(machineSettingsToggleModule, ({ id, enabled }) => {
+    const run = toggleQueue.then(async () => {
+      if (!MODULE_DEFS.some(def => def.id === id)) throw new Error('未知模块');
+      const checked = loadMachineConfig(machine.path, options.sections ?? {});
+      if (checked.errors.length) throw new Error(`配置无效，未保存：${checked.errors.join('；')}`);
+      // 功能内部开关与模块开关同步，已关闭的模块没有 RPC，直接更新其设置文件。
+      if (id === 'answer.browser' && services.main) {
+        if (host.status().modules.some(m => m.id === id && m.state === 'running')) {
+          const browser = await services.main.readyBrowser();
+          await browser.configure({ ...browser.snapshot().settings, enabled });
+        } else {
+          const path = join(stateDirectory, 'browser-state.json');
+          let state: Record<string, unknown>;
+          try {
+            const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('浏览器状态文件无效');
+            state = parsed as Record<string, unknown>;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器状态文件无效，未保存');
+            state = {};
+          }
+          const settings = BrowserSettingsSchema.parse(state.settings ?? {});
+          const bindings = BrowserBindingInputSchema.extend({ agentId: BrowserBindingInputSchema.shape.agentId.unwrap() }).array().parse(state.bindings ?? []);
+          const approvals = BrowserApprovalEventSchema.array().parse(state.approvals ?? []);
+          await patchMachineConfig(path, raw => ({ ...raw, settings: { ...settings, enabled }, bindings, approvals }));
+        }
+      }
+      if (id === 'answer.escalation') {
+        if (services.main?.escalation) await services.main.escalation.configure({ enabled });
+        else {
+          const store = createSettingsStore(join(stateDirectory, 'escalation', 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(ESCALATION_FALLBACK));
+          if (store.error()) throw new Error(store.error()!);
+          store.update({ enabled });
+        }
+      }
+      if (id === 'answer.quietChildren') {
+        if (services.main?.quiet) await services.main.quiet.configure({ enabled });
+        else {
+          const store = createSettingsStore(join(stateDirectory, 'quiet-children', 'settings.json'), QuietSettingsSchema, quietDefaults(QUIET_FALLBACK));
+          if (store.error()) throw new Error(store.error()!);
+          store.update({ enabled });
+        }
+      }
+      await patchMachineConfig(machine.path, raw => ({
+        ...raw,
+        modules: { ...(raw.modules && typeof raw.modules === 'object' ? raw.modules as Record<string, unknown> : {}), [id]: enabled },
+      }));
+      const result = await buildSettingsSnapshot();
+      // 响应先发送，再通过守护进程重载当前插件；重载会关闭此子进程。
+      clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        const reload = options.reload ?? (async () => (await services.daemon.ready()).client.reloadPlugin(MAIN_PLUGIN_ID));
+        void reload().catch(error => console.error('插件自动重载失败', error));
+      }, 500);
+      return result;
+    });
+    toggleQueue = run.catch(() => {});
+    return run;
   });
 
   let pauseQueue: Promise<unknown> = Promise.resolve();
