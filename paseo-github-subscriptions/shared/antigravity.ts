@@ -1,6 +1,10 @@
 import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 
+/** Provider ID：必须以 antigravity- 开头。内置的 `antigravity` 和其他 Provider（cloud-session、claude 等）因此不会被占用；重复注册会停掉整个 Provider 实例。 */
+export const ANTIGRAVITY_ID_PATTERN = /^antigravity-[a-z0-9][a-z0-9-]{0,31}$/;
+export const ANTIGRAVITY_ID_MESSAGE = 'Provider ID 需以 antigravity- 开头，仅含小写字母、数字和连字符';
+
 export const AntigravityAccountItemSchema = z.object({
   providerId: z.string().min(1),
   label: z.string().min(1),
@@ -25,7 +29,7 @@ export const AntigravityAccountToggleInputSchema = z.object({
 export type AntigravityAccountToggleInput = z.infer<typeof AntigravityAccountToggleInputSchema>;
 
 export const AntigravityAccountAddInputSchema = z.object({
-  providerId: z.string().regex(/^antigravity-[a-z0-9][a-z0-9-]{0,31}$/, 'Provider ID 需以 antigravity- 开头，仅含小写字母、数字和连字符'),
+  providerId: z.string().regex(ANTIGRAVITY_ID_PATTERN, ANTIGRAVITY_ID_MESSAGE),
   label: z.string().min(1),
   homeDir: z.string().min(1).optional(),
   proxy: z.string().min(1).optional(),

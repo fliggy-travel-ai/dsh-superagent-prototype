@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { z } from 'zod';
 import {
@@ -14,6 +12,8 @@ import {
   type ProviderQuotasSnapshot,
   type SkippedConflict,
 } from '../../../shared/provider-quotas.ts';
+import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
+import { backupFile, readJsonStrict, writeJsonFile } from '../../core/provider-config.ts';
 import { isMainInstance, type Module, type Services } from '../types.ts';
 import { normalizeHideBuiltinId } from './hide-builtin.ts';
 import { privateUsageSource } from './server/usage-display.ts';
@@ -70,44 +70,11 @@ const FALLBACK_CONFIG: ProviderQuotasConfig = {
   hideBuiltin: [],
 };
 
-interface PaseoConfigFile {
-  plugins?: Record<string, { enabled?: boolean; source?: string; path?: string }>;
-  [key: string]: unknown;
-}
-
-function readJsonFile<T>(filePath: string): T | null {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf8')) as T;
-  } catch {
-    return null;
-  }
-}
-
-function writeJsonAtomic(filePath: string, data: unknown): void {
-  const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true });
-  const tempPath = `${filePath}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(tempPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-    renameSync(tempPath, filePath);
-  } finally {
-    rmSync(tempPath, { force: true });
-  }
-}
-
-function isLegacyPluginEnabled(
-  plugins: Record<string, { enabled?: boolean }> | undefined,
-  pluginId: string,
-): boolean {
-  if (!plugins || typeof plugins !== 'object') return false;
-  const entry = plugins[pluginId];
-  return Boolean(entry && typeof entry === 'object' && entry.enabled !== false);
-}
-
 /**
- * 同步读取 ~/.paseo/config.json 的 plugins，检查要启用的额度来源是否与仍处于启用状态的旧插件冲突。
- * - provider-quotas-usage-source 仍启用时，全部 7 个来源均冲突；
- * - glm-usage-source 仍启用时（如 Mac Mini），glm 来源冲突。
+ * 检查要启用的额度来源是否与仍启用的旧插件冲突（来源 ID 重复会让整个实例停止）。
+ * - provider-quotas-usage-source 仍启用时，全部来源均冲突；
+ * - glm-usage-source 仍启用时（如 Mac Mini），glm 来源冲突；
+ * - 读不到或无法解析 Paseo 的 config.json 时按“仍启用”处理，全部来源跳过并说明原因。
  */
 export function detectUsageSourceConflicts(
   paseoHome: string,
@@ -116,11 +83,8 @@ export function detectUsageSourceConflicts(
   allowedSources: ProviderQuotaSourceId[];
   skippedConflicts: SkippedConflict[];
 } {
-  const config = readJsonFile<PaseoConfigFile>(join(paseoHome, 'config.json'));
-  const plugins = config?.plugins;
-  const quotasLegacyActive = isLegacyPluginEnabled(plugins, 'provider-quotas-usage-source');
-  const glmLegacyActive = isLegacyPluginEnabled(plugins, 'glm-usage-source');
-
+  const quotas = legacyPluginStatus(paseoHome, 'provider-quotas-usage-source');
+  const glm = legacyPluginStatus(paseoHome, 'glm-usage-source');
   const allowedSources: ProviderQuotaSourceId[] = [];
   const skippedConflicts: SkippedConflict[] = [];
   const seenSources = new Set<string>();
@@ -130,20 +94,12 @@ export function detectUsageSourceConflicts(
     seenSources.add(rawId);
     const sourceId = rawId as ProviderQuotaSourceId;
 
-    if (sourceId === 'glm' && glmLegacyActive) {
-      skippedConflicts.push({
-        sourceId,
-        legacyPluginId: 'glm-usage-source',
-        reason: '旧插件 glm-usage-source 仍启用，已跳过额度来源 glm',
-      });
+    if (sourceId === 'glm' && glm.enabled) {
+      skippedConflicts.push({ sourceId, legacyPluginId: 'glm-usage-source', reason: `${glm.problem ?? '旧插件 glm-usage-source 仍启用'}，已跳过额度来源 glm` });
       continue;
     }
-    if (quotasLegacyActive) {
-      skippedConflicts.push({
-        sourceId,
-        legacyPluginId: 'provider-quotas-usage-source',
-        reason: `旧插件 provider-quotas-usage-source 仍启用，已跳过额度来源 ${sourceId}`,
-      });
+    if (quotas.enabled) {
+      skippedConflicts.push({ sourceId, legacyPluginId: 'provider-quotas-usage-source', reason: `${quotas.problem ?? '旧插件 provider-quotas-usage-source 仍启用'}，已跳过额度来源 ${sourceId}` });
       continue;
     }
     allowedSources.push(sourceId);
@@ -152,62 +108,41 @@ export function detectUsageSourceConflicts(
   return { allowedSources, skippedConflicts };
 }
 
-interface QuotasRuntimeState {
-  reloadRequired: boolean;
-  lastError: string | null;
-}
+/**
+ * “需要重载”由实际注册情况推出：模块启动时记下注册了哪些来源，之后配置里允许的来源集合变了就需要重载；
+ * 重载（重新注册）后自动清除。RPC 单独使用（没有模块注册）时用 touched 作退路。
+ */
+const registeredSources = new WeakMap<Services, Set<string>>();
+const touched = new WeakSet<Services>();
+const lastErrors = new WeakMap<Services, string>();
 
-const runtimeStates = new WeakMap<Services, QuotasRuntimeState>();
-const registeredServices = new WeakSet<Services>();
+const sameSet = (left: ReadonlySet<string>, right: readonly string[]) => left.size === right.length && right.every(id => left.has(id));
 
-function getRuntimeState(services: Services): QuotasRuntimeState {
-  let state = runtimeStates.get(services);
-  if (!state) {
-    state = { reloadRequired: false, lastError: null };
-    runtimeStates.set(services, state);
-  }
-  return state;
-}
-
-function readSnapshotFromDisk(
-  machinePath: string,
-  services: Services,
-  overrideError?: string | null,
-): ProviderQuotasSnapshot {
-  const state = getRuntimeState(services);
-  const rawMachine = existsSync(machinePath) ? readJsonFile<Record<string, unknown>>(machinePath) : null;
-  const modulesMap =
-    rawMachine && typeof rawMachine.modules === 'object' && rawMachine.modules !== null && !Array.isArray(rawMachine.modules)
-      ? (rawMachine.modules as Record<string, unknown>)
-      : {};
+function readSnapshotFromDisk(machinePath: string, services: Services, overrideError?: string | null): ProviderQuotasSnapshot {
+  let rawMachine: Record<string, any> | null = null;
+  let configError: string | null = null;
+  try { rawMachine = readJsonStrict(machinePath); } catch (error) { configError = (error as Error).message.replace('，没有写入', ''); }
+  const modulesMap = rawMachine && typeof rawMachine.modules === 'object' && rawMachine.modules && !Array.isArray(rawMachine.modules) ? rawMachine.modules : {};
   const enabled = modulesMap['usage.providerQuotas'] === true;
 
   let parsedConfig: ProviderQuotasConfig = FALLBACK_CONFIG;
-  let configError: string | null = null;
   if (rawMachine && rawMachine.providerQuotas !== undefined) {
     const parsed = ProviderQuotasConfigSchema.safeParse(rawMachine.providerQuotas);
-    if (parsed.success) {
-      parsedConfig = parsed.data;
-    } else {
-      configError = `machine.json 的 providerQuotas 配置无效：${parsed.error.issues.map(i => i.message).join('；')}`;
-    }
+    if (parsed.success) parsedConfig = parsed.data;
+    else configError ??= `machine.json 的 providerQuotas 配置无效：${parsed.error.issues.map(issue => issue.message).join('；')}`;
   }
 
-  const { skippedConflicts } = detectUsageSourceConflicts(services.home, parsedConfig.enabledSources);
-  const conflictError =
-    skippedConflicts.length > 0 ? skippedConflicts.map(c => c.reason).join('；') : null;
-  const error =
-    overrideError !== undefined
-      ? overrideError
-      : configError ?? conflictError ?? state.lastError;
-
+  const { allowedSources, skippedConflicts } = detectUsageSourceConflicts(services.home, parsedConfig.enabledSources);
+  const conflictError = skippedConflicts.length > 0 ? skippedConflicts.map(conflict => conflict.reason).join('；') : null;
+  const registered = registeredSources.get(services);
   return {
     enabled,
     enabledSources: [...parsedConfig.enabledSources],
     hideBuiltin: [...parsedConfig.hideBuiltin],
+    hideBuiltinApplied: false,
     skippedConflicts,
-    reloadRequired: state.reloadRequired,
-    error,
+    reloadRequired: registered ? !sameSet(registered, allowedSources) : touched.has(services),
+    error: overrideError !== undefined ? overrideError : configError ?? conflictError ?? lastErrors.get(services) ?? null,
   };
 }
 
@@ -217,53 +152,45 @@ export function registerProviderQuotasRpcs(options: {
   services: Services;
 }): void {
   const { server, machinePath, services } = options;
-  if (registeredServices.has(services)) return;
-  registeredServices.add(services);
-
-  const state = getRuntimeState(services);
 
   server.handle(providerQuotasSnapshot, async () => readSnapshotFromDisk(machinePath, services));
 
   server.handle(providerQuotasConfigure, async (input: ProviderQuotasConfigureInput) => {
     const current = readSnapshotFromDisk(machinePath, services);
-    const rawNextSources = input.enabledSources ?? current.enabledSources;
-    const rawNextHideBuiltin = input.hideBuiltin ?? current.hideBuiltin;
-
     const validated = ProviderQuotasConfigSchema.safeParse({
-      enabledSources: rawNextSources,
-      hideBuiltin: rawNextHideBuiltin,
+      enabledSources: input.enabledSources ?? current.enabledSources,
+      hideBuiltin: input.hideBuiltin ?? current.hideBuiltin,
     });
     if (!validated.success) {
-      return readSnapshotFromDisk(
-        machinePath,
-        services,
-        `配置参数无效：${validated.error.issues.map(i => i.message).join('；')}`,
-      );
+      return readSnapshotFromDisk(machinePath, services, `配置参数无效：${validated.error.issues.map(issue => issue.message).join('；')}`);
     }
 
-    const rawMachine: Record<string, unknown> =
-      (existsSync(machinePath) ? readJsonFile<Record<string, unknown>>(machinePath) : null) ?? {
-        version: 1,
-      };
+    // 损坏的 machine.json 不能补成空对象写回；写前先备份。
+    let rawMachine: Record<string, any>;
+    try {
+      rawMachine = readJsonStrict(machinePath) ?? { version: 1 };
+    } catch (error) {
+      const message = (error as Error).message;
+      lastErrors.set(services, message);
+      return readSnapshotFromDisk(machinePath, services, message);
+    }
     if (rawMachine.version === undefined) rawMachine.version = 1;
-
     if (input.enabled !== undefined) {
-      const modulesMap =
-        rawMachine.modules && typeof rawMachine.modules === 'object' && !Array.isArray(rawMachine.modules)
-          ? { ...(rawMachine.modules as Record<string, unknown>) }
-          : {};
+      const modulesMap = rawMachine.modules && typeof rawMachine.modules === 'object' && !Array.isArray(rawMachine.modules) ? { ...rawMachine.modules } : {};
       modulesMap['usage.providerQuotas'] = input.enabled;
       rawMachine.modules = modulesMap;
     }
-
-    rawMachine.providerQuotas = {
-      sources: validated.data.enabledSources,
-      hideBuiltin: validated.data.hideBuiltin,
-    };
-    writeJsonAtomic(machinePath, rawMachine);
-
-    state.reloadRequired = true;
-    state.lastError = null;
+    rawMachine.providerQuotas = { sources: validated.data.enabledSources, hideBuiltin: validated.data.hideBuiltin };
+    try {
+      try { backupFile(machinePath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      writeJsonFile(machinePath, rawMachine);
+    } catch (error) {
+      const message = `无法保存 machine.json：${(error as Error).message}`;
+      lastErrors.set(services, message);
+      return readSnapshotFromDisk(machinePath, services, message);
+    }
+    touched.add(services);
+    lastErrors.delete(services);
     return readSnapshotFromDisk(machinePath, services);
   });
 }
@@ -302,9 +229,12 @@ export const providerQuotasModule: Module<ProviderQuotasConfig> = {
       server.registerUsageSource(privateUsageSource(source, services.home));
     }
 
+    registeredSources.set(services, new Set(registeredIds));
+    touched.delete(services);
+    lastErrors.delete(services);
     if (skippedConflicts.length > 0) {
       const message = skippedConflicts.map(c => c.reason).join('；');
-      getRuntimeState(services).lastError = message;
+      lastErrors.set(services, message);
       context.fail(new Error(message));
     }
   },

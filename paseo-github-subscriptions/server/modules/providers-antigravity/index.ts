@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { z } from 'zod';
 import { runningTurns, type AgentRow } from '../../../scripts/deploy-lib.ts';
 import {
+  ANTIGRAVITY_ID_MESSAGE,
+  ANTIGRAVITY_ID_PATTERN,
   antigravityAccountAdd,
   antigravityAccountToggle,
   antigravitySnapshot,
@@ -13,13 +13,17 @@ import {
   type AntigravityAccountToggleInput,
   type AntigravitySnapshot,
 } from '../../../shared/antigravity.ts';
+import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
+import { backupConfigFile, backupFile, readJsonStrict, restoreFromBackup, verifyProviderEntry, writeJsonFile, writeProviderEntry } from '../../core/provider-config.ts';
 import type { Module, Services } from '../types.ts';
 import { createAntigravityProvider } from './provider.ts';
 
+const ProviderIdSchema = z.string().regex(ANTIGRAVITY_ID_PATTERN, ANTIGRAVITY_ID_MESSAGE);
+
 const RawAntigravityAccountSchema = z
   .object({
-    id: z.string().min(1).optional(),
-    providerId: z.string().min(1).optional(),
+    id: ProviderIdSchema.optional(),
+    providerId: ProviderIdSchema.optional(),
     label: z.string().min(1),
     enabled: z.boolean().optional(),
     command: z.array(z.string().min(1)).nonempty().optional(),
@@ -74,31 +78,8 @@ interface PaseoProviderConfigEntry {
 }
 
 interface PaseoConfigFile {
-  plugins?: Record<string, { enabled?: boolean; source?: string; path?: string }>;
-  agents?: {
-    providers?: Record<string, PaseoProviderConfigEntry>;
-  };
+  agents?: { providers?: Record<string, PaseoProviderConfigEntry> };
   [key: string]: unknown;
-}
-
-function readJsonFile<T>(filePath: string): T | null {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf8')) as T;
-  } catch {
-    return null;
-  }
-}
-
-function writeJsonAtomic(filePath: string, data: unknown): void {
-  const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true });
-  const tempPath = `${filePath}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(tempPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-    renameSync(tempPath, filePath);
-  } finally {
-    rmSync(tempPath, { force: true });
-  }
 }
 
 function normalizeCommand(cmd: string[] | string | undefined): string[] | undefined {
@@ -111,294 +92,162 @@ function normalizeCommand(cmd: string[] | string | undefined): string[] | undefi
 }
 
 /**
- * 检查 ~/.paseo/config.json 中对应的旧 Antigravity 插件是否仍处于启用状态。
- * 例如 providerId 为 antigravity-cy517 时，对应旧插件 ID 为 antigravity-cy517-provider。
+ * 对应的旧 Antigravity 插件（`<providerId>-provider`）是否仍启用。读不到或无法解析 Paseo 配置时按“仍启用”处理，
+ * 否则会重复注册 Provider ID，停掉整个 Provider 实例（含云端会话）。
  */
 export function findLegacyAntigravityConflict(
   paseoHome: string,
   providerId: string,
 ): { legacyPluginId: string; reason: string } | null {
-  const config = readJsonFile<PaseoConfigFile>(join(paseoHome, 'config.json'));
-  const plugins = config?.plugins;
-  if (!plugins || typeof plugins !== 'object') return null;
   const legacyPluginId = `${providerId}-provider`;
-  const entry = plugins[legacyPluginId];
-  if (entry && typeof entry === 'object' && entry.enabled !== false) {
-    return {
-      legacyPluginId,
-      reason: `旧插件 ${legacyPluginId} 仍启用，已跳过注册 ${providerId}`,
-    };
-  }
-  return null;
+  const status = legacyPluginStatus(paseoHome, legacyPluginId);
+  if (!status.enabled) return null;
+  return { legacyPluginId, reason: `${status.problem ?? `旧插件 ${legacyPluginId} 仍启用`}，已跳过注册 ${providerId}` };
 }
 
-interface AntigravityRuntimeState {
-  reloadRequired: boolean;
-  lastError: string | null;
-}
+/**
+ * “需要重载”不存内存标志，而由实际注册情况推出：模块启动时记下注册了哪些账号，
+ * 之后配置里启用的账号集合变了就需要重载；Provider 实例重载（重新注册）后自动清除。
+ */
+const registeredAccounts = new WeakMap<Services, Set<string>>();
+/** RPC 单独使用（没有模块注册）时的退路。 */
+const touched = new WeakSet<Services>();
+const lastErrors = new WeakMap<Services, string>();
 
-const runtimeStates = new WeakMap<Services, AntigravityRuntimeState>();
-const registeredServices = new WeakSet<Services>();
-
-function getRuntimeState(services: Services): AntigravityRuntimeState {
-  let state = runtimeStates.get(services);
-  if (!state) {
-    state = { reloadRequired: false, lastError: null };
-    runtimeStates.set(services, state);
-  }
-  return state;
-}
-
-async function countRunningAntigravitySessions(
-  services: Services,
-  rpcContext?: { paseo?: { agents?: { list?: () => Promise< unknown > } } },
-): Promise<number> {
+async function countRunningAntigravitySessions(services: Services): Promise<number> {
+  // 守护进程没连上时不等（连接最多等 60 秒）：后台触发连接，这次按 0 返回。
+  const connection = services.daemon.current();
+  if (!connection) { void services.daemon.ready().catch(() => {}); return 0; }
   try {
-    const conn = await services.daemon.ready();
-    const client = (conn as unknown as { client?: { fetchAgents?: (opts: unknown) => Promise<{ entries?: Array<{ agent: AgentRow }> }> } })?.client;
-    if (client && typeof client.fetchAgents === 'function') {
-      const page = await client.fetchAgents({
-        filter: { includeArchived: false },
-        page: { limit: 200 },
-        timeout: 5_000,
-      });
-      const rows = (page?.entries ?? []).map(entry => entry.agent);
-      return runningTurns(rows, ['antigravity', 'antigravity-*']).length;
-    }
-  } catch {
-    // 守护进程未连接时回退
-  }
-  try {
-    const listFn = rpcContext?.paseo?.agents?.list;
-    if (typeof listFn === 'function') {
-      const res = (await listFn()) as { agents?: AgentRow[]; entries?: Array<{ agent: AgentRow }> } | AgentRow[];
-      const rows = Array.isArray(res)
-        ? res
-        : Array.isArray(res?.agents)
-          ? res.agents
-          : Array.isArray(res?.entries)
-            ? res.entries.map(e => e.agent)
-            : [];
-      return runningTurns(rows, ['antigravity', 'antigravity-*']).length;
-    }
-  } catch {
-    // 忽略回退查询错误
-  }
-  return 0;
+    const client = (connection as unknown as { client?: { fetchAgents?: (opts: unknown) => Promise<{ entries?: Array<{ agent: AgentRow }> }> } }).client;
+    const page = await client?.fetchAgents?.({ filter: { includeArchived: false }, page: { limit: 200 }, timeout: 3_000 });
+    return runningTurns((page?.entries ?? []).map(entry => entry.agent), ['antigravity', 'antigravity-*']).length;
+  } catch { return 0; }
 }
 
-function readCurrentAntigravitySnapshotData(
-  machinePath: string,
-  paseoHome: string,
-): {
-  enabled: boolean;
-  accounts: AntigravityAccountItem[];
-  conflicts: string[];
-  configError: string | null;
-} {
-  const rawMachine = existsSync(machinePath) ? readJsonFile<Record<string, unknown>>(machinePath) : null;
-  const modulesMap =
-    rawMachine && typeof rawMachine.modules === 'object' && rawMachine.modules !== null && !Array.isArray(rawMachine.modules)
-      ? (rawMachine.modules as Record<string, unknown>)
-      : {};
-  const enabled = modulesMap['providers.antigravity'] === true;
+interface SnapshotData { enabled: boolean; accounts: AntigravityAccountItem[]; enabledIds: string[]; conflicts: string[]; configError: string | null }
 
-  let parsedConfig: AntigravityConfig = FALLBACK_CONFIG;
+function readSnapshotData(machinePath: string, paseoHome: string): SnapshotData {
+  let rawMachine: Record<string, any> | null = null;
+  let paseoConfig: PaseoConfigFile | null = null;
   let configError: string | null = null;
+  try { rawMachine = readJsonStrict(machinePath); } catch (error) { configError = (error as Error).message.replace('，没有写入', ''); }
+  try { paseoConfig = readJsonStrict(join(paseoHome, 'config.json')); } catch (error) { configError ??= (error as Error).message.replace('，没有写入', ''); }
+  const modulesMap = rawMachine && typeof rawMachine.modules === 'object' && rawMachine.modules && !Array.isArray(rawMachine.modules) ? rawMachine.modules : {};
+  let parsed: AntigravityConfig = FALLBACK_CONFIG;
   if (rawMachine && rawMachine.antigravity !== undefined) {
-    const parsed = AntigravityConfigSchema.safeParse(rawMachine.antigravity);
-    if (parsed.success) {
-      parsedConfig = parsed.data;
-    } else {
-      configError = `machine.json 的 antigravity 配置无效：${parsed.error.issues.map(i => i.message).join('；')}`;
-    }
+    const result = AntigravityConfigSchema.safeParse(rawMachine.antigravity);
+    if (result.success) parsed = result.data;
+    else configError ??= `machine.json 的 antigravity 配置无效：${result.error.issues.map(issue => issue.message).join('；')}`;
   }
-
-  const paseoConfig = readJsonFile<PaseoConfigFile>(join(paseoHome, 'config.json'));
-  const providersMap = paseoConfig?.agents?.providers ?? {};
+  const providers = paseoConfig?.agents?.providers ?? {};
   const conflicts: string[] = [];
-
-  const accounts: AntigravityAccountItem[] = parsedConfig.accounts.map(account => {
-    const providerEntry = providersMap[account.providerId];
-    const homeDir = account.homeDir ?? providerEntry?.env?.HOME;
+  const accounts = parsed.accounts.map(account => {
     const conflict = findLegacyAntigravityConflict(paseoHome, account.providerId);
     if (conflict) conflicts.push(conflict.reason);
-    return {
-      providerId: account.providerId,
-      label: account.label,
-      enabled: account.enabled,
-      ...(homeDir ? { homeDir } : {}),
-    };
+    // 实际启动用的是 Paseo 配置里的 env.HOME；machine.json 的 homeDir 只在添加账号时写入 Paseo 配置，之后不影响启动。
+    const homeDir = providers[account.providerId]?.env?.HOME ?? account.homeDir;
+    return { providerId: account.providerId, label: account.label, enabled: account.enabled, ...(homeDir ? { homeDir } : {}) };
   });
-
-  return { enabled, accounts, conflicts, configError };
+  return { enabled: modulesMap['providers.antigravity'] === true, accounts, enabledIds: accounts.filter(account => account.enabled).map(account => account.providerId), conflicts, configError };
 }
 
-export function registerAntigravityRpcs(options: {
+export interface AntigravityRpcOptions {
   server: PluginServerContext;
   machinePath: string;
   services: Services;
-}): void {
+  /** 测试用：替换写文件。 */
+  writeJson?: (path: string, data: unknown) => void;
+}
+
+const sameSet = (left: ReadonlySet<string>, right: readonly string[]) => left.size === right.length && right.every(id => left.has(id));
+
+export function registerAntigravityRpcs(options: AntigravityRpcOptions): void {
   const { server, machinePath, services } = options;
-  if (registeredServices.has(services)) return;
-  registeredServices.add(services);
+  const writeJson = options.writeJson ?? writeJsonFile;
+  const paseoConfigPath = join(services.home, 'config.json');
 
-  const state = getRuntimeState(services);
-
-  const buildSnapshot = async (
-    rpcContext?: unknown,
-    overrideError?: string | null,
-  ): Promise<AntigravitySnapshot> => {
-    const { enabled, accounts, conflicts, configError } = readCurrentAntigravitySnapshotData(
-      machinePath,
-      services.home,
-    );
-    const runningSessionsCount = await countRunningAntigravitySessions(
-      services,
-      rpcContext as { paseo?: { agents?: { list?: () => Promise<unknown> } } },
-    );
-    const error =
-      overrideError !== undefined
-        ? overrideError
-        : configError ?? (conflicts.length > 0 ? conflicts.join('；') : state.lastError);
+  const buildSnapshot = async (overrideError?: string | null): Promise<AntigravitySnapshot> => {
+    const data = readSnapshotData(machinePath, services.home);
+    const registered = registeredAccounts.get(services);
     return {
-      enabled,
-      accounts,
-      runningSessionsCount,
-      reloadRequired: state.reloadRequired,
-      error,
+      enabled: data.enabled,
+      accounts: data.accounts,
+      runningSessionsCount: await countRunningAntigravitySessions(services),
+      reloadRequired: registered ? !sameSet(registered, data.enabledIds) : touched.has(services),
+      error: overrideError !== undefined ? overrideError : data.configError ?? (data.conflicts.length > 0 ? data.conflicts.join('；') : lastErrors.get(services) ?? null),
     };
   };
+  const fail = (message: string) => { lastErrors.set(services, message); return buildSnapshot(message); };
+  const ok = () => { lastErrors.delete(services); return buildSnapshot(null); };
 
-  server.handle(antigravitySnapshot, async (_input, rpcContext) => buildSnapshot(rpcContext));
+  server.handle(antigravitySnapshot, async () => buildSnapshot());
 
-  server.handle(antigravityAccountToggle, async (input: AntigravityAccountToggleInput, rpcContext) => {
-    const rawMachine: Record<string, unknown> =
-      (existsSync(machinePath) ? readJsonFile<Record<string, unknown>>(machinePath) : null) ?? {
-        version: 1,
-      };
-    if (rawMachine.version === undefined) rawMachine.version = 1;
-
-    const antigravitySection: Record<string, unknown> =
-      rawMachine.antigravity && typeof rawMachine.antigravity === 'object' && !Array.isArray(rawMachine.antigravity)
-        ? { ...(rawMachine.antigravity as Record<string, unknown>) }
-        : { accounts: [] };
-    const rawAccounts = Array.isArray(antigravitySection.accounts)
-      ? [...(antigravitySection.accounts as Array<Record<string, unknown>>)]
-      : [];
-
-    const idx = rawAccounts.findIndex(
-      item => item && typeof item === 'object' && (item.providerId === input.providerId || item.id === input.providerId),
-    );
-    if (idx === -1) {
-      return buildSnapshot(rpcContext, `未找到账号 ${input.providerId}`);
+  /** 启停：只发 { providers: { [id]: { enabled } } } 并检查返回；机器配置先备份，失败就恢复。 */
+  server.handle(antigravityAccountToggle, async (input: AntigravityAccountToggleInput) => {
+    let rawMachine: Record<string, any> | null;
+    try { rawMachine = readJsonStrict(machinePath); } catch (error) { return fail((error as Error).message); }
+    const accounts: Array<Record<string, unknown>> = Array.isArray(rawMachine?.antigravity?.accounts) ? [...rawMachine!.antigravity.accounts] : [];
+    const index = accounts.findIndex(item => item && (item.providerId === input.providerId || item.id === input.providerId));
+    if (!rawMachine || index === -1) return fail(`未找到账号 ${input.providerId}`);
+    const original = JSON.stringify(rawMachine);
+    let backup: string;
+    try {
+      backup = backupFile(machinePath);
+      accounts[index] = { ...accounts[index], enabled: input.enabled };
+      writeJson(machinePath, { ...rawMachine, antigravity: { ...rawMachine.antigravity, accounts } });
+    } catch (error) { return fail(`无法保存 machine.json：${(error as Error).message}`); }
+    try {
+      const { client } = await services.daemon.ready();
+      const result = await (client as unknown as { patchDaemonConfig(patch: unknown): Promise<{ config?: { providers?: Record<string, { enabled?: boolean }> } }> })
+        .patchDaemonConfig({ providers: { [input.providerId]: { enabled: input.enabled } } });
+      if (result?.config?.providers?.[input.providerId]?.enabled !== input.enabled) throw new Error('守护进程返回的启用状态与请求不一致');
+    } catch (error) {
+      try { restoreFromBackup(backup, machinePath); } catch { /* 恢复失败时备份仍在 */ }
+      return fail(`启停没有生效：${(error as Error).message}。machine.json 已恢复（备份 ${backup}）`);
     }
-
-    rawAccounts[idx] = {
-      ...rawAccounts[idx],
-      enabled: input.enabled,
-    };
-    antigravitySection.accounts = rawAccounts;
-    rawMachine.antigravity = antigravitySection;
-    writeJsonAtomic(machinePath, rawMachine);
-
-    // 同步更新 ~/.paseo/config.json 中的 agents.providers[providerId].enabled
-    const paseoConfigPath = join(services.home, 'config.json');
-    const paseoConfig: PaseoConfigFile = readJsonFile<PaseoConfigFile>(paseoConfigPath) ?? {};
-    const agents =
-      paseoConfig.agents && typeof paseoConfig.agents === 'object' ? { ...paseoConfig.agents } : {};
-    const providers =
-      agents.providers && typeof agents.providers === 'object' ? { ...agents.providers } : {};
-    if (providers[input.providerId]) {
-      providers[input.providerId] = {
-        ...providers[input.providerId],
-        enabled: input.enabled,
-      };
-      agents.providers = providers;
-      paseoConfig.agents = agents;
-      writeJsonAtomic(paseoConfigPath, paseoConfig);
-    }
-
-    const patchFn = (rpcContext as { paseo?: { config?: { patch?: (p: unknown) => Promise<unknown> } } })?.paseo?.config?.patch;
-    if (typeof patchFn === 'function' && providers[input.providerId]) {
-      await patchFn({ agents: { providers } }).catch(() => undefined);
-    }
-
-    state.reloadRequired = true;
-    state.lastError = null;
-    return buildSnapshot(rpcContext);
+    touched.add(services);
+    return ok();
   });
 
-  server.handle(antigravityAccountAdd, async (input: AntigravityAccountAddInput, rpcContext) => {
-    const rawMachine: Record<string, unknown> =
-      (existsSync(machinePath) ? readJsonFile<Record<string, unknown>>(machinePath) : null) ?? {
-        version: 1,
-      };
-    if (rawMachine.version === undefined) rawMachine.version = 1;
+  /**
+   * 新增账号：Provider 的 command、env、label 不在 config.patch 支持范围内，直接写 Paseo 的 config.json。
+   * 顺序：备份两处 → 写 config.json → 写 machine.json；第二处失败就用备份恢复第一处。生效需要重载。
+   */
+  server.handle(antigravityAccountAdd, async (input: AntigravityAccountAddInput) => {
+    let rawMachine: Record<string, any> | null;
+    let paseoConfig: PaseoConfigFile | null;
+    try {
+      rawMachine = readJsonStrict(machinePath) ?? { version: 1 };
+      paseoConfig = readJsonStrict(paseoConfigPath);
+    } catch (error) { return fail((error as Error).message); }
+    if (!paseoConfig) return fail('Paseo 的 config.json 不存在，没有写入');
+    const accounts: Array<Record<string, unknown>> = Array.isArray(rawMachine?.antigravity?.accounts) ? [...rawMachine!.antigravity.accounts] : [];
+    if (accounts.some(item => item && (item.providerId === input.providerId || item.id === input.providerId))) return fail(`账号 ${input.providerId} 已存在`);
 
-    const antigravitySection: Record<string, unknown> =
-      rawMachine.antigravity && typeof rawMachine.antigravity === 'object' && !Array.isArray(rawMachine.antigravity)
-        ? { ...(rawMachine.antigravity as Record<string, unknown>) }
-        : { accounts: [] };
-    const rawAccounts = Array.isArray(antigravitySection.accounts)
-      ? [...(antigravitySection.accounts as Array<Record<string, unknown>>)]
-      : [];
-
-    const exists = rawAccounts.some(
-      item => item && typeof item === 'object' && (item.providerId === input.providerId || item.id === input.providerId),
-    );
-    if (exists) {
-      return buildSnapshot(rpcContext, `账号 ${input.providerId} 已存在`);
+    const existing = paseoConfig.agents?.providers?.[input.providerId] ?? {};
+    const env: Record<string, string> = { ...(existing.env ?? {}) };
+    if (input.homeDir) env.HOME = input.homeDir;
+    if (input.proxy) { env.HTTPS_PROXY = input.proxy; env.HTTP_PROXY = input.proxy; }
+    const entry = { ...existing, enabled: true, label: input.label, command: input.command ?? normalizeCommand(existing.command) ?? ['agy'], ...(Object.keys(env).length > 0 ? { env } : {}) };
+    const configBackup = backupConfigFile(services.home);
+    try {
+      if (readJsonStrict(machinePath)) backupFile(machinePath);
+      writeProviderEntry(services.home, input.providerId, entry);
+      verifyProviderEntry(services.home, input.providerId, entry, configBackup);
+    } catch (error) {
+      try { restoreFromBackup(configBackup, paseoConfigPath); } catch { /* 备份仍在 */ }
+      return fail(`无法写入 Paseo 配置：${(error as Error).message}`);
     }
-
-    const newAccountEntry: Record<string, unknown> = {
-      id: input.providerId,
-      providerId: input.providerId,
-      label: input.label,
-      enabled: true,
-      ...(input.command ? { command: input.command } : {}),
-      ...(input.homeDir ? { homeDir: input.homeDir } : {}),
-      ...(input.proxy ? { proxy: input.proxy } : {}),
-    };
-    rawAccounts.push(newAccountEntry);
-    antigravitySection.accounts = rawAccounts;
-    rawMachine.antigravity = antigravitySection;
-    writeJsonAtomic(machinePath, rawMachine);
-
-    // 写入 ~/.paseo/config.json 的 agents.providers[providerId]
-    const paseoConfigPath = join(services.home, 'config.json');
-    const paseoConfig: PaseoConfigFile = readJsonFile<PaseoConfigFile>(paseoConfigPath) ?? {};
-    const agents =
-      paseoConfig.agents && typeof paseoConfig.agents === 'object' ? { ...paseoConfig.agents } : {};
-    const providers =
-      agents.providers && typeof agents.providers === 'object' ? { ...agents.providers } : {};
-    const existingEntry = providers[input.providerId] ?? {};
-    const nextEnv: Record<string, string> = { ...(existingEntry.env ?? {}) };
-    if (input.homeDir) nextEnv.HOME = input.homeDir;
-    if (input.proxy) {
-      nextEnv.HTTPS_PROXY = input.proxy;
-      nextEnv.HTTP_PROXY = input.proxy;
+    try {
+      accounts.push({ id: input.providerId, providerId: input.providerId, label: input.label, enabled: true, ...(input.command ? { command: input.command } : {}), ...(input.homeDir ? { homeDir: input.homeDir } : {}), ...(input.proxy ? { proxy: input.proxy } : {}) });
+      writeJson(machinePath, { ...rawMachine, antigravity: { ...(rawMachine!.antigravity ?? {}), accounts } });
+    } catch (error) {
+      try { restoreFromBackup(configBackup, paseoConfigPath); } catch { /* 备份仍在 */ }
+      return fail(`无法保存 machine.json：${(error as Error).message}。Paseo 的 config.json 已恢复（备份 ${configBackup}）`);
     }
-    const existingCmd = normalizeCommand(existingEntry.command);
-    providers[input.providerId] = {
-      ...existingEntry,
-      enabled: true,
-      label: input.label,
-      command: input.command ?? existingCmd ?? ['agy'],
-      ...(Object.keys(nextEnv).length > 0 ? { env: nextEnv } : {}),
-    };
-    agents.providers = providers;
-    paseoConfig.agents = agents;
-    writeJsonAtomic(paseoConfigPath, paseoConfig);
-
-    const patchFn = (rpcContext as { paseo?: { config?: { patch?: (p: unknown) => Promise<unknown> } } })?.paseo?.config?.patch;
-    if (typeof patchFn === 'function') {
-      await patchFn({ agents: { providers } }).catch(() => undefined);
-    }
-
-    state.reloadRequired = true;
-    state.lastError = null;
-    return buildSnapshot(rpcContext);
+    touched.add(services);
+    return ok();
   });
 }
 
@@ -411,43 +260,31 @@ export const antigravityModule: Module<AntigravityConfig> = {
   label: 'Antigravity 多账号',
   defaultEnabled: false,
   appliesTo: instance => instance.hostsProviders,
-  config: {
-    section: 'antigravity',
-    spec: {
-      schema: AntigravityConfigSchema,
-      fallback: FALLBACK_CONFIG,
-    },
-  },
+  config: { section: 'antigravity', spec: { schema: AntigravityConfigSchema, fallback: FALLBACK_CONFIG } },
   register(context) {
     const { server, config, machine, services } = context;
     registerAntigravityRpcs({ server, machinePath: machine.path, services });
 
-    const paseoConfig = readJsonFile<PaseoConfigFile>(join(services.home, 'config.json'));
-    const providersMap = paseoConfig?.agents?.providers ?? {};
+    let providersMap: Record<string, PaseoProviderConfigEntry> = {};
+    try { providersMap = (readJsonStrict(join(services.home, 'config.json')) as PaseoConfigFile | null)?.agents?.providers ?? {}; } catch { /* 下面的冲突检查会报告 */ }
     const conflicts: string[] = [];
+    const registered = new Set<string>();
 
     for (const account of config.accounts) {
       if (!account.enabled) continue;
       const conflict = findLegacyAntigravityConflict(services.home, account.providerId);
-      if (conflict) {
-        conflicts.push(conflict.reason);
-        continue;
-      }
-      const configuredCmd =
-        account.command ?? normalizeCommand(providersMap[account.providerId]?.command);
-      server.registerProvider(
-        createAntigravityProvider({
-          providerId: account.providerId,
-          label: account.label,
-          command: configuredCmd,
-          description: account.description,
-        }),
-      );
+      if (conflict) { conflicts.push(conflict.reason); continue; }
+      const configuredCmd = account.command ?? normalizeCommand(providersMap[account.providerId]?.command);
+      server.registerProvider(createAntigravityProvider({ providerId: account.providerId, label: account.label, command: configuredCmd, description: account.description }));
+      registered.add(account.providerId);
     }
+    registeredAccounts.set(services, registered);
+    touched.delete(services);
+    lastErrors.delete(services);
 
     if (conflicts.length > 0) {
       const message = conflicts.join('；');
-      getRuntimeState(services).lastError = message;
+      lastErrors.set(services, message);
       context.fail(new Error(message));
     }
   },

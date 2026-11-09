@@ -58,7 +58,8 @@ export function readRoleFile(content: string | null): InstanceRole | null {
 export function providersHostedBy(role: InstanceRole | null): string[] {
   if (role === 'main') return [];
   if (role === 'provider') return ['cloud-session', 'antigravity-*'];
-  return ['cloud-session'];
+  // 兼容模式：主实例同时托管云端会话和（打开模块时）Antigravity，重载前都要检查运行中的轮次。
+  return ['cloud-session', 'antigravity-*'];
 }
 
 export interface AgentRow { id: string; name?: string; provider: string; status: string }

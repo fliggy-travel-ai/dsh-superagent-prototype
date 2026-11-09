@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { writeJsonFile } from '../server/core/provider-config.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
@@ -20,6 +21,8 @@ function createFakeEnv(options: {
   machineJson?: Record<string, unknown>;
   paseoConfigJson?: Record<string, unknown>;
   runningAgents?: Array<{ id: string; provider: string; status: string }>;
+  patch?: (patch: unknown) => Promise<unknown>;
+  neverConnect?: boolean;
 }) {
   const root = mkdtempSync(join(tmpdir(), 'ghsub-agy-test-'));
   const machinePath = join(root, 'machine.json');
@@ -45,9 +48,12 @@ function createFakeEnv(options: {
     },
   } as unknown as PluginServerContext;
 
-  const daemon = new SharedDaemon(root, (async () => ({
+  const daemon = new SharedDaemon(root, (async () => {
+    if (options.neverConnect) await new Promise(() => {});
+    return {
     paseo: {} as never,
     client: {
+      patchDaemonConfig: async (patch: unknown) => (options.patch ? options.patch(patch) : { requestId: 'r', config: { providers: Object.fromEntries(Object.entries((patch as { providers: Record<string, unknown> }).providers)) } }),
       fetchAgents: async () => ({
         entries: (options.runningAgents ?? []).map(agent => ({ agent })),
         pageInfo: { hasMore: false },
@@ -56,7 +62,8 @@ function createFakeEnv(options: {
     approve: async () => {},
     respond: async () => {},
     async close() {},
-  })) as never);
+    };
+  }) as never);
 
   const services: Services = { home: root, daemon, main: null };
   const sections = {
@@ -192,116 +199,136 @@ test('providers.antigravity：旧插件仍启用时跳过对应账号并标记�
   assert.match(modStatus?.reason ?? '', /antigravity-cy517-provider/);
 });
 
-test('antigravity.* RPC：snapshot、account.add（写两处配置）与 account.toggle 返回 reloadRequired: true', async () => {
-  const { root, machinePath, handlers, server, services } = createFakeEnv({
-    machineJson: {
-      version: 1,
-      modules: { 'providers.antigravity': true },
-      antigravity: {
-        accounts: [
-          { id: 'antigravity-cy517', label: 'Antigravity · 账号一', homeDir: '~/.agy-1' },
-        ],
-      },
-    },
-    paseoConfigJson: {
-      agents: {
-        providers: {
-          'antigravity-cy517': {
-            enabled: true,
-            label: 'Antigravity · 账号一',
-            command: ['/usr/local/bin/agy-paseo'],
-            env: { HOME: '~/.agy-1' },
-          },
-        },
-      },
-    },
-    runningAgents: [
-      { id: 'a1', provider: 'antigravity-cy517/gemini-3.8', status: 'running' },
-      { id: 'a2', provider: 'antigravity-beibeimao', status: 'idle' },
-      { id: 'a3', provider: 'codex', status: 'running' },
-    ],
-  });
+const baseMachine = {
+  version: 1,
+  modules: { 'providers.antigravity': true },
+  antigravity: { accounts: [{ id: 'antigravity-cy517', label: 'Antigravity · 账号一', homeDir: '~/.agy-machine' }] },
+};
+const basePaseo = { agents: { providers: { 'antigravity-cy517': { enabled: true, label: 'Antigravity · 账号一', command: ['/usr/local/bin/agy-paseo'], env: { HOME: '~/.agy-1' } } } } };
+const readMachine = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
+const backupsOf = (dir: string, name: string) => readdirSync(dir).filter(file => file.startsWith(`${name}.bak-`));
 
+test('antigravity.snapshot：运行中会话数、账号列表；显示实际生效的 HOME（Paseo 配置优先于 machine.json）', async () => {
+  const { handlers, server, services, machinePath } = createFakeEnv({
+    machineJson: baseMachine, paseoConfigJson: basePaseo,
+    runningAgents: [{ id: 'a1', provider: 'antigravity-cy517/gemini-3.8', status: 'running' }, { id: 'a2', provider: 'antigravity-beibeimao', status: 'idle' }, { id: 'a3', provider: 'codex', status: 'running' }],
+  });
   registerAntigravityRpcs({ server, machinePath, services });
+  await services.daemon.ready();
+  const snapshot = await handlers.get('antigravity.snapshot')!({});
+  assert.equal(snapshot.enabled, true);
+  assert.equal(snapshot.runningSessionsCount, 1);
+  assert.equal(snapshot.reloadRequired, false);
+  assert.equal(snapshot.error, null);
+  assert.deepEqual(snapshot.accounts, [{ providerId: 'antigravity-cy517', label: 'Antigravity · 账号一', enabled: true, homeDir: '~/.agy-1' }]);
+});
 
-  // 1. 初始快照
-  const initial = await handlers.get('antigravity.snapshot')!({});
-  assert.equal(initial.enabled, true);
-  assert.equal(initial.reloadRequired, false);
-  assert.equal(initial.runningSessionsCount, 1);
-  assert.equal(initial.error, null);
-  assert.deepEqual(initial.accounts, [
-    {
-      providerId: 'antigravity-cy517',
-      label: 'Antigravity · 账号一',
-      enabled: true,
-      homeDir: '~/.agy-1',
-    },
-  ]);
+test('antigravity.snapshot：守护进程没连上时不等待，运行中会话数按 0 返回', async () => {
+  const { handlers, server, services, machinePath } = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo, neverConnect: true });
+  registerAntigravityRpcs({ server, machinePath, services });
+  const started = Date.now();
+  const snapshot = await handlers.get('antigravity.snapshot')!({});
+  assert.ok(Date.now() - started < 1500, `耗时 ${Date.now() - started}ms`);
+  assert.equal(snapshot.runningSessionsCount, 0);
+});
 
-  // 2. 添加新账号：同时写 machine.json 与 config.json，并调用 paseo.config.patch
-  const patched: unknown[] = [];
-  const afterAdd = await handlers.get('antigravity.account.add')!(
-    {
-      providerId: 'antigravity-beibeimao',
-      label: 'Antigravity · 账号二',
-      homeDir: '~/.agy-2',
-      proxy: 'http://127.0.0.1:7897',
-    },
-    {
-      paseo: {
-        config: {
-          patch: async (payload: unknown) => {
-            patched.push(payload);
-          },
-        },
-      },
-    },
-  );
+test('machine.json 里的账号 ID 必须符合 antigravity- 规则：antigravity、cloud-session、claude 等会重复注册的 ID 被拒绝，不注册任何 Provider', () => {
+  for (const id of ['antigravity', 'cloud-session', 'claude', 'codex', 'Antigravity-x', 'antigravity-']) {
+    const { providers, server, services, machine, root } = createFakeEnv({ machineJson: { version: 1, modules: { 'providers.antigravity': true }, antigravity: { accounts: [{ id, label: 'x' }] } } });
+    const host = startModules([antigravityModule], { server, instance: resolveInstance('provider'), machine, services, stateDirectory: root, baseDirectory: root });
+    assert.equal(host.status().modules[0]?.state, 'error', id);
+    assert.deepEqual(providers, [], id);
+  }
+});
 
-  assert.equal(afterAdd.reloadRequired, true);
-  assert.equal(afterAdd.error, null);
-  assert.equal(afterAdd.accounts.length, 2);
-  assert.deepEqual(afterAdd.accounts[1], {
-    providerId: 'antigravity-beibeimao',
-    label: 'Antigravity · 账号二',
-    enabled: true,
-    homeDir: '~/.agy-2',
+test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：不注册账号，模块出错', () => {
+  const { providers, server, services, machine, root } = createFakeEnv({ machineJson: baseMachine });
+  writeFileSync(join(root, 'config.json'), '{坏');
+  const host = startModules([antigravityModule], { server, instance: resolveInstance('provider'), machine, services, stateDirectory: root, baseDirectory: root });
+  assert.deepEqual(providers, []);
+  assert.equal(host.status().modules[0]?.state, 'error');
+  assert.match(host.status().modules[0]?.reason ?? '', /config\.json 无法解析/);
+});
+
+test('account.add：机器配置或 Paseo 配置损坏时报错，什么都不写', async () => {
+  for (const broken of ['machine', 'paseo'] as const) {
+    const { root, machinePath, handlers, server, services } = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo });
+    registerAntigravityRpcs({ server, machinePath, services });
+    const target = broken === 'machine' ? machinePath : join(root, 'config.json');
+    writeFileSync(target, '{坏');
+    const other = broken === 'machine' ? join(root, 'config.json') : machinePath;
+    const before = readFileSync(other, 'utf8');
+    const result = await handlers.get('antigravity.account.add')!({ providerId: 'antigravity-new', label: 'Antigravity · 新' });
+    assert.match(result.error, /无法解析/);
+    assert.equal(readFileSync(target, 'utf8'), '{坏');
+    assert.equal(readFileSync(other, 'utf8'), before);
+  }
+});
+
+test('account.add：先备份两处配置，直接写 Paseo 配置（command/env/label）再写机器配置，提示需要重载；不用 config.patch', async () => {
+  const patches: unknown[] = [];
+  const { root, machinePath, handlers, server, services } = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo, patch: async p => { patches.push(p); return { config: {} }; } });
+  registerAntigravityRpcs({ server, machinePath, services });
+  const result = await handlers.get('antigravity.account.add')!({ providerId: 'antigravity-beibeimao', label: 'Antigravity · 账号二', homeDir: '~/.agy-2', proxy: 'http://127.0.0.1:7897' });
+  assert.equal(result.error, null);
+  assert.equal(result.reloadRequired, true);
+  assert.deepEqual(result.accounts[1], { providerId: 'antigravity-beibeimao', label: 'Antigravity · 账号二', enabled: true, homeDir: '~/.agy-2' });
+  assert.deepEqual(patches, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-beibeimao'], {
+    enabled: true, label: 'Antigravity · 账号二', command: ['agy'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
   });
-  assert.equal(patched.length, 1);
+  assert.equal(readMachine(machinePath).antigravity.accounts[1].providerId, 'antigravity-beibeimao');
+  assert.equal(backupsOf(root, 'config.json').length, 1);
+  assert.equal(backupsOf(root, 'machine.json').length, 1);
+  const duplicate = await handlers.get('antigravity.account.add')!({ providerId: 'antigravity-beibeimao', label: '重复' });
+  assert.match(duplicate.error, /已存在/);
+  const invalid = handlers.get('antigravity.account.add');
+  assert.ok(invalid);
+});
 
-  const savedMachine = JSON.parse(readFileSync(machinePath, 'utf8'));
-  assert.equal(savedMachine.antigravity.accounts.length, 2);
-  assert.equal(savedMachine.antigravity.accounts[1].providerId, 'antigravity-beibeimao');
+test('account.add：第二处（机器配置）写入失败时，用备份恢复第一处（Paseo 配置）', async () => {
+  const { root, machinePath, handlers, server, services } = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo });
+  const before = readFileSync(join(root, 'config.json'), 'utf8');
+  registerAntigravityRpcs({ server, machinePath, services, writeJson: (path, data) => { if (path === machinePath) throw new Error('磁盘已满'); writeJsonFile(path, data); } });
+  const result = await handlers.get('antigravity.account.add')!({ providerId: 'antigravity-new', label: 'Antigravity · 新' });
+  assert.match(result.error, /磁盘已满.*已恢复/);
+  assert.equal(readFileSync(join(root, 'config.json'), 'utf8'), before);
+  assert.equal(readMachine(machinePath).antigravity.accounts.length, 1);
+});
 
-  const savedPaseoConfig = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8'));
-  assert.deepEqual(savedPaseoConfig.agents.providers['antigravity-beibeimao'], {
-    enabled: true,
-    label: 'Antigravity · 账号二',
-    command: ['agy'],
-    env: {
-      HOME: '~/.agy-2',
-      HTTPS_PROXY: 'http://127.0.0.1:7897',
-      HTTP_PROXY: 'http://127.0.0.1:7897',
-    },
-  });
+test('account.toggle：先备份机器配置，只发 { providers: { [id]: { enabled } } } 并检查返回', async () => {
+  const patches: unknown[] = [];
+  const { root, machinePath, handlers, server, services } = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo, patch: async p => { patches.push(p); return { requestId: 'r', config: { providers: { 'antigravity-cy517': { enabled: false } } } }; } });
+  registerAntigravityRpcs({ server, machinePath, services });
+  const result = await handlers.get('antigravity.account.toggle')!({ providerId: 'antigravity-cy517', enabled: false });
+  assert.deepEqual(patches, [{ providers: { 'antigravity-cy517': { enabled: false } } }]);
+  assert.equal(result.error, null);
+  assert.equal(result.accounts[0].enabled, false);
+  assert.equal(result.reloadRequired, true);
+  assert.equal(readMachine(machinePath).antigravity.accounts[0].enabled, false);
+  assert.equal(backupsOf(root, 'machine.json').length, 1);
+  assert.equal(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-cy517'].enabled, true, '不再直接改 Paseo 配置，由守护进程保存');
+});
 
-  // 3. 重复添加同名账号返回错误且不破坏列表
-  const duplicateAdd = await handlers.get('antigravity.account.add')!({
-    providerId: 'antigravity-beibeimao',
-    label: '重复账号',
-  });
-  assert.match(duplicateAdd.error ?? '', /已存在/);
-  assert.equal(duplicateAdd.accounts.length, 2);
+test('account.toggle：补丁失败或返回值与请求不符时，机器配置恢复原样并报错', async () => {
+  for (const patch of [async () => { throw new Error('守护进程拒绝'); }, async () => ({ config: { providers: { 'antigravity-cy517': { enabled: true } } } }), async () => ({ config: {} })]) {
+    const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo, patch });
+    const before = readFileSync(machinePath, 'utf8');
+    registerAntigravityRpcs({ server, machinePath, services });
+    const result = await handlers.get('antigravity.account.toggle')!({ providerId: 'antigravity-cy517', enabled: false });
+    assert.match(result.error, /没有生效.*machine\.json 已恢复/);
+    assert.equal(readFileSync(machinePath, 'utf8'), before);
+    assert.equal(result.accounts[0].enabled, true);
+  }
+});
 
-  // 4. 切换账号启用状态：更新两处配置并返回 reloadRequired: true
-  const afterToggle = await handlers.get('antigravity.account.toggle')!({
-    providerId: 'antigravity-beibeimao',
-    enabled: false,
-  });
-  assert.equal(afterToggle.reloadRequired, true);
-  assert.equal(afterToggle.accounts[1]?.enabled, false);
-
-  const toggledPaseoConfig = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8'));
-  assert.equal(toggledPaseoConfig.agents.providers['antigravity-beibeimao'].enabled, false);
+test('“需要重载”由实际注册情况推出：配置变化后为 true，重载（重新注册）后自动清除', async () => {
+  const env = createFakeEnv({ machineJson: baseMachine, paseoConfigJson: basePaseo });
+  const start = () => startModules([antigravityModule], { server: env.server, instance: resolveInstance('provider'), machine: loadMachineConfig(env.machinePath, { [antigravityModule.config!.section]: antigravityModule.config!.spec }), services: env.services, stateDirectory: env.root, baseDirectory: env.root });
+  start();
+  assert.equal((await env.handlers.get('antigravity.snapshot')!({})).reloadRequired, false);
+  await env.handlers.get('antigravity.account.toggle')!({ providerId: 'antigravity-cy517', enabled: false });
+  assert.equal((await env.handlers.get('antigravity.snapshot')!({})).reloadRequired, true);
+  start();
+  assert.equal((await env.handlers.get('antigravity.snapshot')!({})).reloadRequired, false);
 });

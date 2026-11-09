@@ -32,6 +32,8 @@ export const ProviderQuotasSnapshotSchema = z.object({
   enabled: z.boolean(),
   enabledSources: z.array(z.string()),
   hideBuiltin: z.array(z.string()),
+  /** 隐藏内置额度来源的过滤还没有实现：hideBuiltin 目前只保存配置，不会隐藏任何来源。 */
+  hideBuiltinApplied: z.boolean(),
   skippedConflicts: z.array(SkippedConflictSchema),
   reloadRequired: z.boolean(),
   error: z.string().nullable(),

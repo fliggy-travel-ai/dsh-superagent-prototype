@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../server/modules/usage-claude-accounts/config-writer.ts';
+import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../server/core/provider-config.ts';
 
 function setup(config: unknown = { version: 1, agents: { providers: { claude: { label: 'Claude' }, 'claude-2': { extends: 'claude', label: 'old', env: { A: '1' } } } }, other: true }) {
   const home = mkdtempSync(join(tmpdir(), 'config-writer-'));
@@ -56,5 +56,34 @@ test('读回核对：extends 和配置目录不一致时报错并提示备份', 
     assert.throws(() => verifyProviderEntry(home, 'claude-3', { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/u/.claude-3' } }, '/b'), /env/);
     writeFileSync(join(home, 'config.json'), JSON.stringify({ agents: { providers: { 'claude-3': { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/u/.claude-3', X: '1' }, label: 'l' } } } }));
     verifyProviderEntry(home, 'claude-3', { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/u/.claude-3', X: '1' }, label: 'l' }, '/b');
+  } finally { done(); }
+});
+
+import { backupFile, readJsonStrict, restoreFromBackup, writeJsonFile } from '../server/core/provider-config.ts';
+
+test('严格读取：不存在返回 null；存在但无法解析时抛错，不当作空对象', () => {
+  const { home, done } = setup();
+  try {
+    assert.equal(readJsonStrict(join(home, 'missing.json')), null);
+    assert.deepEqual(readJsonStrict(join(home, 'config.json')), JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')));
+    writeFileSync(join(home, 'broken.json'), '{坏');
+    assert.throws(() => readJsonStrict(join(home, 'broken.json')), /broken\.json 无法解析/);
+    mkdirSync(join(home, 'dir.json'));
+    assert.throws(() => readJsonStrict(join(home, 'dir.json')), /无法读取/);
+  } finally { done(); }
+});
+
+test('通用备份、原子写入（0600）和从备份恢复', () => {
+  const { home, done } = setup();
+  try {
+    const path = join(home, 'machine.json');
+    writeJsonFile(path, { version: 1 });
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const backup = backupFile(path, () => 1);
+    assert.match(backup, /machine\.json\.bak-/);
+    writeJsonFile(path, { version: 2 });
+    restoreFromBackup(backup, path);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { version: 1 });
+    assert.equal(existsSync(`${path}.tmp`), false);
   } finally { done(); }
 });

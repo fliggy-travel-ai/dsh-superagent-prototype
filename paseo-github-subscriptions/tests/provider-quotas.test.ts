@@ -221,6 +221,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
     enabled: false,
     enabledSources: [],
     hideBuiltin: [],
+    hideBuiltinApplied: false,
     skippedConflicts: [],
     reloadRequired: false,
     error: null,
@@ -236,6 +237,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
     enabled: true,
     enabledSources: ['antigravity', 'codex-multi', 'grok-multi'],
     hideBuiltin: ['codex', 'grok'],
+    hideBuiltinApplied: false,
     skippedConflicts: [],
     reloadRequired: true,
     error: null,
@@ -332,4 +334,49 @@ test('usage.providerQuotas：隐藏内置额度来源配置项与侧栏固定项
   assert.equal(credits.used, 250);
   assert.equal(credits.remaining, 750);
   assert.equal(credits.remainingPct, 75);
+});
+
+
+import { readdirSync } from 'node:fs';
+
+test('provider-quotas.configure：machine.json 损坏时报错，不覆盖；写入前备份', async () => {
+  const { root, machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, modules: { 'usage.providerQuotas': true } } });
+  registerProviderQuotasRpcs({ server, machinePath, services });
+  const ok = await handlers.get('provider-quotas.configure')!({ enabledSources: ['glm'] });
+  assert.equal(ok.error, null);
+  assert.equal(readdirSync(root).filter(name => name.startsWith('machine.json.bak-')).length, 1);
+  writeFileSync(machinePath, '{坏');
+  const failed = await handlers.get('provider-quotas.configure')!({ enabledSources: ['qoder'] });
+  assert.match(failed.error, /machine\.json 无法解析/);
+  assert.equal(readFileSync(machinePath, 'utf8'), '{坏');
+  const snapshot = await handlers.get('provider-quotas.snapshot')!({});
+  assert.match(snapshot.error, /machine\.json 无法解析/);
+});
+
+test('provider-quotas.snapshot：隐藏内置额度来源目前只保存配置，快照明确标为未生效', async () => {
+  const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, providerQuotas: { sources: [], hideBuiltin: ['codex'] } } });
+  registerProviderQuotasRpcs({ server, machinePath, services });
+  const snapshot = await handlers.get('provider-quotas.snapshot')!({});
+  assert.deepEqual(snapshot.hideBuiltin, ['codex']);
+  assert.equal(snapshot.hideBuiltinApplied, false);
+});
+
+test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：全部来源跳过，模块出错', () => {
+  const { root, usageSources, server, services, machine } = createFakeEnv({ machineJson: { version: 1, modules: { 'usage.providerQuotas': true }, providerQuotas: { sources: ['glm', 'qoder'] } } });
+  writeFileSync(join(root, 'config.json'), '{坏');
+  const host = startModules([providerQuotasModule], { server, instance: resolveInstance('main'), machine, services, stateDirectory: root, baseDirectory: root });
+  assert.deepEqual(usageSources, []);
+  assert.equal(host.status().modules[0]?.state, 'error');
+  assert.match(host.status().modules[0]?.reason ?? '', /config\.json 无法解析/);
+});
+
+test('“需要重载”由实际注册的来源推出：配置变化后为 true，重新注册后自动清除', async () => {
+  const env = createFakeEnv({ machineJson: { version: 1, modules: { 'usage.providerQuotas': true }, providerQuotas: { sources: ['glm'] } } });
+  const start = () => startModules([providerQuotasModule], { server: env.server, instance: resolveInstance('main'), machine: loadMachineConfig(env.machinePath, { [providerQuotasModule.config!.section]: providerQuotasModule.config!.spec }), services: env.services, stateDirectory: env.root, baseDirectory: env.root });
+  start();
+  assert.equal((await env.handlers.get('provider-quotas.snapshot')!({})).reloadRequired, false);
+  await env.handlers.get('provider-quotas.configure')!({ enabledSources: ['glm', 'qoder'] });
+  assert.equal((await env.handlers.get('provider-quotas.snapshot')!({})).reloadRequired, true);
+  start();
+  assert.equal((await env.handlers.get('provider-quotas.snapshot')!({})).reloadRequired, false);
 });
