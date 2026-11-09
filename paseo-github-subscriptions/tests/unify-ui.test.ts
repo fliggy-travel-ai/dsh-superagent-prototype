@@ -114,7 +114,6 @@ test('第二期侧栏状态计算：待办只计插件待办，异常存在时�
         },
       ],
       quotaName: { enabled: true, lowestRemainingPct: null, autoResumeDefault: true, hiddenBuiltinSources: [] },
-      activeFlow: null,
       error: null,
     },
   };
@@ -657,7 +656,6 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
     },
   };
 
-  const startedLogins: Array<{ providerId?: string }> = [];
   const baseControlState = {
     automation: daemon.automation,
     browser: daemon.browser,
@@ -685,20 +683,7 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
       cloudSession: { enabled: true, onlineSessions: 1, unackedMessages: 0 },
     },
     cloudSession: { enabled: true, onlineSessions: 1, unackedMessages: 0 },
-    claudeAccounts: {
-      ...daemon.claudeAccounts,
-      activeFlow: {
-        providerId: 'claude-2',
-        configDir: '~/.claude-2',
-        step: 4,
-        terminalId: 't1',
-        workspaceId: 'w1',
-        loginUrl: 'https://claude.ai/oauth',
-        detectedEmail: 'relay@example.test', // scan-allow
-        requiresRealEmailConfirmation: true,
-        error: null,
-      },
-    },
+    claudeAccounts: daemon.claudeAccounts,
     claudeAccountsStatus: 'ready' as const,
     claudeAccountsError: null,
     antigravity: { enabled: false, runningSessionsCount: 0, reloadRequired: false, error: null, accounts: [] },
@@ -723,10 +708,6 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
       control: {
         subscribe: () => () => {},
         getState: () => baseControlState,
-        startClaudeLogin: async (input: { providerId?: string }) => {
-          startedLogins.push(input);
-          return baseControlState.claudeAccounts;
-        },
         bluetoothDevices: async () => ({ target: null, devices: [], error: null }),
       } as never,
       openScreen: () => {},
@@ -757,6 +738,11 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   const quotaCardSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === 'Claude 名称带额度');
   assert.equal(quotaCardSwitch.length, 0, 'Claude 名称带额度卡片不应有开关');
   assert.match(text, /当前最低 48%/);
+  // Claude 账号卡片不再有“添加账号”按钮；顶部提示保留红色提示，按钮改为提示文字
+  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '添加账号').length, 0, 'Claude 账号卡片不应有添加账号按钮');
+  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '重新登录').length, 0, '顶部提示不应有重新登录按钮');
+  assert.match(text, /需要重新登录/);
+  assert.match(text, /请在 Paseo 的 Provider 设置中重新登录/);
   assert.match(text, /1 个在线/);
   assert.equal(
     text.includes('多个 Antigravity 账号分别作为 Provider'),
@@ -792,25 +778,11 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   assert.match(text, /配置目录/);
   assert.equal(text.includes('剩余额度'), false, 'Claude 账号抽屉不应重复展示剩余额度列');
 
-  // 3. 点击“重新登录”带入 claude-2 并展示 Apple 真实邮箱确认与重试按钮
-  const reloginBtn = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '重新登录')[0]!;
-  (reloginBtn.props.onPress as () => void)();
-  tree = renderer.render(() =>
-    React.createElement(BoundMain, {
-      theme: mockTheme,
-      host: { id: 'h1', label: 'Host' },
-      layout: { compact: false, platform: 'web' },
-      params: { page: 'providers' },
-    } as never),
-  );
-  text = collectText(tree);
-  const realEmailInput = findNodes(tree, n => n.type === 'TextInput' && n.props.accessibilityLabel === '真实邮箱');
-  assert.equal(realEmailInput.length, 1, 'requiresRealEmailConfirmation 时应显示真实邮箱输入框');
-  const retryBtn = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '重试');
-  assert.equal(retryBtn.length, 1, '应提供重试按钮');
-  const startBtn = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '生成登录链接')[0]!;
-  await (startBtn.props.onPress as () => Promise<void>)();
-  assert.deepEqual(startedLogins[0], { providerId: 'claude-2' });
+  // 3. 添加 Claude 账号由 Paseo 自带：账号列表不再有“重新登录”按钮，改为提示去 Provider 设置
+  assert.match(text, /需要重新登录/);
+  assert.match(text, /请在 Paseo 的 Provider 设置中重新登录/);
+  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '重新登录').length, 0, '账号列表不应有重新登录按钮');
+  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '添加 Claude 账号').length, 0, '不应有添加 Claude 账号按钮');
 
   // 4. 问题答复页与升级通知抽屉：正确文案、status=stopped 显示“未运行”、无蓝牙假开关、可编辑时段与最近投递记录
   renderer.reset();
@@ -1358,7 +1330,6 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
     enabled: false,
     accounts: [],
     quotaName: { enabled: false, lowestRemainingPct: null, autoResumeDefault: false, hiddenBuiltinSources: [] },
-    activeFlow: null,
     error: '旧插件 claude-quota-resume 仍启用',
   };
   daemon.defaults = {

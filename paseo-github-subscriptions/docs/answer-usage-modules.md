@@ -27,7 +27,6 @@
 - **旧插件保护**：同步读取 `~/.paseo/config.json` 的 `plugins`。旧插件 `claude-quota-resume` 仍启用时，**不注册额度来源，整个模块报错**（页面 `claude-accounts.snapshot` 返回原因，写操作被拒绝）。原因：来源 ID 重复会让整个实例停止；两处同时运行还会重复改写 Provider 显示名称、重复发送继续消息。
 - **自动继续默认值**：`claudeAccounts.autoResumeDefault`（默认 `false`）。没有单独选择过的会话（含新会话）按这个值处理；会话卡片上的勾选是单独选择，保存在 `enabled-agents.json` 或 `disabled-agents.json`，默认值改变后仍保留。归档会话时清掉它的选择。页面设置保存在 `quota/settings.json`，优先于 `machine.json`。
 - **状态目录** `~/.paseo/github-subscriptions/quota/`：`jobs.json`、`enabled-agents.json`、`disabled-agents.json`、`usage-history.json`、`cross-user-providers.json`、`cross-user-cache.json`、`renewal/`、`settings.json`。账号显示标签在 `~/.paseo/github-subscriptions/labels.json`（隐藏邮箱 → 显示名称）。
-- **添加账号引导**（`claudeAccounts.loginGuide`，**真机验证前默认关闭**）：`claude-accounts.login.start` 先确认“账号登录”工作区存在，再备份 `config.json`（名字精确到毫秒，不覆盖）、**直接写** Provider 条目（守护进程的 `config.patch` 只保存 `enabled`、`additionalModels`、`paseoTools`，不保存 `extends`、`env`、`models`、`label`；写后读回核对）、让 Paseo 重载、建配置目录、打开登录终端、读出登录链接；重复点“添加账号”会复用没登录完的 Provider，同时只允许一个登录流程；授权码只允许字母、数字和 `_ - # . ~`，并在写入前确认终端仍在等待授权码；浏览器登录是人工步骤；`login.submit-code` 把授权码输入终端（授权码不记录、不保存）、读邮箱并命名；Apple 隐藏邮箱要用 `claude-accounts.rename` 确认真实邮箱。工作区名称在 `claudeAccounts.loginWorkspaceName`。
 
 ### 复制自 Paseo 自带插件的文件
 
@@ -81,5 +80,4 @@
 ## 已知限制
 
 - 订阅、钩子和连接部分（`runtime.ts`、`forward.ts`）没有自动化测试：它们依赖运行中的守护进程。投递、时段、配置、迁移、角色判定、清除队列和 RPC 都有单元测试。需要在影子模式下用真实守护进程观察。
-- `claude-accounts.login.*` 依赖终端接口和 `claude auth status`，没有在真实守护进程上验证，所以默认关闭。写配置失败或读回不一致时返回错误，并提示用 `config.json.bak-<时间>` 恢复。
 - 额度来源的 `icon` 写成插件内相对路径 `server/vendor/paseo-0.15.0/claude-usage-source/icon.svg`；如果 Paseo 不按插件根目录解析，只是不显示图标。

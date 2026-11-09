@@ -12,7 +12,6 @@ import { ContinuousUsage } from './continuous-usage.ts';
 import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../../core/provider-config.ts';
 import { withQuota } from './labels.ts';
 import { readLabels, setLabel } from './labels-file.ts';
-import { ensureConfigDirectory, LoginFlows, readAuthStatus } from './login.ts';
 import { migrateLegacyClaudeQuota } from './migrate.ts';
 import { bundledClaudeUsageInstalled, discoverAccounts, isClaudeProvider } from './providers.ts';
 import { QuotaLabelService } from './quota-labels.ts';
@@ -21,12 +20,12 @@ import { cli, ResumeService } from './resume.ts';
 const ICON = 'server/vendor/paseo-0.15.0/claude-usage-source/icon.svg';
 
 const emptySnapshot = (error: string): rpc.ClaudeAccountsSnapshot => ({
-  enabled: false, accounts: [], quotaName: { enabled: false, lowestRemainingPct: null, autoResumeDefault: false, hiddenBuiltinSources: [] }, activeFlow: null, error,
+  enabled: false, accounts: [], quotaName: { enabled: false, lowestRemainingPct: null, autoResumeDefault: false, hiddenBuiltinSources: [] }, error,
 });
 
 /**
  * Claude 账号额度：额度来源、额度耗尽后自动继续、登录续期、Provider 显示名称加额度、账号显示标签、
- * 跨用户查询，以及页面用的账号列表、设置和添加账号引导。替代旧插件 claude-quota-resume。
+ * 跨用户查询，以及页面用的账号列表和设置。替代旧插件 claude-quota-resume。
  *
  * 旧插件仍启用时整个模块拒绝启动（跳过额度来源并报错）：来源 ID 重复会让整个实例停止，
  * 两处同时改写 Provider 显示名称并重复发送继续消息。
@@ -51,9 +50,6 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       const refuse = async () => { throw new Error(message); };
       server.handle(rpc.claudeAccountsConfigure, refuse);
       server.handle(rpc.claudeAccountsRename, refuse);
-      server.handle(rpc.claudeAccountsLoginStart, refuse);
-      server.handle(rpc.claudeAccountsLoginSubmitCode, refuse);
-      server.handle(rpc.claudeAccountsLoginRetry, refuse);
       context.fail(new Error(message));
       return;
     }
@@ -130,34 +126,6 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       writeProvider(id, { label }, backup);
       await reloadProviders();
     };
-    const flows = new LoginFlows({
-      homeDirectory: homedir(),
-      providers: providersRaw,
-      backupConfig: () => backupConfigFile(home),
-      writeProvider,
-      reloadProviders,
-      ensureConfigDirectory: dir => ensureConfigDirectory(dir, join(homedir(), '.claude')),
-      findLoginWorkspace: async () => {
-        const { paseo } = await services.daemon.ready();
-        const found = (await paseo.workspaces.list()).entries.find(workspace => workspace.name === config.loginWorkspaceName);
-        return found ? { id: found.id, cwd: found.workspaceDirectory || found.projectRootPath } : null;
-      },
-      createTerminal: async (workspaceId, name, cwd) => {
-        const { paseo, client } = await services.daemon.ready();
-        const terminal = await paseo.terminals.create({ workspaceId, name, cwd });
-        return {
-          id: terminal.id,
-          write: data => { terminal.write(data); },
-          sendKeys: keys => { terminal.sendKeys(keys); },
-          capture: async () => (await client.captureTerminal(terminal.id, { stripAnsi: true })).lines,
-          kill: () => terminal.kill(),
-        };
-      },
-      authStatus: readAuthStatus,
-      setLabel: (key, value) => setLabel(labelsFile, key, value),
-      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
-    });
-
     const snapshot = async (): Promise<rpc.ClaudeAccountsSnapshot> => {
       const accounts = await listAccounts({
         home, homeDirectory: homedir(), baseEnv: baseEnv(), labels: () => readLabels(labelsFile), quotas: labels.quotas(),
@@ -169,7 +137,6 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
         enabled: true,
         accounts,
         quotaName: { enabled: true, lowestRemainingPct: known.length ? Math.min(...known) : null, autoResumeDefault: current.autoResumeDefault, hiddenBuiltinSources: bundledClaudeUsageInstalled() ? [] : ['claude-usage-source'] },
-        activeFlow: flows.current(),
         error: settings.error(),
       };
     };
@@ -185,24 +152,14 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       const withName = (name: string) => withQuota(name, quota);
       if (realEmail !== undefined) {
         const real = realEmail.trim().toLowerCase();
-        if (!(await flows.confirmRealEmail(providerId, real))) {
-          const hidden = usage.identityEmail(providerEnv(providerId));
-          if (!hidden || !isAppleRelay(hidden)) throw new Error('这个账号不是 Apple 登录，不需要确认真实邮箱');
-          setLabel(labelsFile, hidden, `${real}${APPLE_SUFFIX}`);
-          await rewriteLabel(providerId, withName(`Claude · ${real}${APPLE_SUFFIX}`));
-        }
+        const hidden = usage.identityEmail(providerEnv(providerId));
+        if (!hidden || !isAppleRelay(hidden)) throw new Error('这个账号不是 Apple 登录，不需要确认真实邮箱');
+        setLabel(labelsFile, hidden, `${real}${APPLE_SUFFIX}`);
+        await rewriteLabel(providerId, withName(`Claude · ${real}${APPLE_SUFFIX}`));
       }
       if (label !== undefined) await rewriteLabel(providerId, withName(label));
       return snapshot();
     });
-    // 添加账号引导在真机验证前默认关闭（claudeAccounts.loginGuide）。
-    const guide = <T>(run: () => Promise<T>) => async () => {
-      if (!config.loginGuide) throw new Error('添加账号引导还没有开放：在真机上验证后，把 machine.json 的 claudeAccounts.loginGuide 设为 true');
-      return run();
-    };
-    server.handle(rpc.claudeAccountsLoginStart, async input => { await guide(() => flows.start(input))(); return snapshot(); });
-    server.handle(rpc.claudeAccountsLoginSubmitCode, async input => { await guide(() => flows.submitCode(input))(); return snapshot(); });
-    server.handle(rpc.claudeAccountsLoginRetry, async ({ providerId }) => { await guide(() => flows.retry(providerId))(); return snapshot(); });
 
     return async () => { removeStart(); removeArchive(); removeEnd(); service.stop(); await usage.stop(); await labels.stop(); };
   },
