@@ -6,6 +6,8 @@
  * - shared/ 文件的依赖按 shared 检查：只能依赖 shared/ 或包，不能依赖 server/、client/、Node 内置模块、只给服务端或客户端的 SDK。
  * - client 包不能到达 server/；server 包不能到达 client/。
  * - 类型导入（import type、import('x').T、/// <reference>）同样检查，和 Paseo 一致。
+ * - Paseo 把 server 包作为 `eval` 出的 CommonJS 工厂函数执行（bundle-evaluator.js），没有 import.meta、__dirname、__filename；
+ *   esbuild 把 import.meta.url 编成 undefined，`new URL('..', import.meta.url)` 在加载时抛 “Invalid URL”。打包的源码不能用它们。
  *
  * Paseo 的编译器打包在桌面程序里，不能作为依赖安装，所以这里按同样的规则静态检查；真实构建另用
  * `paseo plugin install` 验证（#1737）。用法：node --experimental-strip-types scripts/check-plugin-boundaries.ts [插件目录]
@@ -51,6 +53,24 @@ function specifierError(specifier: string, owner: Target, importer: string): str
   return kind ? `${kind} module cannot be imported into the plugin ${owner} bundle: ${specifier} imported by ${importer}` : null;
 }
 
+// 打包后不存在的模块级变量：import.meta、未在本文件声明的 __dirname、__filename。
+function runtimeGlobals(file: string): string[] {
+  const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
+  const found = new Set<string>();
+  const visit = (node: ts.Node) => {
+    if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword && node.name.text === 'meta') found.add('import.meta');
+    else if (ts.isIdentifier(node) && (node.text === '__dirname' || node.text === '__filename')) {
+      const parent = node.parent;
+      const declared = (ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isFunctionDeclaration(parent)) && parent.name === node;
+      const property = (ts.isPropertyAccessExpression(parent) && parent.name === node) || (ts.isPropertyAssignment(parent) && parent.name === node);
+      if (!declared && !property) found.add(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return [...found];
+}
+
 type Edge = { specifier: string; kind: 'import' | 'require' | 'type-reference'; typeOnly: boolean };
 
 function readImports(file: string): Edge[] {
@@ -94,6 +114,7 @@ export function checkPluginBoundaries(directory: string): string[] {
     const key = `${owner}:${file}`;
     if (checked.has(key) || !/\.[cm]?[jt]sx?$/.test(file)) return;
     checked.add(key);
+    for (const name of runtimeGlobals(file)) errors.add(`Paseo runs plugin bundles without ${name}: ${path.relative(root, file)}`);
     for (const edge of readImports(file)) {
       const packageSpecifier = edge.kind === 'type-reference' ? `@types/${edge.specifier.replace(/^@/, '').replace('/', '__')}` : edge.specifier;
       const relativeError = edge.specifier.startsWith('.') || path.isAbsolute(edge.specifier)
@@ -121,7 +142,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const directory = process.argv[2] ?? path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
   const errors = checkPluginBoundaries(directory);
   if (errors.length) {
-    console.error(`插件打包边界检查失败（Paseo 0.15 插件编译器会拒绝构建），共 ${errors.length} 处：`);
+    console.error(`插件打包边界检查失败（Paseo 0.15 构建或加载插件会失败），共 ${errors.length} 处：`);
     for (const error of errors) console.error(`- ${error}`);
     process.exit(1);
   }
