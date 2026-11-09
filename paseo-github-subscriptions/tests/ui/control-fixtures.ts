@@ -3,10 +3,6 @@ import type { PresenceSnapshot } from '../../shared/presence.ts';
 
 export const makeBrowser = (): BrowserSnapshot => ({
   settings: { enabled: false, port: 17373 }, connected: false, error: null, bindings: [],
-  paseoSessions: [
-    { id: 'native-backend', title: '订单服务开发' },
-    { id: 'native-frontend', title: '订单服务开发' },
-  ],
   sessions: [
     { instanceId: 'browser-development', instanceName: '开发账号', sessionId: 'same-session', title: '订单服务开发', url: 'https://claude.ai/code/session_same-session', tabCount: 2, lastSeenAt: new Date().toISOString(), agentId: null, groupTitle: '订单服务开发' },
     { instanceId: 'browser-review', instanceName: '审阅账号', sessionId: 'same-session', title: '订单服务开发', url: 'https://claude.ai/code/session_same-session', tabCount: 1, lastSeenAt: new Date().toISOString(), agentId: null, groupTitle: '订单服务开发' },

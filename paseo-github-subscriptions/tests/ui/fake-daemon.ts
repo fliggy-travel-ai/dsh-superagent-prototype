@@ -31,11 +31,11 @@ export class FakeDaemon {
       { instanceId: 'env-27', instanceName: '环境 27（主力）', connected: true, lastSeenAt: new Date().toISOString() },
       { instanceId: 'env-29', instanceName: '环境 29（备用）', connected: true, lastSeenAt: new Date().toISOString() },
     ],
-    paseoSessions: [
-      { id: 'agent-refund', title: '【订单退款】联调' },
-      { id: 'agent-search', title: '【搜索排序】实验' },
-    ],
   };
+  paseoSessions = [
+    { id: 'agent-refund', title: '【订单退款】联调' },
+    { id: 'agent-search', title: '【搜索排序】实验' },
+  ];
   presence = makePresence();
   adspowerApiKeyConfigured = false;
   state: Snapshot;
@@ -504,7 +504,7 @@ export class FakeDaemon {
         const binding = input as unknown as BrowserBindingInput;
         this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),
           sessions: this.browser.sessions.map(session => session.instanceId === binding.instanceId && session.sessionId === binding.sessionId
-            ? { ...session, agentId: binding.agentId, groupTitle: this.browser.paseoSessions?.find(item => item.id === binding.agentId)?.title ?? session.title } : session) };
+            ? { ...session, agentId: binding.agentId, groupTitle: this.paseoSessions.find(item => item.id === binding.agentId)?.title ?? session.title } : session) };
         if (binding.agentId) this.browser.bindings.push({ ...binding, agentId: binding.agentId });
         return this.browser;
       }

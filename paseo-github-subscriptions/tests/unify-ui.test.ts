@@ -578,7 +578,7 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   const baseControlState = {
     browser: daemon.browser,
     presence: daemon.presence,
-    paseoSessions: daemon.browser.paseoSessions ?? [],
+    paseoSessions: daemon.paseoSessions,
     stalled: null,
     stalledError: null,
     browserError: null,
@@ -792,7 +792,7 @@ test('审阅项 5/7/14：待办“打开会话”传递 serverId，网页提问�
         getState: () => ({
           browser: daemon.browser,
           presence: daemon.presence,
-          paseoSessions: daemon.browser.paseoSessions ?? [],
+          paseoSessions: daemon.paseoSessions,
           stalled: null,
           stalledError: null,
           browserError: null,
@@ -1447,13 +1447,14 @@ test('1737-remove-automation：删除精确授权卡片与模块后，问答与�
   };
   const daemon = new FakeDaemon('shadow');
   daemon.latencyMs = 0;
+  const allEntries = [
+    { agent: { id: 'agent-refund', title: '【订单退款】联调', status: 'idle', archivedAt: null } },
+    { agent: { id: 'agent-search', title: '【搜索排序】实验', status: 'running', archivedAt: null } },
+  ];
   const control = createControlStore(
     daemon as never,
-    (async () => ({
-      entries: [
-        { agent: { id: 'agent-refund', title: '【订单退款】联调', status: 'idle', archivedAt: null } },
-        { agent: { id: 'agent-search', title: '【搜索排序】实验', status: 'running', archivedAt: null } },
-      ],
+    (async (opts: { filter?: { statuses?: string[] } }) => ({
+      entries: opts?.filter?.statuses ? allEntries.filter(e => opts.filter!.statuses!.includes(e.agent.status)) : allEntries,
       pageInfo: { hasMore: false },
     })) as never,
   );

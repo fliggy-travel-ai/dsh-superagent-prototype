@@ -113,7 +113,7 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const [pairingText, setPairingText] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
-  const bindTargets = paseoSessions.length > 0 ? paseoSessions : (browser?.paseoSessions ?? []);
+  const bindTargets = paseoSessions;
 
   const instances =
     browser?.instances && browser.instances.length > 0

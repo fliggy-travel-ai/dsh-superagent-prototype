@@ -325,3 +325,44 @@ test('服务器仍在重载时超过提示时间仍锁住开关，直到服务�
     assert.equal((store.getState() as any).moduleReloading, false);
   } finally { store.dispose(); }
 });
+
+test('paseoSessions 单独查询不过滤状态的未归档会话，保留 running 会话同时不影响停滞卡片过滤', async () => {
+  const allAgents = [
+    { id: 'sess-idle', title: '空闲会话', status: 'idle', archivedAt: null },
+    { id: 'sess-running', title: '运行中会话', status: 'running', archivedAt: null },
+    { id: 'sess-closed', title: '已关闭会话', status: 'closed', archivedAt: null },
+    { id: 'sess-archived', title: '已归档会话', status: 'idle', archivedAt: '2026-11-09T00:00:00Z' },
+  ];
+  const listAgents = (async (options: { filter: { includeArchived: boolean; statuses?: string[] }; page: { cursor?: string } }) => {
+    const entries = allAgents
+      .filter(a => options.filter.includeArchived || !a.archivedAt)
+      .filter(a => !options.filter.statuses || options.filter.statuses.includes(a.status))
+      .map(agent => ({ agent }));
+    return { entries, pageInfo: { hasMore: false } };
+  }) as unknown as Parameters<typeof createStore>[1];
+
+  const stalled: StalledSnapshot = {
+    sessions: ['sess-idle', 'sess-running'].map(agentId => ({
+      agentId, title: agentId, since: '2026-11-08T06:00:00Z', lastMessage: '等待', messageError: null,
+    })),
+    error: null,
+  };
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todos.stalled') return stalled;
+    if (contract.name === 'presence.snapshot') return makePresence();
+    return makeBrowser();
+  }) as Parameters<typeof createStore>[0]['rpc'] }, listAgents);
+  try {
+    await store.refresh();
+    assert.deepEqual(
+      store.getState().paseoSessions.map(s => s.id),
+      ['sess-idle', 'sess-running'],
+      '绑定列表应包含 running 与 idle 的未归档会话，排除 closed 与 archived',
+    );
+    assert.deepEqual(
+      store.getState().stalled?.sessions.map(s => s.agentId),
+      ['sess-idle'],
+      '停滞卡片仍只显示 idle/error 会话',
+    );
+  } finally { store.dispose(); }
+});

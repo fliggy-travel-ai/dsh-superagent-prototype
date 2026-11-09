@@ -26,7 +26,6 @@ export const BrowserSnapshotSchema = z.strictObject({
   approvals: z.array(BrowserApprovalEventSchema).optional(),
   extensionPath: z.string().optional(),
   instances: z.array(BrowserInstanceInfoSchema).optional(),
-  paseoSessions: z.array(z.strictObject({ id: id, title: z.string().min(1).max(200) })).optional(),
 });
 export type BrowserSettings = z.infer<typeof BrowserSettingsSchema>;
 export type BrowserBindingInput = z.infer<typeof BrowserBindingInputSchema>;

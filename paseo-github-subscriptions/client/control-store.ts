@@ -167,17 +167,29 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     typeof listAgents === 'function' ? listAgents : (listAgents as { list: PluginClientContext['paseo']['agents']['list'] }).list;
   const refreshLive = () => {
     liveInflight ??= (async () => {
-      let nextSessions = state.paseoSessions;
-      try {
+      const fetchLiveIds = async () => {
         const ids = new Set<string>();
-        const sessions: Array<{ id: string; title: string }> = [];
         let cursor: string | undefined;
         for (let page = 0; ; page++) {
           if (page >= 100) throw new Error('会话清单未完整返回');
           const result = await callListAgents({ filter: { includeArchived: false, statuses: ['idle', 'error'] }, page: { limit: 100, cursor }, timeout: 5000 });
+          for (const { agent } of result.entries) if (!agent.archivedAt && ['idle', 'error'].includes(agent.status)) ids.add(agent.id);
+          if (!result.pageInfo.hasMore) break;
+          if (!result.pageInfo.nextCursor || result.pageInfo.nextCursor === cursor) throw new Error('会话清单未完整返回');
+          cursor = result.pageInfo.nextCursor;
+        }
+        return ids;
+      };
+      const fetchBindableSessions = async () => {
+        const sessions: Array<{ id: string; title: string }> = [];
+        const seen = new Set<string>();
+        let cursor: string | undefined;
+        for (let page = 0; ; page++) {
+          if (page >= 100) throw new Error('会话清单未完整返回');
+          const result = await callListAgents({ filter: { includeArchived: false }, page: { limit: 100, cursor }, timeout: 5000 });
           for (const { agent } of result.entries) {
-            if (!agent.archivedAt && ['idle', 'error'].includes(agent.status)) ids.add(agent.id);
-            if (!agent.archivedAt && agent.status !== 'closed') {
+            if (!agent.archivedAt && agent.status !== 'closed' && !seen.has(agent.id)) {
+              seen.add(agent.id);
               sessions.push({ id: agent.id, title: (agent as { title?: string | null }).title?.trim() || '未命名 Paseo 会话' });
             }
           }
@@ -185,11 +197,17 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
           if (!result.pageInfo.nextCursor || result.pageInfo.nextCursor === cursor) throw new Error('会话清单未完整返回');
           cursor = result.pageInfo.nextCursor;
         }
-        liveIds = ids; liveError = null;
-        nextSessions = sessions;
-      } catch (error) {
-        liveIds = null; liveError = `无法核对会话是否已归档，暂不显示停滞会话：${errorMessage(error)}`;
+        return sessions;
+      };
+      const [liveResult, sessionsResult] = await Promise.allSettled([fetchLiveIds(), fetchBindableSessions()]);
+      if (liveResult.status === 'fulfilled') {
+        liveIds = liveResult.value;
+        liveError = null;
+      } else {
+        liveIds = null;
+        liveError = `无法核对会话是否已归档，暂不显示停滞会话：${errorMessage(liveResult.reason)}`;
       }
+      const nextSessions = sessionsResult.status === 'fulfilled' ? sessionsResult.value : state.paseoSessions;
       emit({ stalled: visibleStalled(state.stalled), stalledError: liveError || scanError, paseoSessions: nextSessions });
     })().finally(() => { liveInflight = null; });
     return liveInflight;
