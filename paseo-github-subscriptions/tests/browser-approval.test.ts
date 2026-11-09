@@ -460,6 +460,7 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
   // 预置 01XKJ85kumsMsemTjaRUfwh7 在 07:44:05 UTC 的旧版 still-visible 记录（无 cardId）
   const storageState: Record<string, any> = {
     instanceId: 'inst-1',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [
       {
@@ -511,7 +512,7 @@ test('连续两张内容完全相同的卡片都被点，不同工具卡片在�
 
   runInNewContext(backgroundSource, {
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-uuid-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -651,6 +652,7 @@ test('同一张卡片 still-visible 按间隔重试，即使文字随流式输�
 
   const storageState: Record<string, any> = {
     instanceId: 'inst-retry',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [],
   };
@@ -692,7 +694,7 @@ test('同一张卡片 still-visible 按间隔重试，即使文字随流式输�
   runInNewContext(backgroundSource, {
     __paseoApprovalConfig: approvalConfig,
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-retry-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -836,6 +838,7 @@ test('首次出现等待 800 毫秒再点击；后台（visibilityState !== visi
 
   const storageState: Record<string, any> = {
     instanceId: 'inst-vis',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [],
   };
@@ -877,7 +880,7 @@ test('首次出现等待 800 毫秒再点击；后台（visibilityState !== visi
   runInNewContext(backgroundSource, {
     __paseoApprovalConfig: approvalConfig,
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-vis-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -1052,6 +1055,7 @@ test('同一节点先后显示两张卡片，两张都被点（覆盖关闭后�
 
   const storageState: Record<string, any> = {
     instanceId: 'inst-reuse',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [],
   };
@@ -1092,7 +1096,7 @@ test('同一节点先后显示两张卡片，两张都被点（覆盖关闭后�
 
   runInNewContext(backgroundSource, {
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-reuse-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -1242,6 +1246,7 @@ test('旧样式菜单卡片 skipped 计入单卡点击上限，且支持菜单�
 
   const storageState: Record<string, any> = {
     instanceId: 'inst-menu',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [],
   };
@@ -1283,7 +1288,7 @@ test('旧样式菜单卡片 skipped 计入单卡点击上限，且支持菜单�
   runInNewContext(backgroundSource, {
     __paseoApprovalConfig: approvalConfig,
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-menu-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -1450,6 +1455,7 @@ test('同时存在两张卡片时，第一张处于冷却期或达上限不阻�
 
   const storageState: Record<string, any> = {
     instanceId: 'inst-two',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [],
   };
@@ -1490,7 +1496,7 @@ test('同时存在两张卡片时，第一张处于冷却期或达上限不阻�
 
   runInNewContext(backgroundSource, {
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-two-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -1609,6 +1615,7 @@ test('跨标签页同 label 去重、同会话每分钟总次数限制、reserve
 
   const storageState: Record<string, any> = {
     instanceId: 'inst-guards',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
     approvalEnabled: true,
     approvalAudit: [],
   };
@@ -1656,7 +1663,7 @@ test('跨标签页同 label 去重、同会话每分钟总次数限制、reserve
       reservedTimeoutMs: null,
     },
     chrome: bgChrome,
-    fetch: async () => ({ ok: false }),
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
     crypto: { randomUUID: () => `bg-guards-${++uuidCounter}` },
     AbortSignal,
     Map,
@@ -2194,7 +2201,12 @@ test('阅读门槛：卡片带可取消勾选框时先取消再点 Allow once；
 test('后台把阅读门槛结果 readGate 写进点同意记录并随同步上报', async () => {
   const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
   const sessionUrl = 'https://claude.ai/code/session_gatebg123';
-  const storageState: Record<string, any> = { instanceId: 'inst-gate', approvalEnabled: true, approvalAudit: [] };
+  const storageState: Record<string, any> = {
+    instanceId: 'inst-gate',
+    pairing: { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) },
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
   let onMessage: any = null;
   let uuid = 0;
   const bodies: any[] = [];
@@ -2270,10 +2282,11 @@ test('1737-remove-automation：结构识别权限卡不受 plan/AskUserQuestion/
   // 1. 权限卡含 plan、AskUserQuestion、请选择、always、remember、超 16000 字符参数，且按钮为普通 Allow，带已勾选 checkbox：先取消勾选再点 Allow
   const card = DomNode.fromTuple(directFixture.tree);
   const titleRegion = card.querySelector('[data-testid="approval-title-region"]')!;
-  titleRegion.setText('Plan: proceed with ExitPlanMode & AskUserQuestion (Recommended) 请选择 Which option Remember this choice Always allow ' + 'x'.repeat(18000));
+  titleRegion.setText('Plan: proceed with AskUserQuestion (Recommended) 请选择 Which option Remember this choice Always allow ' + 'x'.repeat(18000));
   const allowBtn = card.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
   allowBtn.setText('Allow ⌘⏎');
   const cardRoot = card.querySelector('[data-approval-card-root]')!;
+  cardRoot.appendChild(new DomNode('pre', {}, ['git commit -m "plan: mention ExitPlanMode and plan mode in body"']));
   const rememberBox = new DomNode('div', { role: 'checkbox', 'aria-checked': 'true' }, ['Remember this choice']);
   cardRoot.appendChild(rememberBox);
 
@@ -2783,4 +2796,115 @@ test('关闭网页版 claude.ai 模块并重载插件后最小桥接返回 appro
     await Promise.race([cleanup2?.().catch(() => {}), new Promise(r => setTimeout(r, 1000))]);
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test('复审：未配对或配对地址格式无效时立即将 approvalEnabled 置为 false 并停止点击；ExitPlanMode 标题/aria-label 卡片不自动点而正文含 plan 的普通权限卡仍自动点', async () => {
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+
+  // 1. 验证未配对与配对格式无效时立即置 approvalEnabled = false（无需等 3 分钟）
+  const bgState: Record<string, any> = {
+    instanceId: 'inst-unpair',
+    pairing: { url: 'https://evil.example/sync', token: 'a'.repeat(64) },
+    approvalEnabled: true,
+    approvalAudit: [],
+  };
+  let startupFn: () => void = () => {};
+  let bgMsgFn: any = null;
+  const bgChrome = {
+    storage: {
+      local: {
+        get: async (keys: any) => typeof keys === 'string' ? { [keys]: bgState[keys] } : Array.isArray(keys) ? Object.fromEntries(keys.map(k => [k, bgState[k]])) : { ...bgState },
+        set: async (vals: Record<string, any>) => { Object.assign(bgState, vals); },
+      },
+      onChanged: { addListener: () => {} },
+    },
+    tabs: { query: async () => [], onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    tabGroups: { onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    runtime: {
+      onStartup: { addListener: (fn: () => void) => { startupFn = fn; } },
+      onInstalled: { addListener: () => {} },
+      onMessage: { addListener: (fn: any) => { bgMsgFn = fn; } },
+    },
+    alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+    scripting: {},
+  };
+
+  runInNewContext(backgroundSource, {
+    chrome: bgChrome,
+    fetch: async () => ({ ok: true, json: async () => ({ sessions: [] }) }),
+    crypto: { randomUUID: () => 'unpair-uuid' },
+    AbortSignal, Map, Object, String, Number, Array, URL, Date, Promise, JSON, Set,
+    setTimeout: (fn: () => void, d: number) => (d >= 2000 ? 0 : setTimeout(fn, d)),
+    clearTimeout,
+  });
+
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(bgState.approvalEnabled, false, '配对地址格式无效时应立即将 approvalEnabled 置为 false');
+
+  // 模拟解除配对（无 pairing）但旧值为 true
+  delete bgState.pairing;
+  bgState.approvalEnabled = true;
+  startupFn();
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(bgState.approvalEnabled, false, '无配对时应立即将 approvalEnabled 置为 false');
+
+  // 即使 reconcile 尚未跑，未配对时 approval-reserve 也必须拒绝并置 false
+  bgState.approvalEnabled = true;
+  const reserveUnpaired = await new Promise<any>(resolve => {
+    bgMsgFn({ type: 'approval-reserve', digest: 'd'.repeat(64), button: 'Allow once' }, { tab: { id: 1, url: 'https://claude.ai/code/session_unpair123' } }, resolve);
+  });
+  assert.equal(reserveUnpaired.allowed, false, '未配对时 approval-reserve 必须拒绝');
+  assert.equal(bgState.approvalEnabled, false);
+
+  // 2. 验证计划确认卡（ExitPlanMode）：根 aria-label 或标题区含 ExitPlanMode / exit plan mode 不点；正文含 plan 的普通权限卡仍自动点
+  const planAriaCard = DomNode.fromTuple(directFixture.tree);
+  planAriaCard.querySelector('[data-approval-card-root]')!.setAttribute('aria-label', 'Permission request: ExitPlanMode');
+  const planAriaAllow = planAriaCard.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+
+  const planTitleCard = DomNode.fromTuple(directFixture.tree);
+  planTitleCard.querySelector('[data-testid="approval-title-region"]')!.setText('Allow Claude to use ExitPlanMode?');
+  const planTitleAllow = planTitleCard.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+
+  const normalPlanBodyCard = DomNode.fromTuple(directFixture.tree);
+  const normalRoot = normalPlanBodyCard.querySelector('[data-approval-card-root]')!;
+  normalRoot.setAttribute('aria-label', 'Permission request: use bash');
+  normalPlanBodyCard.querySelector('[data-testid="approval-title-region"]')!.setText('Allow Claude to run bash?');
+  normalRoot.appendChild(new DomNode('pre', {}, ['echo "review plan and ExitPlanMode handling"']));
+  const normalAllow = normalPlanBodyCard.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  normalAllow.onClick = () => { normalPlanBodyCard.parentElement = null; };
+
+  const body = new DomNode('body', {}, []);
+  body.appendChild(planAriaCard);
+  body.appendChild(planTitleCard);
+  body.appendChild(normalPlanBodyCard);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const timers: Array<() => void> = [];
+  let uuid = 0;
+  runInNewContext(source, {
+    document: { documentElement: html, body, activeElement: body, querySelectorAll: (sel: string) => html.querySelectorAll(sel), querySelector: (sel: string) => html.querySelector(sel) },
+    location: { origin: 'https://claude.ai', pathname: '/code/session_planmode123' },
+    chrome: {
+      storage: { local: { get: async () => ({ approvalEnabled: true }) }, onChanged: { addListener: () => {} } },
+      runtime: { sendMessage: async (msg: any) => msg.type === 'approval-reserve' ? { allowed: true, reservationId: `pm-${++uuid}` } : { allowed: true } },
+    },
+    crypto: { randomUUID: () => `pm-uuid-${++uuid}`, subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() } },
+    TextEncoder, Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void) => { timers.push(fn); },
+    setInterval: () => {},
+    Date, WeakMap,
+  });
+
+  for (let step = 0; step < 30; step++) {
+    while (timers.length) timers.shift()!();
+    await Promise.resolve();
+  }
+
+  assert.equal(planAriaAllow.clicks, 0, '根 aria-label 含 ExitPlanMode 的计划确认卡不应自动点击');
+  assert.equal(planTitleAllow.clicks, 0, '标题区含 ExitPlanMode 的计划确认卡不应自动点击');
+  assert.equal(normalAllow.clicks, 1, '正文含 plan 字样的普通权限卡仍应自动点击');
 });

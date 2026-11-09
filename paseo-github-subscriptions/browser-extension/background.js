@@ -6,6 +6,10 @@ const sessionId = value => {
   } catch { return undefined; }
 };
 const PAIR_RE = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/sync$/;
+const isValidPairing = pairing => {
+  const match = typeof pairing?.url === 'string' && pairing.url.match(PAIR_RE);
+  return Boolean(pairing && match && Number(match[1]) <= 65535 && /^[a-f0-9]{64}$/.test(pairing?.token || ''));
+};
 const safeTitle = value => {
   const title = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
   return !title || /^(claude|claude code|recents|new chat|untitled)$/i.test(title) ? '未命名会话' : title;
@@ -164,8 +168,15 @@ async function reconcile() {
   let instanceId = data.instanceId;
   if (!instanceId) { instanceId = crypto.randomUUID(); await chrome.storage.local.set({ instanceId }); }
   const pairing = data.pairing;
-  const match = typeof pairing?.url === 'string' && pairing.url.match(PAIR_RE);
-  if (pairing && (!match || Number(match[1]) > 65535 || !/^[a-f0-9]{64}$/.test(pairing?.token || ''))) return;
+  const pairingValid = isValidPairing(pairing);
+  if (!pairingValid) {
+    if (data.approvalEnabled !== false || data.syncFailureSince != null) {
+      await chrome.storage.local.set({ approvalEnabled: false, syncFailureSince: null });
+      data.approvalEnabled = false;
+      data.syncFailureSince = null;
+    }
+    if (pairing) return;
+  }
   const noteSyncFailure = async () => {
     const now = Date.now();
     const since = typeof data.syncFailureSince === 'number' && Number.isFinite(data.syncFailureSince) ? data.syncFailureSince : now;
@@ -195,7 +206,7 @@ async function reconcile() {
   const reported = new Map();
   const observedSessionIds = [];
   let sentResults = [];
-  if (pairing) try {
+  if (pairingValid) try {
     for (const session of sessions.values()) {
       let complete = true;
       const activities = [];
@@ -237,7 +248,7 @@ async function reconcile() {
     if (!validSessions) return;
   } catch { await noteSyncFailure(); return; }
   if ((await chrome.storage.local.get('instanceId')).instanceId !== instanceId) return;
-  if (pairing) {
+  if (pairingValid) {
     if (sentResults.length) { const sent = new Set(sentResults.map(resultKey)); await changeQuestionState(state => { state.results = state.results.filter(item => !sent.has(resultKey(item))); }); }
     if (Array.isArray(response.decisions) && response.decisions.length) { if (await dispatchDecisions(response.decisions, instanceId, reported)) schedule(); }
     if (reported.size && !questionPoll) questionPoll = setTimeout(() => { questionPoll = null; schedule(); }, 2000);
@@ -339,7 +350,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       ? message.labelDigest
       : undefined;
     const operation = approvalWrites.then(async () => {
-      const stored = await chrome.storage.local.get(['approvalAudit', 'approvalEnabled']);
+      const stored = await chrome.storage.local.get(['approvalAudit', 'approvalEnabled', 'pairing']);
       const audit = Array.isArray(stored.approvalAudit) ? stored.approvalAudit : [];
       const now = Date.now();
       for (const entry of audit) {
@@ -352,6 +363,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         }
       }
       if (message.type === 'approval-reserve') {
+        if (!isValidPairing(stored.pairing)) {
+          if (stored.approvalEnabled !== false) {
+            await chrome.storage.local.set({ approvalEnabled: false, syncFailureSince: null });
+          }
+          return { allowed: false };
+        }
         if (stored.approvalEnabled !== true || typeof message.button !== 'string' || message.button.length > 100) return { allowed: false };
         const cardEntries = audit.filter(entry =>
           entry.sessionId === session && (cardId ? entry.cardId === cardId : !entry.cardId && entry.digest === message.digest),

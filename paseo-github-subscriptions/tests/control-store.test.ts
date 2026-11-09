@@ -333,7 +333,9 @@ test('paseoSessions 单独查询不过滤状态的未归档会话，保留 runni
     { id: 'sess-closed', title: '已关闭会话', status: 'closed', archivedAt: null },
     { id: 'sess-archived', title: '已归档会话', status: 'idle', archivedAt: '2026-11-09T00:00:00Z' },
   ];
+  let listCalls = 0;
   const listAgents = (async (options: { filter: { includeArchived: boolean; statuses?: string[] }; page: { cursor?: string } }) => {
+    listCalls += 1;
     const entries = allAgents
       .filter(a => options.filter.includeArchived || !a.archivedAt)
       .filter(a => !options.filter.statuses || options.filter.statuses.includes(a.status))
@@ -364,5 +366,6 @@ test('paseoSessions 单独查询不过滤状态的未归档会话，保留 runni
       ['sess-idle'],
       '停滞卡片仍只显示 idle/error 会话',
     );
+    assert.equal(listCalls, 1, '单次刷新只应查询一遍未归档会话清单');
   } finally { store.dispose(); }
 });

@@ -36,6 +36,7 @@
   const allow = /^(?:allow|允许)$/i;
   const permission = /(?:permission|allow claude|授权|权限|允许 Claude)/i;
   const permanent = /always|don't ask again|do not ask again|remember|this session|始终|不再询问|记住|本次会话/i;
+  const planModeTool = /(?:ExitPlanMode|\bexit[_\s-]+plan[_\s-]+mode\b|\bplan[_\s-]+mode\b)/i;
   function triggerApprovalClick(target) {
     target.click();
   }
@@ -271,9 +272,18 @@
     await new Promise(resolve => setTimeout(resolve, 0));
     return getRawCheckedNodes(scope).length === 0;
   }
+  function isPlanModeCard(scope) {
+    const root = getCardRoot(scope) || scope;
+    const aria = (root?.getAttribute?.('aria-label') || scope?.getAttribute?.('aria-label') || '').trim();
+    if (aria && planModeTool.test(aria)) return true;
+    const titleNode = root?.querySelector?.('[data-testid="approval-title-region"]') || root?.querySelector?.('h1,h2,h3,[role="heading"]');
+    const titleText = (titleNode?.innerText || titleNode?.textContent || '').trim();
+    return Boolean(titleText && planModeTool.test(titleText));
+  }
   function cardSafe(scope) {
     const root = getCardRoot(scope);
     if (hasCardRootAttr(root) && !isPermissionCard(root)) return false;
+    if (isPlanModeCard(scope)) return false;
     if (scope.querySelector?.('button[data-question-answer],input[type="radio"],[role="radio"],[role="radiogroup"],select,[role="listbox"]')) return false;
     const raw = getRawCheckedNodes(scope);
     if (raw.length > 0) {
