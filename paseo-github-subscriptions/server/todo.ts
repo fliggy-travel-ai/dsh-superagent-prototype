@@ -117,6 +117,29 @@ export class TodoRuntime {
         continue;
       }
 
+      // 云端提问在 Paseo 作答后网页提交未确认：Paseo 侧栏已不再列出它，在这里提示去原网页重试（不提供作答表单）。
+      // 沿用“网页等待”标签，不新增枚举值：旧版插件严格校验远端待办，未知标签会让整包解析失败。
+      if (q.source === 'native' && q.webRetry) {
+        const internalSessionId = q.webSessionId?.replace(/^session_/, '');
+        if (internalSessionId) openAskSessionIds.add(internalSessionId);
+        const firstQuestion = q.prompts[0]?.question;
+        items.push({
+          id: `web-retry:${self.id}:${q.id}:${q.fingerprint}`,
+          type: 'web',
+          label: '网页等待',
+          hostId: self.id,
+          hostName: self.name,
+          sourceLabel: `claude.ai 网页 · ${self.name}`,
+          sessionTitle: q.title || '云端会话提问',
+          at: q.at,
+          ageText: formatAge('已等', q.at, nowMs),
+          text: `【网页重试】${firstQuestion ? `${q.reason}：${firstQuestion}` : q.reason}`,
+          ...(q.url ? { url: q.url } : {}),
+          agentId: q.sessionId,
+        });
+        continue;
+      }
+
       // 原生待答提问不收（在 Paseo 侧栏“需要输入”中处理）
       if (q.source !== 'browser') continue;
 

@@ -58,6 +58,8 @@ export class MainServices {
       delegateBrowserAnswer: (id, answers, otherAnswers, source) => this.presence?.delegateBrowserAnswer(id, answers, otherAnswers, source) ?? false,
       cancelBrowserDecision: id => this.presence?.cancelBrowserDecision(id),
       browserState: id => this.presence?.browserState(id) ?? null,
+      noteWebResult: input => this.presence?.noteWebResult(input),
+      noteCloudConfirmed: input => this.presence?.noteCloudConfirmed(input),
     }, this.webLedger);
   }
 

@@ -2084,3 +2084,141 @@ test('approval-reserve 被后台拒绝时，内容脚本在本地给该卡片记
 
 
 
+
+// #1704 评论 6732392628：阅读门槛（“Scroll to the end to allow this.”）自动滚到底，复核提示消失后再点 Allow once。
+async function runReadGateScenario(options: { clearsOnScroll: boolean; persistentChecked?: boolean; rounds?: number; changeOnScroll?: (card: DomNode) => void }) {
+  const fixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-read-gate.json', import.meta.url), 'utf8'));
+  const cardTree = DomNode.fromTuple(fixture.tree);
+  const body = new DomNode('body', {}, []);
+  body.appendChild(cardTree);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+  const card = html.querySelector('[data-approval-card-root]')!;
+  const rows = card.querySelector('[data-testid="approval-read-rows"]')! as any;
+  const hint = card.querySelector('[data-testid="approval-read-hint"]')!;
+  const buttons = html.querySelectorAll('button');
+  const deny = buttons.find(b => b.innerText.includes('Deny'))!;
+  const allowOnce = buttons.find(b => b.innerText.includes('Allow once'))!;
+  const more = buttons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
+  if (options.persistentChecked) card.appendChild(new DomNode('input', { type: 'checkbox', 'aria-checked': 'true', role: 'checkbox' }, []));
+  // 参数区可滚动；滚到底并触发 scroll 事件后页面才去掉门槛提示（clearsOnScroll 为假时页面不认这次滚动）
+  rows.scrollHeight = 400; rows.clientHeight = 100; rows.scrollTop = 0;
+  const scrollEvents: any[] = [];
+  rows.dispatchEvent = (event: any) => {
+    scrollEvents.push(event);
+    if (event?.type === 'scroll' && options.clearsOnScroll && rows.scrollTop + rows.clientHeight >= rows.scrollHeight) { hint.hidden = true; options.changeOnScroll?.(card); }
+    return true;
+  };
+  // 门槛还在时页面不接受“允许”
+  allowOnce.onClick = () => { if (hint.hidden) cardTree.parentElement = null; };
+
+  const timers: (() => void)[] = [];
+  const results: Array<{ status: string; readGate?: string }> = [];
+  let uuid = 0;
+  const context = {
+    document: { documentElement: html, body, activeElement: body, querySelectorAll: (sel: string) => html.querySelectorAll(sel), querySelector: (sel: string) => html.querySelector(sel) },
+    location: { origin: 'https://claude.ai', pathname: '/code/session_gate123' },
+    chrome: {
+      storage: { local: { get: async () => ({ approvalEnabled: true }) }, onChanged: { addListener: () => {} } },
+      runtime: { sendMessage: async (message: any) => {
+        if (message.type === 'approval-reserve') return { allowed: true, reservationId: `res-${results.length}` };
+        if (message.type === 'approval-result') results.push({ status: message.status, ...(message.readGate ? { readGate: message.readGate } : {}) });
+      } },
+    },
+    crypto: { randomUUID: () => `gate-uuid-${++uuid}`, subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() } },
+    TextEncoder, Uint8Array, Event: class { type: string; constructor(type: string) { this.type = type; } },
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void) => { timers.push(fn); }, setInterval: () => {}, Date, WeakMap,
+  };
+  runInNewContext(source, context);
+  for (let step = 0; step < (options.rounds ?? 40); step++) {
+    while (timers.length) timers.shift()!();
+    await Promise.resolve();
+  }
+  return { allowOnce, deny, more, rows, scrollEvents, results, cardTree };
+}
+
+test('阅读门槛：原本会自动批准的卡片先把参数区滚到底，提示消失后只点 Allow once，记录 read_gate_scrolled', async () => {
+  const run = await runReadGateScenario({ clearsOnScroll: true });
+  assert.ok(run.rows.scrollTop + run.rows.clientHeight >= run.rows.scrollHeight, '参数区没有滚到底');
+  assert.ok(run.scrollEvents.some(event => event.type === 'scroll'), '没有派发 scroll 事件');
+  assert.equal(run.allowOnce.clicks, 1);
+  assert.equal(run.deny.clicks, 0);
+  assert.equal(run.more.clicks, 0);
+  assert.equal(run.cardTree.parentElement, null);
+  assert.deepEqual(run.results, [{ status: 'dismissed', readGate: 'read_gate_scrolled' }]);
+});
+
+test('阅读门槛：滚动后提示仍在时不点 Allow once，记 skipped / read_gate_blocked，按原有上限停止重试', async () => {
+  const run = await runReadGateScenario({ clearsOnScroll: false, rounds: 400 });
+  assert.equal(run.allowOnce.clicks, 0);
+  assert.equal(run.deny.clicks, 0);
+  assert.equal(run.more.clicks, 0);
+  assert.ok(run.results.length >= 1);
+  assert.ok(run.results.every(result => result.status === 'skipped' && result.readGate === 'read_gate_blocked'), JSON.stringify(run.results));
+  assert.ok(run.results.length <= 36, `重试次数 ${run.results.length} 超过单卡上限`);
+});
+
+test('阅读门槛：不符合自动批准条件的卡片不滚动也不点击', async () => {
+  const run = await runReadGateScenario({ clearsOnScroll: true, persistentChecked: true });
+  assert.equal(run.rows.scrollTop, 0);
+  assert.equal(run.scrollEvents.length, 0);
+  assert.equal(run.allowOnce.clicks, 0);
+  assert.deepEqual(run.results, []);
+});
+
+test('后台把阅读门槛结果 readGate 写进点同意记录并随同步上报', async () => {
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+  const sessionUrl = 'https://claude.ai/code/session_gatebg123';
+  const storageState: Record<string, any> = { instanceId: 'inst-gate', approvalEnabled: true, approvalAudit: [] };
+  let onMessage: any = null;
+  let uuid = 0;
+  const bodies: any[] = [];
+  const chrome = {
+    storage: { local: { get: async (keys: any) => typeof keys === 'string' ? { [keys]: storageState[keys] } : Array.isArray(keys) ? Object.fromEntries(keys.map(k => [k, storageState[k]])) : { ...storageState }, set: async (values: Record<string, any>) => { Object.assign(storageState, values); } }, onChanged: { addListener: () => {} } },
+    tabs: { query: async () => [], onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    tabGroups: { onUpdated: { addListener: () => {} }, onRemoved: { addListener: () => {} } },
+    runtime: { onMessage: { addListener: (fn: any) => { onMessage = fn; } }, onStartup: { addListener: () => {} }, onInstalled: { addListener: () => {} } },
+    alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+  };
+  const timers: Array<() => void> = [];
+  runInNewContext(backgroundSource, {
+    chrome, crypto: { randomUUID: () => `bg-gate-${++uuid}` }, AbortSignal, Map, Object, String, Number, Array, URL, Date, Promise, JSON, Set,
+    fetch: async (_url: string, init: any) => { bodies.push(JSON.parse(init.body)); return { ok: true, json: async () => ({ sessions: [] }) }; },
+    setTimeout: (fn: () => void) => { timers.push(fn); return 0; }, clearTimeout: () => {},
+  });
+  const send = (message: any) => new Promise<any>(resolve => { onMessage(message, { tab: { id: 7, url: sessionUrl } }, resolve); });
+  const digest = createHash('sha256').update('gate-card').digest('hex');
+  const reserved = await send({ type: 'approval-reserve', digest, cardId: 'gate-card', labelDigest: createHash('sha256').update('gate-label').digest('hex'), button: 'Allow once' });
+  assert.equal(reserved.allowed, true);
+  await send({ type: 'approval-result', digest, reservationId: reserved.reservationId, status: 'dismissed', readGate: 'read_gate_scrolled' });
+  assert.equal(storageState.approvalAudit.at(-1).readGate, 'read_gate_scrolled');
+  // 非法取值不写入
+  const digest2 = createHash('sha256').update('gate-card-2').digest('hex');
+  const reserved2 = await send({ type: 'approval-reserve', digest: digest2, cardId: 'gate-card-2', labelDigest: createHash('sha256').update('gate-label-2').digest('hex'), button: 'Allow once' });
+  await send({ type: 'approval-result', digest: digest2, reservationId: reserved2.reservationId, status: 'skipped', readGate: 'whatever' });
+  assert.equal(storageState.approvalAudit.at(-1).readGate, undefined);
+
+  storageState.pairing = { url: 'http://127.0.0.1:17373/sync', token: 'a'.repeat(64) };
+  for (let step = 0; step < 30 && !bodies.some(body => body.approvals?.some((item: any) => item.readGate)); step++) { while (timers.length) timers.shift()!(); await new Promise(resolve => setImmediate(resolve)); onMessage({ type: 'session-title-changed' }, { tab: { id: 7, url: sessionUrl } }, () => {}); }
+  const synced = bodies.flatMap(body => body.approvals ?? []);
+  assert.ok(synced.some((item: any) => item.digest === digest && item.readGate === 'read_gate_scrolled'), JSON.stringify(synced));
+
+  const { BrowserApprovalSchema } = await import('../shared/browser.ts');
+  assert.equal(BrowserApprovalSchema.safeParse({ sessionId: 'abc', reservationId: 'r', digest, button: 'Allow once', at: new Date().toISOString(), status: 'dismissed', readGate: 'read_gate_scrolled' }).success, true);
+  assert.equal(BrowserApprovalSchema.safeParse({ sessionId: 'abc', reservationId: 'r', digest, button: 'Allow once', at: new Date().toISOString(), status: 'dismissed', readGate: 'other' }).success, false);
+});
+
+test('阅读门槛：滚动后卡片内容变化，完整复核不通过（出现已勾选的永久授权或敏感内容）时不点击，记 skipped', async () => {
+  for (const change of [
+    (card: DomNode) => { card.appendChild(new DomNode('input', { type: 'checkbox', role: 'checkbox', 'aria-checked': 'true' }, [])); },
+    (card: DomNode) => { card.appendChild(new DomNode('p', {}, ['Plan: proceed with ExitPlanMode'])); },
+  ]) {
+    const run = await runReadGateScenario({ clearsOnScroll: true, changeOnScroll: change });
+    assert.equal(run.allowOnce.clicks, 0);
+    assert.equal(run.deny.clicks, 0);
+    assert.ok(run.results.length >= 1);
+    assert.ok(run.results.every(result => result.status === 'skipped' && !result.readGate), JSON.stringify(run.results));
+  }
+});
