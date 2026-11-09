@@ -21,8 +21,7 @@ const base = new URL('../../../', import.meta.url);
 const at = path => new URL(path, base).href;
 mock.module(at('shared/instance.ts'), { namedExports: { INSTANCE_ROLE: role } });
 class Fake { async start() {} async stop() {} snapshot() { return {}; } }
-for (const [file, name] of [['server/automation.ts', 'AutomationRuntime'], ['server/presence.ts', 'PresenceRuntime'], ['server/browser-bridge.ts', 'BrowserBridge'], ['server/runtime.ts', 'Runtime']]) mock.module(at(file), { namedExports: { [name]: Fake } });
-mock.module(at('server/automation-port.ts'), { namedExports: { automationPort: () => ({}) } });
+for (const [file, name] of [['server/presence.ts', 'PresenceRuntime'], ['server/browser-bridge.ts', 'BrowserBridge'], ['server/runtime.ts', 'Runtime']]) mock.module(at(file), { namedExports: { [name]: Fake } });
 mock.module(at('server/presence-port.ts'), { namedExports: { PresenceHosts: class { async stop() {} }, presencePort: () => ({}) } });
 const invoked = [];
 mock.module(at('server/daemon.ts'), { namedExports: { connectDaemon: async () => ({ paseo: {}, client: { invokePluginRpc: async (...args) => { invoked.push(args); return { forwarded: true }; } }, approve() {}, close: async () => {} }) } });

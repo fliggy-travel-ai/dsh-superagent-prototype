@@ -1,5 +1,4 @@
 import type { PluginClientContext } from '@getpaseo/plugin/client';
-import { automationSnapshot, automationPause, automationPolicy, type AutomationSnapshot, type SessionPolicy } from '../shared/automation.ts';
 import { browserSnapshot, browserConfigure, browserBind, browserPairing, browserUsageSnapshot, browserUsageSaveApiKey, browserUsageRemoveApiKey } from '../shared/browser-contracts.ts';
 import type { BrowserSnapshot, BrowserSettings, BrowserBindingInput } from '../shared/browser.ts';
 import { presenceSnapshot, presenceConfigure, presenceAnswer, presenceRead, type PresenceSnapshot, type PresenceSettings, type QuestionAnswer, type QuestionRead } from '../shared/presence.ts';
@@ -48,12 +47,11 @@ export type EscalationWindow = EscalationSnapshot['immediate'][number];
 export type OptionalFeatureStatus = 'loading' | 'ready' | 'disabled' | 'error';
 
 export interface ControlState {
-  automation: AutomationSnapshot | null;
   browser: BrowserSnapshot | null;
+  paseoSessions: Array<{ id: string; title: string }>;
   presence: PresenceSnapshot | null;
   stalled: StalledSnapshot | null;
   stalledError: string | null;
-  automationError: string | null;
   browserError: string | null;
   presenceError: string | null;
   modules: ModulesSnapshot | null;
@@ -97,12 +95,11 @@ const ACT_REFRESH_WAIT_MS = 3_000;
 export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, listAgents: PluginClientContext['paseo']['agents']['list'], options: { actTimeoutMs?: number; reloadDelayMs?: number; reloadPollMs?: number } = {}) {
   const actTimeoutMs = options.actTimeoutMs ?? ACT_TIMEOUT_MS;
   let state: ControlState = {
-    automation: null,
     browser: null,
+    paseoSessions: [],
     presence: null,
     stalled: null,
     stalledError: null,
-    automationError: null,
     browserError: null,
     presenceError: null,
     modules: null,
@@ -142,7 +139,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
   let inflight: Promise<void> | null = null;
   let disposed = false;
   let mutating = 0;
-  const sequence = { automation: 0, browser: 0, presence: 0, machine: 0 };
+  const sequence = { browser: 0, presence: 0, machine: 0 };
   const listeners = new Set<() => void>();
   const emit = (patch: Partial<ControlState>) => {
     if (disposed) return;
@@ -150,11 +147,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     if (JSON.stringify(next) === JSON.stringify(state)) return;
     state = next;
     for (const listener of listeners) listener();
-  };
-  const native = async (operation: () => Promise<AutomationSnapshot>) => {
-    const version = ++sequence.automation;
-    try { const value = await operation(); if (version === sequence.automation) emit({ automation: value, automationError: null }); }
-    catch (error) { if (version === sequence.automation) emit({ automationError: errorMessage(error) }); throw error; }
   };
   const browsing = async (operation: () => Promise<BrowserSnapshot>) => {
     const version = ++sequence.browser;
@@ -171,24 +163,38 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     const sessions = value.sessions.filter(session => liveIds?.has(session.agentId));
     return sessions.length === value.sessions.length ? value : { ...value, sessions };
   };
+  const callListAgents: PluginClientContext['paseo']['agents']['list'] =
+    typeof listAgents === 'function' ? listAgents : (listAgents as { list: PluginClientContext['paseo']['agents']['list'] }).list;
   const refreshLive = () => {
     liveInflight ??= (async () => {
       try {
         const ids = new Set<string>();
+        const sessions: Array<{ id: string; title: string }> = [];
+        const seen = new Set<string>();
         let cursor: string | undefined;
         for (let page = 0; ; page++) {
           if (page >= 100) throw new Error('会话清单未完整返回');
-          const result = await listAgents({ filter: { includeArchived: false, statuses: ['idle', 'error'] }, page: { limit: 100, cursor }, timeout: 5000 });
-          for (const { agent } of result.entries) if (!agent.archivedAt && ['idle', 'error'].includes(agent.status)) ids.add(agent.id);
+          const result = await callListAgents({ filter: { includeArchived: false }, page: { limit: 100, cursor }, timeout: 5000 });
+          for (const { agent } of result.entries) {
+            if (agent.archivedAt) continue;
+            if (['idle', 'error'].includes(agent.status)) ids.add(agent.id);
+            if (agent.status !== 'closed' && !seen.has(agent.id)) {
+              seen.add(agent.id);
+              sessions.push({ id: agent.id, title: (agent as { title?: string | null }).title?.trim() || '未命名 Paseo 会话' });
+            }
+          }
           if (!result.pageInfo.hasMore) break;
           if (!result.pageInfo.nextCursor || result.pageInfo.nextCursor === cursor) throw new Error('会话清单未完整返回');
           cursor = result.pageInfo.nextCursor;
         }
-        liveIds = ids; liveError = null;
+        liveIds = ids;
+        liveError = null;
+        emit({ stalled: visibleStalled(state.stalled), stalledError: scanError, paseoSessions: sessions });
       } catch (error) {
-        liveIds = null; liveError = `无法核对会话是否已归档，暂不显示停滞会话：${errorMessage(error)}`;
+        liveIds = null;
+        liveError = `无法核对会话是否已归档，暂不显示停滞会话：${errorMessage(error)}`;
+        emit({ stalled: visibleStalled(state.stalled), stalledError: liveError, paseoSessions: state.paseoSessions });
       }
-      emit({ stalled: visibleStalled(state.stalled), stalledError: liveError || scanError });
     })().finally(() => { liveInflight = null; });
     return liveInflight;
   };
@@ -269,7 +275,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     if (disposed) return Promise.resolve();
     const live = refreshLive();
     if (mutating) return live;
-    inflight ??= Promise.allSettled([native(() => client.rpc(automationSnapshot, {})), browsing(() => client.rpc(browserSnapshot, {})), asking(() => client.rpc(presenceSnapshot, {}))])
+    inflight ??= Promise.allSettled([browsing(() => client.rpc(browserSnapshot, {})), asking(() => client.rpc(presenceSnapshot, {}))])
       .then(() => {}).finally(() => { inflight = null; });
     stalledInflight ??= client.rpc(stalledSnapshot, {}).then(async value => {
       if (disposed) return;
@@ -287,8 +293,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     refresh,
     refreshUnify,
-    pause: (paused: boolean) => write(() => native(() => client.rpc(automationPause, { paused }))),
-    policy: (policy: SessionPolicy) => write(() => native(() => client.rpc(automationPolicy, policy))),
     configureBrowser: (settings: BrowserSettings) => write(() => browsing(() => client.rpc(browserConfigure, settings))),
     bind: (input: BrowserBindingInput) => write(() => browsing(() => client.rpc(browserBind, input))),
     pairing: () => client.rpc(browserPairing, {}),

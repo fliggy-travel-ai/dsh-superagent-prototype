@@ -49,16 +49,22 @@ test('相同标题的会话独立分组，重复同步幂等，人工改名与�
   installed.fire(); await flush(); assert.deepEqual(injected, [1, 2, 3]);
 });
 
-test('确认重置时只替换本浏览器身份并保留配对', async () => {
+test('确认重置时只替换本浏览器身份并保留配对；解除配对时同时关闭 approvalEnabled', async () => {
   const source = await readFile(new URL('../browser-extension/options.js', import.meta.url), 'utf8');
   const listeners: Record<string, (event: any) => Promise<void>> = {};
-  const elements: Record<string, any> = Object.fromEntries(['status', 'approvalEnabled', 'name', 'instanceName', 'pair', 'url', 'token', 'clear', 'resetIdentity'].map(id => [id, { value: '', textContent: '', addEventListener(_event: string, fn: any) { listeners[id] = fn; } }]));
-  const state: Record<string, any> = { instanceId: 'old', groups: { a: { id: 1 } }, pairing: { token: 'kept' } };
+  const elements: Record<string, any> = Object.fromEntries(['status', 'approvalEnabled', 'name', 'instanceName', 'pair', 'url', 'token', 'clear', 'resetIdentity'].map(id => [id, { value: '', checked: false, textContent: '', addEventListener(_event: string, fn: any) { listeners[id] = fn; } }]));
+  const state: Record<string, any> = { instanceId: 'old', groups: { a: { id: 1 } }, pairing: { token: 'kept' }, approvalEnabled: true };
   let approved = false;
-  const chrome = { storage: { local: { async get() { return {}; }, async set(value: any) { Object.assign(state, value); }, async remove(key: string) { delete state[key]; } } } };
+  const chrome = { storage: { local: { async get(key: any) { return typeof key === 'string' ? { [key]: state[key] } : {}; }, async set(value: any) { Object.assign(state, value); }, async remove(key: string | string[]) { for (const k of Array.isArray(key) ? key : [key]) delete state[k]; } } } };
   runInNewContext(source, { chrome, document: { getElementById: (id: string) => elements[id] }, confirm: () => approved, crypto: { randomUUID: () => 'new-instance' } });
+  await Promise.resolve();
+  assert.equal(elements.approvalEnabled.checked, true);
   await listeners.resetIdentity({}); assert.equal(state.instanceId, 'old');
   approved = true; await listeners.resetIdentity({}); assert.equal(state.instanceId, 'new-instance'); assert.equal(Object.keys(state.groups).length, 0); assert.equal(state.pairing.token, 'kept');
+  await listeners.clear({});
+  assert.equal(state.pairing, undefined);
+  assert.equal(state.approvalEnabled, false, '解除配对时必须把 approvalEnabled 置为 false');
+  assert.equal(elements.approvalEnabled.checked, false);
 });
 
 test('标题支持参数、页面片段和 SPA，准确读取名称并在改名时通知', async () => {

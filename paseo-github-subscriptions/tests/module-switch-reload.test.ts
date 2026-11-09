@@ -72,11 +72,11 @@ test('重载已排期时拒绝其他模块切换，重载失败后可再次操�
       services: { main: null } as never, stateDirectory: dir, baseDirectory: dir, reload: async () => { throw new Error('离线'); } });
     await handlers.get('machine.settings.toggle-module')!({ id: 'answer.presence', enabled: false });
     assert.equal((await handlers.get('machine.settings.snapshot')!({})).reloadInProgress, true);
-    await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'answer.automation', enabled: false }), /正在重新加载/);
-    assert.equal(JSON.parse(await readFile(path, 'utf8')).modules['answer.automation'], undefined);
+    await assert.rejects(handlers.get('machine.settings.toggle-module')!({ id: 'github', enabled: false }), /正在重新加载/);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).modules.github, undefined);
     await new Promise(resolve => setTimeout(resolve, 650));
     assert.equal((await handlers.get('machine.settings.snapshot')!({})).reloadInProgress, false);
-    await handlers.get('machine.settings.toggle-module')!({ id: 'answer.automation', enabled: false });
+    await handlers.get('machine.settings.toggle-module')!({ id: 'github', enabled: false });
     await new Promise(resolve => setTimeout(resolve, 650));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

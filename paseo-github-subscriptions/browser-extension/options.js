@@ -1,6 +1,6 @@
 const status = document.getElementById('status');
 const approval = document.getElementById('approvalEnabled');
-chrome.storage.local.get('approvalEnabled').then(data => { approval.checked = data.approvalEnabled !== false; });
+chrome.storage.local.get('approvalEnabled').then(data => { approval.checked = data.approvalEnabled === true; });
 approval.addEventListener('change', async () => {
   await chrome.storage.local.set({ approvalEnabled: approval.checked });
   status.textContent = approval.checked ? '自动点同意已开启' : '自动点同意已暂停';
@@ -27,7 +27,12 @@ document.getElementById('pair').addEventListener('submit', async event => {
   await chrome.storage.local.set({ pairing: { url, token } });
   document.getElementById('token').value = ''; status.textContent = '配对已保存';
 });
-document.getElementById('clear').addEventListener('click', async () => { await chrome.storage.local.remove('pairing'); status.textContent = '配对已解除'; });
+document.getElementById('clear').addEventListener('click', async () => {
+  await chrome.storage.local.remove('pairing');
+  await chrome.storage.local.set({ approvalEnabled: false, syncFailureSince: null });
+  approval.checked = false;
+  status.textContent = '配对已解除';
+});
 document.getElementById('resetIdentity').addEventListener('click', async () => {
   if (!confirm('重置后本环境将不再使用原身份的会话绑定。确定重置？')) return;
   await chrome.storage.local.set({ instanceId: crypto.randomUUID(), groups: {} });

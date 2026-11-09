@@ -1,6 +1,4 @@
 import { Runtime } from '../runtime.ts';
-import { AutomationRuntime } from '../automation.ts';
-import { automationPort } from '../automation-port.ts';
 import { BrowserBridge } from '../browser-bridge.ts';
 import { PresenceRuntime } from '../presence.ts';
 import { PresenceHosts, presencePort } from '../presence-port.ts';
@@ -26,7 +24,6 @@ export class MainServices {
   readonly webExecutor: WebRequestExecutor;
   host: ModuleHost | null = null;
   runtime: Runtime | null = null;
-  automation: AutomationRuntime | null = null;
   browser: BrowserBridge | null = null;
   presence: PresenceRuntime | null = null;
   presenceHosts: PresenceHosts | null = null;
@@ -40,7 +37,6 @@ export class MainServices {
   private readonly home: string;
   private stopped = false;
   private initializing: Promise<Runtime> | null = null;
-  private automationInitializing: Promise<AutomationRuntime> | null = null;
   private presenceInitializing: Promise<PresenceRuntime> | null = null;
   private hostsInitializing: Promise<PresenceHosts> | null = null;
   private browserInitializing: Promise<BrowserBridge> | null = null;
@@ -150,18 +146,6 @@ export class MainServices {
     return this.initializing;
   }
 
-  readyAutomation(): Promise<AutomationRuntime> {
-    const stopped = this.guard(); if (stopped) return stopped;
-    this.automationInitializing ??= (async () => {
-      const connection = await this.daemon.ready();
-      this.automation = new AutomationRuntime(this.directory, automationPort(connection.paseo, connection.approve));
-      await this.automation.start();
-      if (this.stopped) await this.automation.stop();
-      return this.automation;
-    })().catch(async error => { await this.automation?.stop(); this.automationInitializing = null; throw error; });
-    return this.automationInitializing;
-  }
-
   readyHosts(): Promise<PresenceHosts> {
     const stopped = this.guard(); if (stopped) return stopped;
     this.hostsInitializing ??= (async () => {
@@ -193,14 +177,14 @@ export class MainServices {
   readyBrowser(): Promise<BrowserBridge> {
     const stopped = this.guard(); if (stopped) return stopped;
     this.browserInitializing ??= (async () => {
-      const connection = await this.daemon.ready();
       this.browser = new BrowserBridge(this.directory, async agentId => {
+        const connection = await this.daemon.ready();
         const agent = (await connection.paseo.agents.ref(agentId).refresh())?.agent;
         return agent && !agent.archivedAt ? { id: agent.id, title: agent.title || '未命名 Paseo 会话' } : null;
-      }, async (...input) => (await this.readyPresence()).browserSync(...input), async request => {
+      }, async (...input) => this.isModuleRunning('answer.presence') ? (await this.readyPresence()).browserSync(...input) : [], async request => {
         await this.readyPresence();
         return this.webExecutor.answerWebRequest(request);
-      });
+      }, () => this.isModuleRunning('answer.browser'));
       await this.browser.start();
       if (this.stopped) await this.browser.stop();
       return this.browser;
@@ -212,8 +196,8 @@ export class MainServices {
   async stop(): Promise<void> {
     this.stopped = true;
     try { await this.initializing; } catch {}
-    await Promise.allSettled([this.automationInitializing, this.browserInitializing, this.presenceInitializing, this.hostsInitializing]);
-    await Promise.allSettled([this.automation?.stop(), this.browser?.stop(), this.presence?.stop()]);
+    await Promise.allSettled([this.browserInitializing, this.presenceInitializing, this.hostsInitializing]);
+    await Promise.allSettled([this.browser?.stop(), this.presence?.stop()]);
     await this.presenceHosts?.stop();
     await this.runtime?.stop();
   }

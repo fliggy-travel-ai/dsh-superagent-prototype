@@ -37,9 +37,22 @@ export class BrowserBridge {
   private resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>;
   private syncQuestions?: PresenceRuntime['browserSync'];
   private answerWeb?: AnswerWebRequest;
+  private isModuleRunning?: () => boolean;
   private usageRoute?: (body: unknown) => void | Promise<void>;
 
-  constructor(directory: string, resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>, syncQuestions?: PresenceRuntime['browserSync'], answerWeb?: AnswerWebRequest) { this.directory = directory; this.resolveAgent = resolveAgent; this.syncQuestions = syncQuestions; this.answerWeb = answerWeb; }
+  constructor(
+    directory: string,
+    resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>,
+    syncQuestions?: PresenceRuntime['browserSync'],
+    answerWeb?: AnswerWebRequest,
+    isModuleRunning?: () => boolean,
+  ) {
+    this.directory = directory;
+    this.resolveAgent = resolveAgent;
+    this.syncQuestions = syncQuestions;
+    this.answerWeb = answerWeb;
+    this.isModuleRunning = isModuleRunning;
+  }
   setUsageRoute(route: (body: unknown) => void | Promise<void>) { this.usageRoute = route; }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -54,17 +67,19 @@ export class BrowserBridge {
   async start(): Promise<void> { return this.serial(async () => {
     if (this.started) return;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    let hasSavedState = false;
     try {
       const state = JSON.parse(await readFile(join(this.directory, 'browser-state.json'), 'utf8'));
       this.settings = BrowserSettingsSchema.parse(state.settings);
       this.bindings = BrowserBindingInputSchema.extend({ agentId: BrowserBindingInputSchema.shape.agentId.unwrap() }).array().parse(state.bindings);
       this.approvals = BrowserApprovalEventSchema.array().parse(state.approvals ?? []).slice(-300);
+      hasSavedState = true;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器分组状态无效'); }
     const tokenPath = join(this.directory, 'browser-token');
     try { this.token = (await readFile(tokenPath, 'utf8')).trim(); if (!/^[a-f0-9]{64}$/.test(this.token)) throw new Error('invalid'); }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器配对令牌无效'); this.token = randomBytes(32).toString('hex'); await writeFile(tokenPath, this.token, { mode: 0o600, flag: 'wx' }); }
     await chmod(tokenPath, 0o600); this.started = true;
-    if (this.settings.enabled) await this.listen().catch(() => {});
+    if (this.settings.enabled || hasSavedState) await this.listen().catch(() => {});
   }); }
   private async listen() {
     const server = createServer((req, res) => {
@@ -94,6 +109,16 @@ export class BrowserBridge {
             if (url.origin !== 'https://claude.ai' || url.pathname !== `/code/session_${s.sessionId}` || url.search || url.hash || ids.has(s.sessionId)) throw new Error('invalid');
             ids.add(s.sessionId);
           }
+          if (this.isModuleRunning && !this.isModuleRunning()) {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(
+              JSON.stringify({
+                approvalEnabled: false,
+                sessions: input.sessions.map(s => ({ sessionId: s.sessionId, groupTitle: cleanTitle(s.title) })),
+                decisions: [],
+              }),
+            );
+            return;
+          }
           const next: BrowserSnapshot['sessions'] = [];
           let bindingsChanged = false;
           for (const s of input.sessions) {
@@ -121,8 +146,16 @@ export class BrowserBridge {
           const nowIso = new Date().toISOString();
           this.seen.set(input.instanceId, Date.now());
           this.knownInstances.set(input.instanceId, { instanceName: input.instanceName, lastSeenAt: nowIso });
-          const decisions = await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds, { deadline: decisionDeadline }) ?? [];
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ sessions: next.map(({ sessionId, groupTitle }) => ({ sessionId, groupTitle })), decisions }));
+          const decisions = this.settings.enabled
+            ? (await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds, { deadline: decisionDeadline }) ?? [])
+            : [];
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(
+            JSON.stringify({
+              approvalEnabled: this.settings.enabled,
+              sessions: next.map(({ sessionId, groupTitle }) => ({ sessionId, groupTitle })),
+              decisions,
+            }),
+          );
         } catch { if (!res.headersSent) res.writeHead(400).end(); }
       }); });
       req.on('error', () => {});
@@ -138,12 +171,12 @@ export class BrowserBridge {
       instanceId,
       instanceName: info.instanceName,
       account: null,
-      connected: !!this.server && (now - (this.seen.get(instanceId) ?? 0) < MAX_AGE),
+      connected: this.settings.enabled && !!this.server && (now - (this.seen.get(instanceId) ?? 0) < MAX_AGE),
       lastSeenAt: info.lastSeenAt,
     }));
     return {
       settings: { ...this.settings },
-      connected: !!this.server && active,
+      connected: this.settings.enabled && !!this.server && active,
       error: this.error,
       approvals: this.approvals.map(entry => ({ ...entry })),
       sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })),
@@ -156,7 +189,8 @@ export class BrowserBridge {
   async configure(value: BrowserSettings): Promise<BrowserSnapshot> { return this.serial(async () => {
     if (!this.started) throw new Error('浏览器桥接尚未启动');
     const settings = BrowserSettingsSchema.parse(value); await this.close(); this.settings = settings; await this.save();
-    if (settings.enabled) await this.listen(); else this.error = null;
+    if (settings.enabled) await this.listen();
+    else { await this.listen().catch(() => {}); this.error = null; }
     return this.snapshot();
   }); }
   async bind(value: BrowserBindingInput): Promise<BrowserSnapshot> { return this.serial(async () => {

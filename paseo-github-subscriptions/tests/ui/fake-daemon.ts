@@ -2,8 +2,7 @@ import type { PluginRpcContract } from '@getpaseo/plugin';
 import { pollNow, removeToken, saveToken, savePreferences, snapshot, unsubscribe } from '../../shared/contracts.ts';
 import type { Snapshot } from '../../shared/model.ts';
 import { makeSnapshot, type Scene } from './fixtures.ts';
-import { makeAutomation, makeBrowser, makePresence } from './control-fixtures.ts';
-import type { SessionPolicy } from '../../shared/automation.ts';
+import { makeBrowser, makePresence } from './control-fixtures.ts';
 import type { BrowserBindingInput, BrowserSettings } from '../../shared/browser.ts';
 import type { PresenceSettings } from '../../shared/presence.ts';
 import type { AgentDefaultRule, DefaultsSnapshot } from '../../shared/defaults.ts';
@@ -23,7 +22,6 @@ export interface RpcLogEntry {
 
 /** 内存里的假守护进程：用真实合约的 Zod 校验输入和输出。 */
 export class FakeDaemon {
-  automation = { ...makeAutomation(), paused: false };
   browser = {
     ...makeBrowser(),
     settings: { enabled: true, port: 17373 },
@@ -34,6 +32,10 @@ export class FakeDaemon {
       { instanceId: 'env-29', instanceName: '环境 29（备用）', connected: true, lastSeenAt: new Date().toISOString() },
     ],
   };
+  paseoSessions = [
+    { id: 'agent-refund', title: '【订单退款】联调' },
+    { id: 'agent-search', title: '【搜索排序】实验' },
+  ];
   presence = makePresence();
   adspowerApiKeyConfigured = false;
   state: Snapshot;
@@ -160,7 +162,6 @@ export class FakeDaemon {
     modules: [
       { id: 'providers.defaults', label: '新建会话默认设置', enabled: false, state: 'off', reloadRequired: true },
       { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: true },
-      { id: 'answer.automation', label: '精确授权', enabled: true, state: 'running', reloadRequired: true },
       { id: 'answer.browser', label: '网页版 claude.ai', enabled: true, state: 'running', reloadRequired: true },
       { id: 'answer.escalation', label: '升级通知', enabled: false, state: 'off', reloadRequired: true },
       { id: 'answer.quietChildren', label: '子会话免提醒', enabled: false, state: 'off', reloadRequired: true },
@@ -484,16 +485,6 @@ export class FakeDaemon {
       }
       case 'todos.stalled':
         return { sessions: [], error: null };
-      case 'automation.snapshot':
-        return this.automation;
-      case 'automation.pause':
-        this.automation = { ...this.automation, paused: Boolean(input.paused) };
-        return this.automation;
-      case 'automation.policy': {
-        const policy = input as unknown as SessionPolicy;
-        this.automation = { ...this.automation, policies: [...this.automation.policies.filter(item => item.agentId !== policy.agentId), policy] };
-        return this.automation;
-      }
       case 'browser.snapshot':
         return this.browser;
       case 'browser.configure':
@@ -513,7 +504,7 @@ export class FakeDaemon {
         const binding = input as unknown as BrowserBindingInput;
         this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),
           sessions: this.browser.sessions.map(session => session.instanceId === binding.instanceId && session.sessionId === binding.sessionId
-            ? { ...session, agentId: binding.agentId, groupTitle: this.automation.sessions.find(item => item.id === binding.agentId)?.title ?? session.title } : session) };
+            ? { ...session, agentId: binding.agentId, groupTitle: this.paseoSessions.find(item => item.id === binding.agentId)?.title ?? session.title } : session) };
         if (binding.agentId) this.browser.bindings.push({ ...binding, agentId: binding.agentId });
         return this.browser;
       }
