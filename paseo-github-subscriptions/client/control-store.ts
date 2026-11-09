@@ -26,9 +26,6 @@ import {
   claudeAccountsSnapshot,
   claudeAccountsConfigure,
   claudeAccountsRename,
-  claudeAccountsLoginStart,
-  claudeAccountsLoginSubmitCode,
-  claudeAccountsLoginRetry,
   type ClaudeAccountsSnapshot,
 } from '../shared/claude-accounts.ts';
 import {
@@ -341,24 +338,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
       return result;
     }),
-    startClaudeLogin: (input: { providerId?: string; browserProfile?: string } = {}): Promise<ClaudeAccountsSnapshot> =>
-      write(async () => {
-        const result = await client.rpc(claudeAccountsLoginStart, input);
-        emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
-        return result;
-      }),
-    submitClaudeLoginCode: (input: { providerId: string; code: string; realEmail?: string }): Promise<ClaudeAccountsSnapshot> =>
-      write(async () => {
-        const result = await client.rpc(claudeAccountsLoginSubmitCode, input);
-        emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
-        return result;
-      }),
-    retryClaudeLogin: (input: { providerId: string }): Promise<ClaudeAccountsSnapshot> =>
-      write(async () => {
-        const result = await client.rpc(claudeAccountsLoginRetry, input);
-        emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
-        return result;
-      }),
     toggleAntigravityAccount: (input: { providerId: string; enabled: boolean }) => write(async () => {
       const result = await client.rpc(antigravityAccountToggle, input);
       emit({ antigravity: result, antigravityStatus: 'ready', antigravityError: null });

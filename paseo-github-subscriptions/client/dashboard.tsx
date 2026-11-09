@@ -98,7 +98,7 @@ function ModuleOffHint({ onOpenMachineConfig }: { onOpenMachineConfig(): void })
 function ProvidersPage({
   onOpenDrawer,
 }: {
-  onOpenDrawer(id: DrawerId, providerId?: string): void;
+  onOpenDrawer(id: DrawerId): void;
 }) {
   const { s, control, theme } = useUi();
   const {
@@ -215,12 +215,7 @@ function ProvidersPage({
             <Text style={s.text}>
               <Text style={s.strong}>{acc.label}</Text>（{acc.email ?? '本机账号'}）需要重新登录
             </Text>
-            <Btn
-              small
-              primary
-              label="重新登录"
-              onPress={() => onOpenDrawer('add-claude', acc.providerId)}
-            />
+            <Text style={s.small}>请在 Paseo 的 Provider 设置中重新登录</Text>
           </View>
         </Notice>
       ))}
@@ -245,8 +240,7 @@ function ProvidersPage({
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
         <FeatureCard
           title="Claude 账号"
-          trailing={<Btn small primary label="添加账号" onPress={() => onOpenDrawer('add-claude')} />}
-          description="添加本机 Claude 账号，查看登录状态并改名。"
+          description="查看本机 Claude 账号的登录状态并改名。"
           kv={
             claudeAccountsStatus === 'error' || Boolean(claudeError) ? (
               <>
@@ -270,7 +264,6 @@ function ProvidersPage({
           }
           actions={
             <>
-              <Btn small primary label="添加账号" onPress={() => onOpenDrawer('add-claude')} />
               <Btn small label="编辑" onPress={() => onOpenDrawer('claude-accounts')} />
             </>
           }
@@ -1223,7 +1216,6 @@ export function MainScreen(props: PluginScreenProps) {
     paramPage && ['providers', 'answer', 'github', 'todo'].includes(paramPage) ? paramPage : 'providers',
   );
   const [drawer, setDrawer] = useState<DrawerId | null>(() => paramDrawer ?? null);
-  const [targetProviderId, setTargetProviderId] = useState<string | null>(null);
 
   useEffect(() => {
     if (paramPage && ['providers', 'answer', 'github', 'todo'].includes(paramPage)) {
@@ -1243,8 +1235,7 @@ export function MainScreen(props: PluginScreenProps) {
     setLastNonTodoPage(next);
   };
 
-  const openDrawer = (id: DrawerId, providerId?: string) => {
-    setTargetProviderId(providerId ?? null);
+  const openDrawer = (id: DrawerId) => {
     setDrawer(id);
   };
 
@@ -1339,10 +1330,8 @@ export function MainScreen(props: PluginScreenProps) {
 
       <DrawerOverlay
         drawerId={drawer}
-        targetProviderId={targetProviderId}
         onClose={() => {
           setDrawer(null);
-          setTargetProviderId(null);
         }}
         onOpenDrawer={openDrawer}
       />

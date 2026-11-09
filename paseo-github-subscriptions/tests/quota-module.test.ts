@@ -73,8 +73,7 @@ test('模块启动：注册额度来源和约定的 RPC，状态为运行', asyn
     assert.equal(run.host.status().modules[0]!.state, 'running');
     assert.deepEqual(run.sources.map(source => source.id), ['claude-accounts']);
     assert.deepEqual([...run.handlers.keys()].filter(name => name.startsWith('claude-accounts.')).sort(), [
-      'claude-accounts.configure', 'claude-accounts.login.retry', 'claude-accounts.login.start', 'claude-accounts.login.submit-code',
-      'claude-accounts.rename', 'claude-accounts.retry-status', 'claude-accounts.set-auto-resume', 'claude-accounts.snapshot',
+      'claude-accounts.configure', 'claude-accounts.rename', 'claude-accounts.retry-status', 'claude-accounts.set-auto-resume', 'claude-accounts.snapshot',
     ]);
     const snapshot = await run.handlers.get('claude-accounts.snapshot')!({});
     assert.equal(snapshot.enabled, true);
@@ -82,7 +81,7 @@ test('模块启动：注册额度来源和约定的 RPC，状态为运行', asyn
     assert.equal(snapshot.accounts[1].appleLogin, true);
     assert.equal(snapshot.quotaName.enabled, true);
     assert.equal(snapshot.quotaName.autoResumeDefault, false);
-    assert.equal(snapshot.activeFlow, null);
+    assert.equal('activeFlow' in snapshot, false);
   } finally { await run.done(); }
 });
 
@@ -153,17 +152,11 @@ test('改名：用 config.patch 改 Provider 显示名称；Apple 账号确认�
   } finally { await run.done(); }
 });
 
-test('添加账号引导在真机验证前默认关闭；打开 loginGuide 后才进入流程', async () => {
-  const closed = setup();
+test('旧 machine.json 里留有添加账号引导的设置时，模块照常启动', async () => {
+  const run = setup({ json: { version: 1, modules: { 'usage.claudeAccounts': true }, claudeAccounts: { loginGuide: true, loginWorkspaceName: '账号登录' } } });
   try {
-    for (const name of ['claude-accounts.login.start', 'claude-accounts.login.submit-code', 'claude-accounts.login.retry']) {
-      await assert.rejects(closed.handlers.get(name)!({ providerId: 'claude-2', code: 'abc' }), /loginGuide/);
-    }
-  } finally { await closed.done(); }
-  const open = setup({ json: { version: 1, modules: { 'usage.claudeAccounts': true }, claudeAccounts: { loginGuide: true } } });
-  try {
-    await assert.rejects(open.handlers.get('claude-accounts.login.retry')!({ providerId: 'claude-2' }), /没有正在进行/);
-  } finally { await open.done(); }
+    assert.equal(run.host.status().modules[0]!.state, 'running');
+  } finally { await run.done(); }
 });
 
 test('旧状态目录存在时启动自动复制，旧文件不动', async () => {

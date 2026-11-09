@@ -1,6 +1,6 @@
 import { useToast } from '@getpaseo/plugin/client/ui';
 import { useEffect, useState, type ReactNode } from 'react';
-import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { BluetoothSnapshot } from '../shared/bluetooth.ts';
 import type { BrowserUsageSettings } from '../shared/browser-usage.ts';
 import type { AgentDefaultRule } from '../shared/defaults.ts';
@@ -15,7 +15,6 @@ type ImmediateWindow = EscalationSnapshot['immediate'][number];
 
 export type DrawerId =
   | 'claude-accounts'
-  | 'add-claude'
   | 'browser'
   | 'add-browser'
   | 'claude-quota'
@@ -34,7 +33,6 @@ export type DrawerId =
 
 const DRAWER_TITLES: Record<DrawerId, string> = {
   'claude-accounts': 'Claude 账号',
-  'add-claude': '添加 Claude 账号',
   browser: '网页版 claude.ai',
   'add-browser': '添加浏览器环境',
   'claude-quota': 'Claude 名称带额度',
@@ -123,11 +121,7 @@ function StepRow(props: { num: number; title: string; children?: ReactNode }) {
   );
 }
 
-function ClaudeAccountsDrawer({
-  onOpenDrawer,
-}: {
-  onOpenDrawer(id: DrawerId, providerId?: string): void;
-}) {
+function ClaudeAccountsDrawer() {
   const { s, control } = useUi();
   const { claudeAccounts, claudeAccountsStatus, claudeAccountsError } = useControlState();
   const [labels, setLabels] = useState<Record<string, string>>({});
@@ -194,13 +188,9 @@ function ClaudeAccountsDrawer({
                   {acc.configDir}
                 </Text>,
                 acc.needsRelogin ? (
-                  <Btn
-                    key="act"
-                    small
-                    primary
-                    label="重新登录"
-                    onPress={() => onOpenDrawer('add-claude', acc.providerId)}
-                  />
+                  <Text key="act" style={s.small}>
+                    请在 Paseo 的 Provider 设置中重新登录
+                  </Text>
                 ) : (
                   <Btn
                     key="act"
@@ -216,205 +206,9 @@ function ClaudeAccountsDrawer({
         </View>
       )}
       {msg ? <Text style={s.small}>{msg}</Text> : null}
-      <View style={s.row}>
-        <Btn primary label="添加 Claude 账号" onPress={() => onOpenDrawer('add-claude')} />
-      </View>
       <RuleNote>
         本机只显示本机钥匙串里的账号。各账号的 5 小时与 7 天额度请直接在 Paseo 原生额度面板查看。
       </RuleNote>
-    </View>
-  );
-}
-
-const FLOW_STEP_LABELS: Record<number, string> = {
-  1: '正在写入 Provider 配置…',
-  2: '正在初始化配置目录…',
-  3: '正在启动登录终端…',
-  4: '等待浏览器完成登录…',
-  5: '等待输入授权码…',
-  6: '正在读取账号邮箱并更新显示名称…',
-};
-
-function AddClaudeDrawer({ initialProviderId }: { initialProviderId?: string | null }) {
-  const { s, control, theme } = useUi();
-  const { claudeAccounts } = useControlState();
-  const activeFlow = claudeAccounts?.activeFlow;
-  const [providerId, setProviderId] = useState(
-    () => initialProviderId ?? activeFlow?.providerId ?? '',
-  );
-  const [code, setCode] = useState('');
-  const [realEmail, setRealEmail] = useState('');
-  const [busy, setBusy] = useState<'start' | 'submit' | 'retry' | null>(null);
-  const [resultMsg, setResultMsg] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (initialProviderId) setProviderId(initialProviderId);
-    else if (activeFlow?.providerId && !providerId) setProviderId(activeFlow.providerId);
-  }, [initialProviderId, activeFlow?.providerId]);
-
-  const start = async () => {
-    setBusy('start');
-    setError(null);
-    setResultMsg(null);
-    try {
-      const target = providerId.trim() || undefined;
-      await control.startClaudeLogin(target ? { providerId: target } : {});
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const retry = async () => {
-    const target = activeFlow?.providerId ?? providerId.trim();
-    if (!target) return;
-    setBusy('retry');
-    setError(null);
-    setResultMsg(null);
-    try {
-      await control.retryClaudeLogin({ providerId: target });
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const submit = async () => {
-    if (!code.trim()) return;
-    const target = activeFlow?.providerId ?? providerId.trim();
-    if (!target) {
-      setError('请先生成登录链接或填写账号标识');
-      return;
-    }
-    setBusy('submit');
-    setError(null);
-    setResultMsg(null);
-    try {
-      const res = await control.submitClaudeLoginCode({
-        providerId: target,
-        code: code.trim(),
-        ...(realEmail.trim() ? { realEmail: realEmail.trim() } : {}),
-      });
-      setCode('');
-      if (res.activeFlow?.error) {
-        setError(res.activeFlow.error);
-      } else if (res.activeFlow?.requiresRealEmailConfirmation) {
-        setResultMsg('检测到 Apple 隐藏邮箱登录，请补充真实邮箱以完成命名。');
-      } else {
-        setResultMsg('授权码已提交，登录状态已刷新。');
-      }
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const confirmAppleEmail = async () => {
-    const target = activeFlow?.providerId ?? providerId.trim();
-    if (!target || !realEmail.trim()) return;
-    setBusy('submit');
-    setError(null);
-    try {
-      await control.renameClaudeAccount({ providerId: target, realEmail: realEmail.trim() });
-      setResultMsg('已保存真实邮箱并更新账号名称。');
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <View style={{ gap: 8 }}>
-      <StepRow num={1} title="账号标识（留空则自动分配新编号，重新登录时自动带入原标识）">
-        <TextInput
-          accessibilityLabel="新账号标识"
-          style={s.input}
-          value={providerId}
-          onChangeText={setProviderId}
-          placeholder="留空自动分配（如 claude-2）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-      </StepRow>
-      <StepRow num={2} title="启动登录流程并打开授权页面">
-        <View style={s.wrap}>
-          <Btn primary label="生成登录链接" busy={busy === 'start'} onPress={() => void start()} />
-          {activeFlow ? (
-            <Btn label="重试" busy={busy === 'retry'} onPress={() => void retry()} />
-          ) : null}
-          {activeFlow?.loginUrl ? (
-            <Btn label="打开浏览器" onPress={() => void Linking.openURL(activeFlow.loginUrl!)} />
-          ) : null}
-        </View>
-        {activeFlow ? (
-          <Text style={s.small}>
-            当前进度（步骤 {activeFlow.step}/6）：{FLOW_STEP_LABELS[activeFlow.step] ?? `步骤 ${activeFlow.step}`}
-            {activeFlow.configDir ? ` · 目录 ${activeFlow.configDir}` : ''}
-          </Text>
-        ) : null}
-        {activeFlow?.loginUrl ? <Text style={s.mono}>{activeFlow.loginUrl}</Text> : null}
-        {activeFlow?.error ? (
-          <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{activeFlow.error}</Text>
-        ) : null}
-      </StepRow>
-      <StepRow num={3} title="在浏览器登录目标 Claude 账号并点击 Authorize" />
-      <StepRow num={4} title="粘贴页面显示的授权码 code#state">
-        <View style={{ gap: 8 }}>
-          {activeFlow?.requiresRealEmailConfirmation ? (
-            <View style={{ gap: 6 }}>
-              <Text style={s.small}>
-                检测到 Apple 隐藏邮箱（{activeFlow.detectedEmail ?? '已隐藏'}），请填写对应的真实邮箱：
-              </Text>
-              <View style={s.row}>
-                <TextInput
-                  accessibilityLabel="真实邮箱"
-                  style={s.input}
-                  value={realEmail}
-                  onChangeText={setRealEmail}
-                  placeholder="真实邮箱（如 user@example.com）"
-                  placeholderTextColor={theme.colors.foregroundMuted}
-                  autoCapitalize="none"
-                />
-                <Btn
-                  small
-                  label="确认真实邮箱"
-                  disabled={!realEmail.trim()}
-                  busy={busy === 'submit'}
-                  onPress={() => void confirmAppleEmail()}
-                />
-              </View>
-            </View>
-          ) : null}
-          <View style={s.row}>
-            <TextInput
-              accessibilityLabel="授权码 code#state"
-              style={s.input}
-              value={code}
-              onChangeText={setCode}
-              placeholder="code#state"
-              placeholderTextColor={theme.colors.foregroundMuted}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Btn
-              primary
-              label="完成添加"
-              disabled={!code.trim()}
-              busy={busy === 'submit'}
-              onPress={() => void submit()}
-            />
-          </View>
-        </View>
-      </StepRow>
-      <StepRow num={5} title="插件在登录终端完成授权校验并写入本机配置目录" />
-      <StepRow num={6} title="读取登录邮箱更新 Provider 显示名称并刷新账号列表" />
-      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
-      {resultMsg ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{resultMsg}</Text> : null}
     </View>
   );
 }
@@ -2254,20 +2048,17 @@ function MachineConfigDrawer() {
 
 export function DrawerOverlay(props: {
   drawerId: DrawerId | null;
-  targetProviderId?: string | null;
   onClose(): void;
-  onOpenDrawer(id: DrawerId, providerId?: string): void;
+  onOpenDrawer(id: DrawerId): void;
 }) {
   const { s, theme, compact } = useUi();
-  const { drawerId, targetProviderId, onClose, onOpenDrawer } = props;
+  const { drawerId, onClose, onOpenDrawer } = props;
   if (!drawerId) return null;
 
   const renderContent = () => {
     switch (drawerId) {
       case 'claude-accounts':
-        return <ClaudeAccountsDrawer onOpenDrawer={onOpenDrawer} />;
-      case 'add-claude':
-        return <AddClaudeDrawer initialProviderId={targetProviderId} />;
+        return <ClaudeAccountsDrawer />;
       case 'browser':
         return <BrowserDrawer onOpenDrawer={onOpenDrawer} />;
       case 'add-browser':

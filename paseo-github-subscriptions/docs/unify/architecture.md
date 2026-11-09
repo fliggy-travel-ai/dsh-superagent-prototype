@@ -55,7 +55,7 @@ Paseo 0.15 对模块注册的约束（feasibility 第 3、5 项）：
 | `providers/cloud-session` 云端会话 | Provider | Provider 与账号 | 现有（从主实例移出） | provider |
 | `providers/antigravity` Antigravity 多账号 | Provider | Provider 与账号 | 两个 antigravity-*-provider | provider（按配置列表注册，改列表要重载 Provider 实例） |
 | `providers/defaults` 新建会话默认设置 | 主 | Provider 与账号 | codex-speed-defaults、opencode-auto-accept-default、qoder-permission-defaults | `before("agent.create")` |
-| `usage/claude-accounts` Claude 账号额度、自动继续、登录续期、显示名称、添加账号 | 主 | Provider 与账号；会话时间线 | claude-quota-resume；新增添加账号引导（`config.patch`、终端接口） | usage source、timeline、hook |
+| `usage/claude-accounts` Claude 账号额度、自动继续、登录续期、显示名称 | 主 | Provider 与账号；会话时间线 | claude-quota-resume | usage source、timeline、hook |
 | `usage/claude-browser` 网页额度 | 主 | Provider 与账号 | 现有 | usage source |
 | `usage/provider-quotas` 其他 Provider 额度 | 主 | 额度面板（原生） | provider-quotas-usage-source、glm-usage-source | usage source（按配置开关，重载生效） |
 | `answer/presence` 在线、离线、自动 | 主 | 问题答复 | 现有。决定是否代答 | RPC |
@@ -122,7 +122,6 @@ Paseo 0.15 对模块注册的约束（feasibility 第 3、5 项）：
 - `agentDefaults` 只在创建请求没有显式值时生效（与三个旧插件行为一致）。Mac Mini 的独立用户 Claude 规则写成 `{ "provider": "claude-user-pilot", "modeIdWhenAuto": "bypassPermissions" }`。该 Provider 目前已不在配置中，迁移时不再写入。
 - Antigravity 账号的启动命令、`HOME`、代理继续写在 `~/.paseo/config.json` 的 `agents.providers`。插件只按列表注册 Provider ID 和标签。**Provider ID 必须保持 `antigravity-cy517`、`antigravity-beibeimao`**，否则已有会话无法恢复。
 - 新加 Antigravity 账号：在页面“添加账号”，写入两处配置，不复制插件。之后要**重载 Provider 实例**，页面先显示会受影响的运行中会话数。
-- Claude 账号（同一 macOS 用户）：页面“添加账号”用 `paseo.config.patch` 写 `agents.providers`（不手改 JSON，写前仍备份），插件建配置目录，用 Paseo 终端接口打开登录终端。浏览器登录和授权码是人工步骤（feasibility 第 2 项）。
 - 配置文件不合法时，相关模块显示错误并停用，不让整个插件停止。
 
 ### 4.3 两台机器的配置差异（迁移后）

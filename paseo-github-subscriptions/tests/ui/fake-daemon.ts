@@ -86,7 +86,6 @@ export class FakeDaemon {
       autoResumeDefault: true,
       hiddenBuiltinSources: ['claude'],
     },
-    activeFlow: null,
     error: null,
   };
   antigravity: AntigravitySnapshot = {
@@ -409,42 +408,6 @@ export class FakeDaemon {
           ),
         };
         return this.claudeAccounts;
-      case 'claude-accounts.login.start':
-      case 'claude-accounts.login.retry':
-        this.claudeAccounts = {
-          ...this.claudeAccounts,
-          activeFlow: {
-            providerId: String(input.providerId || 'claude-4'),
-            configDir: '~/.claude-4',
-            step: 3,
-            terminalId: 'term-demo',
-            workspaceId: 'ws-demo',
-            loginUrl: 'https://claude.ai/oauth/authorize?client_id=demo&state=st_demo',
-            detectedEmail: null,
-            requiresRealEmailConfirmation: false,
-            error: null,
-          },
-        };
-        return this.claudeAccounts;
-      case 'claude-accounts.login.submit-code': {
-        const providerId = String(input.providerId || `claude-${this.claudeAccounts.accounts.length + 1}`);
-        const added = {
-          providerId,
-          label: `Claude ${this.claudeAccounts.accounts.length + 1}`,
-          email: 'new@example.com',
-          appleLogin: false,
-          configDir: `~/.${providerId}`,
-          needsRelogin: false,
-          remainingPct: 100,
-        };
-        this.claudeAccounts = {
-          ...this.claudeAccounts,
-          quotaName: { ...this.claudeAccounts.quotaName, enabled: true, autoResumeDefault: true },
-          accounts: [...this.claudeAccounts.accounts, added],
-          activeFlow: null,
-        };
-        return this.claudeAccounts;
-      }
       case 'antigravity.snapshot':
         return this.antigravity;
       case 'antigravity.account.toggle':

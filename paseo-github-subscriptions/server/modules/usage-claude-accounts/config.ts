@@ -16,10 +16,9 @@ export const ClaudeAccountsSectionSchema = z.strictObject({
   legacyPluginId: z.string().min(1).default('claude-quota-resume'),
   /** 旧插件状态目录，默认 `<Paseo 目录>/claude-quota-resume`。 */
   legacyDirectory: z.string().min(1).optional(),
-  /** 添加账号和重新登录引导。在真机上验证完之前默认关闭。 */
-  loginGuide: z.boolean().default(false),
-  /** 登录终端所在工作区的名称。 */
-  loginWorkspaceName: z.string().min(1).default('账号登录'),
+  /** 兼容旧 machine.json：添加账号引导已删除（由 Paseo 自带），这两项读到后忽略。 */
+  loginGuide: z.unknown().optional().transform(() => undefined),
+  loginWorkspaceName: z.unknown().optional().transform(() => undefined),
 });
 export type ClaudeAccountsSection = z.infer<typeof ClaudeAccountsSectionSchema>;
 export const CLAUDE_ACCOUNTS_FALLBACK: ClaudeAccountsSection = ClaudeAccountsSectionSchema.parse({});
