@@ -699,6 +699,7 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
     quietError: null,
   };
 
+  const autoResumeCalls: Array<{ autoResumeDefault?: boolean }> = [];
   const BoundMain = bind(
     {
       store: {
@@ -709,6 +710,10 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
         subscribe: () => () => {},
         getState: () => baseControlState,
         bluetoothDevices: async () => ({ target: null, devices: [], error: null }),
+        configureClaudeAccounts: async (input: { autoResumeDefault?: boolean }) => {
+          autoResumeCalls.push(input);
+          return baseControlState.claudeAccounts;
+        },
       } as never,
       openScreen: () => {},
     },
@@ -735,10 +740,11 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   assert.equal(text.includes('飞猪云端开发环境'), false);
   const cloudSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '云端会话');
   assert.equal(cloudSwitch.length, 0, '云端会话卡片不应有开关');
-  const quotaCardSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === 'Claude 名称带额度');
-  assert.equal(quotaCardSwitch.length, 0, 'Claude 名称带额度卡片不应有开关');
-  assert.match(text, /当前最低 48%/);
-  // Claude 账号卡片不再有“添加账号”按钮；顶部提示保留红色提示，按钮改为提示文字
+  // 账号列表和名称带额度由 Paseo 提供：不再有“Claude 账号”“Claude 名称带额度”两张卡片
+  assert.equal(text.includes('查看本机 Claude 账号的登录状态并改名'), false, '不应有 Claude 账号卡片');
+  assert.equal(text.includes('Claude 名称带额度'), false, '不应有 Claude 名称带额度卡片');
+  assert.equal(text.includes('当前最低'), false, '页面不介绍名称带额度');
+  // 顶部提示保留红色提示，没有添加账号、重新登录按钮
   assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '添加账号').length, 0, 'Claude 账号卡片不应有添加账号按钮');
   assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '重新登录').length, 0, '顶部提示不应有重新登录按钮');
   assert.match(text, /需要重新登录/);
@@ -750,39 +756,22 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
     '主实例查不到 Antigravity 模块且 antigravityStatus=disabled 时，不应把 Antigravity 当未启用显示，而应按基线隐藏卡片',
   );
 
-  // 1b. 新增项 E：Claude 名称带额度抽屉（claude-quota）不显示“在名称后显示剩余额度”开关，只保留自动继续默认开关
+  // 2. “新建 Claude 会话默认开启自动继续”开关在本机配置面板，沿用原保存接口
   renderer.reset();
   tree = renderer.render(() =>
     React.createElement(BoundMain, {
       theme: mockTheme,
       host: { id: 'h1', label: 'Host' },
       layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'claude-quota' },
+      params: { page: 'providers', drawer: 'machine-config' },
     } as never),
   );
-  text = collectText(tree);
-  assert.equal(text.includes('在名称后显示剩余额度'), false, '抽屉不应有名称带额度关闭开关');
-  assert.match(text, /新建 Claude 会话默认开启自动继续/);
-
-  // 2. Claude 账号抽屉：显示“配置目录”列，不重复显示“剩余额度”列
-  renderer.reset();
-  tree = renderer.render(() =>
-    React.createElement(BoundMain, {
-      theme: mockTheme,
-      host: { id: 'h1', label: 'Host' },
-      layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'claude-accounts' },
-    } as never),
-  );
-  text = collectText(tree);
-  assert.match(text, /配置目录/);
-  assert.equal(text.includes('剩余额度'), false, 'Claude 账号抽屉不应重复展示剩余额度列');
-
-  // 3. 添加 Claude 账号由 Paseo 自带：账号列表不再有“重新登录”按钮，改为提示去 Provider 设置
-  assert.match(text, /需要重新登录/);
-  assert.match(text, /请在 Paseo 的 Provider 设置中重新登录/);
-  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '重新登录').length, 0, '账号列表不应有重新登录按钮');
-  assert.equal(findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '添加 Claude 账号').length, 0, '不应有添加 Claude 账号按钮');
+  const autoResumeSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '新建 Claude 会话默认开启自动继续');
+  assert.equal(autoResumeSwitch.length, 1, '本机配置面板应有自动继续默认开关');
+  assert.equal(autoResumeSwitch[0]!.props.value, baseControlState.claudeAccounts.quotaName.autoResumeDefault);
+  assert.equal(autoResumeSwitch[0]!.props.disabled, false);
+  (autoResumeSwitch[0]!.props.onValueChange as (value: boolean) => void)(!baseControlState.claudeAccounts.quotaName.autoResumeDefault);
+  assert.deepEqual(autoResumeCalls, [{ autoResumeDefault: !baseControlState.claudeAccounts.quotaName.autoResumeDefault }]);
 
   // 4. 问题答复页与升级通知抽屉：正确文案、status=stopped 显示“未运行”、无蓝牙假开关、可编辑时段与最近投递记录
   renderer.reset();
@@ -1138,18 +1127,6 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   const okProvidersText = collectText(tree);
   assert.doesNotMatch(okProvidersText, /始终开启（默认功能）/);
 
-  // K: ClaudeQuotaDrawer 在 hideBuiltinApplied=false 时显示“未生效”
-  renderer.reset();
-  tree = renderer.render(() =>
-    React.createElement(BoundOkMain, {
-      theme: mockTheme,
-      host: { id: 'h1', label: 'Host' },
-      layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'claude-quota' },
-    } as never),
-  );
-  assert.match(collectText(tree), /未生效/);
-
   // 第 5 项：SessionDefaultsDrawer 添加规则默认 newAutoApprove=false，五类 Provider 可选，调用 saveRules 不强制启用总开关
   let savedDefaultsCall: unknown = null;
   const defaultsDaemon = new FakeDaemon('shadow');
@@ -1368,11 +1345,13 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
       theme: mockTheme,
       host: { id: 'h1', label: 'Host' },
       layout: { compact: false, platform: 'web' },
-      params: { page: 'providers', drawer: 'claude-quota' },
+      params: { page: 'providers', drawer: 'machine-config' },
     } as never),
   );
   const text = collectText(tree);
-  // 第 2 项：Claude 账号与名称带额度卡片及抽屉均显示读取失败原因，不显示“0 个账号 正常”或“已开启”
+  // 第 2 项：本机配置面板的自动继续开关显示读取失败原因并禁用，不显示“0 个账号 正常”或“已开启”
+  const brokenAutoResume = findNodes(tree, el => el.type === 'Switch' && el.props.accessibilityLabel === '新建 Claude 会话默认开启自动继续')[0];
+  assert.equal(brokenAutoResume?.props.disabled, true, 'Claude 账号模块读取失败时自动继续开关应禁用');
   assert.match(text, /旧插件 claude-quota-resume 仍启用/);
   assert.doesNotMatch(text, /0 个账号/);
   assert.doesNotMatch(text, /已开启/);

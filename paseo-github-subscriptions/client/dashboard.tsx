@@ -112,7 +112,6 @@ function ProvidersPage({
     cloudSessionError,
     claudeAccounts,
     claudeAccountsStatus,
-    claudeAccountsError,
     antigravity,
     antigravityStatus,
     antigravityError,
@@ -145,19 +144,15 @@ function ProvidersPage({
   };
 
   const pausedAll = machineSettings?.pausedAll ?? false;
-  const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
   const claudeAccountsDisabled =
     isModuleOff('usage.claudeAccounts', machineSettings, modules) ||
     claudeAccountsStatus === 'disabled' ||
     Boolean(claudeAccounts && !claudeAccounts.enabled);
-  const claudeQuotaDisabled =
-    claudeAccountsDisabled || Boolean(claudeAccounts && !claudeAccounts.quotaName.enabled);
   const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
   const defaultsModOff = isModuleOff('providers.defaults', machineSettings, modules);
   const agModOff = isModuleOff('providers.antigravity', machineSettings, modules);
   const accounts = claudeAccounts?.accounts ?? [];
   const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
-  const lowestClaudePct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
 
   const browserEnvCount =
@@ -239,37 +234,6 @@ function ProvidersPage({
 
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
         <FeatureCard
-          title="Claude 账号"
-          description="查看本机 Claude 账号的登录状态并改名。"
-          kv={
-            claudeAccountsStatus === 'error' || Boolean(claudeError) ? (
-              <>
-                <Chip label="读取失败" tone="danger" />
-                <Text style={s.small}>读取失败：{claudeError ?? '无法读取账号状态'}</Text>
-              </>
-            ) : claudeAccountsDisabled ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
-            ) : !claudeAccounts ? (
-              <Text style={s.small}>正在读取…</Text>
-            ) : (
-              <>
-                <Text style={s.small}>{accounts.length} 个账号</Text>
-                {reloginAccounts.length > 0 ? (
-                  <Chip label={`${reloginAccounts.length} 个需要重新登录`} tone="danger" />
-                ) : (
-                  <Chip label="正常" tone="success" />
-                )}
-              </>
-            )
-          }
-          actions={
-            <>
-              <Btn small label="编辑" onPress={() => onOpenDrawer('claude-accounts')} />
-            </>
-          }
-        />
-
-        <FeatureCard
           title="网页版 claude.ai"
           trailing={
             <Switch
@@ -313,28 +277,6 @@ function ProvidersPage({
               <Btn small label="编辑" onPress={() => onOpenDrawer('browser')} />
             </>
           }
-        />
-
-        <FeatureCard
-          title="Claude 名称带额度"
-          description="在会话的 Claude 名称后显示 5 小时与 7 天剩余百分比。"
-          kv={
-            claudeAccountsStatus === 'error' || Boolean(claudeError) ? (
-              <>
-                <Chip label="读取失败" tone="danger" />
-                <Text style={s.small}>读取失败：{claudeError ?? '无法读取额度状态'}</Text>
-              </>
-            ) : claudeQuotaDisabled ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
-            ) : !claudeAccounts ? (
-              <Text style={s.small}>正在读取…</Text>
-            ) : (
-              <Chip
-                label={lowestClaudePct !== null ? `当前最低 ${lowestClaudePct}%` : '按账号显示 5h / 7d 额度'}
-                tone={lowestClaudePct !== null && lowestClaudePct < 20 ? 'warning' : 'success'}
-              />
-            )}
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('claude-quota')} />}
         />
 
         <FeatureCard
