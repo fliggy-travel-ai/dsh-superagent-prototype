@@ -189,7 +189,25 @@
     if (root.querySelector?.('button[data-question-answer]')) return false;
     return /^Permission request:/i.test((root.getAttribute?.('aria-label') || '').trim());
   }
-  function getCheckedControls(scope) {
+  function nodeContains(ancestor, descendant) {
+    if (!ancestor || !descendant) return false;
+    if (typeof ancestor.contains === 'function') return ancestor.contains(descendant);
+    for (let cur = descendant; cur; cur = cur.parentElement) {
+      if (cur === ancestor) return true;
+    }
+    return false;
+  }
+  function isNodeChecked(node) {
+    return Boolean(
+      node &&
+        (node.checked === true ||
+          node.getAttribute?.('aria-checked') === 'true' ||
+          node.getAttribute?.('aria-pressed') === 'true'),
+    );
+  }
+  function getRawCheckedNodes(scope) {
+    const root = getCardRoot(scope);
+    if (!root) return [];
     const result = [];
     const seen = new Set();
     const add = node => {
@@ -198,31 +216,70 @@
         result.push(node);
       }
     };
-    const root = getCardRoot(scope);
-    for (const target of [scope, root, root?.parentElement, scope?.closest?.('[role="dialog"],dialog,form')]) {
-      if (!target) continue;
-      for (const node of target.querySelectorAll?.('input[type="checkbox"],[role="checkbox"],[role="switch"]') || []) {
-        if (node.checked === true || node.getAttribute?.('aria-checked') === 'true') add(node);
-      }
-      const single = target.querySelector?.('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"],[role="switch"][aria-checked="true"]');
-      if (single) add(single);
+    for (const node of root.querySelectorAll?.('input[type="checkbox"],[role="checkbox"],[role="switch"],[aria-pressed="true"]') || []) {
+      if (isNodeChecked(node)) add(node);
     }
+    const single = root.querySelector?.('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"],[role="switch"][aria-checked="true"],[aria-pressed="true"]');
+    if (single) add(single);
     return result;
   }
-  function uncheckRememberControls(scope) {
-    for (const box of getCheckedControls(scope)) {
-      if (typeof box.click !== 'function') return false;
-      triggerApprovalClick(box);
-      if (box.checked === true) box.checked = false;
-      if (box.getAttribute?.('aria-checked') === 'true') box.setAttribute?.('aria-checked', 'false');
+  function getCheckedControls(scope) {
+    const root = getCardRoot(scope);
+    if (!root) return [];
+    const raw = getRawCheckedNodes(root);
+    const candidates = [];
+    for (const node of raw) {
+      const isVis = typeof node.getBoundingClientRect === 'function' ? visible(node) : true;
+      if (isVis) {
+        candidates.push(node);
+        continue;
+      }
+      const id = (node.getAttribute?.('id') || node.id || '').trim();
+      const assocLabel = node.closest?.('label') || (id ? root.querySelector?.(`label[for="${id}"]`) : null);
+      if (assocLabel && nodeContains(root, assocLabel) && (typeof assocLabel.getBoundingClientRect !== 'function' || visible(assocLabel))) {
+        candidates.push(assocLabel);
+      }
     }
-    return getCheckedControls(scope).length === 0;
+    const deduped = [];
+    const seenLabels = new Set();
+    for (const node of candidates) {
+      if (deduped.includes(node)) continue;
+      const enclosingLabel = node.tagName?.toLowerCase?.() === 'label' ? node : node.closest?.('label');
+      if (enclosingLabel) {
+        if (seenLabels.has(enclosingLabel)) continue;
+        seenLabels.add(enclosingLabel);
+      }
+      const id = (node.getAttribute?.('id') || node.id || '').trim();
+      const forLabel = id ? root.querySelector?.(`label[for="${id}"]`) : null;
+      if (forLabel) {
+        if (seenLabels.has(forLabel)) continue;
+        seenLabels.add(forLabel);
+      }
+      if (deduped.some(existing => nodeContains(existing, node) || nodeContains(node, existing))) continue;
+      deduped.push(node);
+    }
+    return deduped;
+  }
+  async function uncheckRememberControls(scope) {
+    const raw = getRawCheckedNodes(scope);
+    if (raw.length === 0) return true;
+    const controls = getCheckedControls(scope);
+    if (controls.length === 0 || controls.some(box => typeof box.click !== 'function')) return false;
+    for (const box of controls) {
+      triggerApprovalClick(box);
+    }
+    await new Promise(resolve => setTimeout(resolve, 0));
+    return getRawCheckedNodes(scope).length === 0;
   }
   function cardSafe(scope) {
     const root = getCardRoot(scope);
     if (hasCardRootAttr(root) && !isPermissionCard(root)) return false;
     if (scope.querySelector?.('button[data-question-answer],input[type="radio"],[role="radio"],[role="radiogroup"],select,[role="listbox"]')) return false;
-    if (getCheckedControls(scope).some(box => typeof box.click !== 'function')) return false;
+    const raw = getRawCheckedNodes(scope);
+    if (raw.length > 0) {
+      const controls = getCheckedControls(scope);
+      if (controls.length === 0 || controls.some(box => typeof box.click !== 'function')) return false;
+    }
     return true;
   }
   function eligible(button, scope, text) {
@@ -332,7 +389,7 @@
         }
         readGate = 'read_gate_scrolled';
       }
-      if (!uncheckRememberControls(scope)) {
+      if (!(await uncheckRememberControls(scope))) {
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
         await report('skipped');
@@ -409,7 +466,7 @@
         }
         readGate = 'read_gate_scrolled';
       }
-      if (!uncheckRememberControls(card)) {
+      if (!(await uncheckRememberControls(card))) {
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
         await report('skipped');

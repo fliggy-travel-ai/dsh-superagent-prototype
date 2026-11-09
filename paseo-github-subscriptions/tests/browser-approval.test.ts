@@ -2098,7 +2098,7 @@ test('approval-reserve 被后台拒绝时，内容脚本在本地给该卡片记
 
 
 // #1704 评论 6732392628：阅读门槛（“Scroll to the end to allow this.”）自动滚到底，复核提示消失后再点 Allow once。
-async function runReadGateScenario(options: { clearsOnScroll: boolean; persistentChecked?: boolean; rounds?: number; changeOnScroll?: (card: DomNode) => void }) {
+async function runReadGateScenario(options: { clearsOnScroll: boolean; persistentChecked?: boolean; uncheckableChecked?: boolean; rounds?: number; changeOnScroll?: (card: DomNode) => void }) {
   const fixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-read-gate.json', import.meta.url), 'utf8'));
   const cardTree = DomNode.fromTuple(fixture.tree);
   const body = new DomNode('body', {}, []);
@@ -2113,6 +2113,11 @@ async function runReadGateScenario(options: { clearsOnScroll: boolean; persisten
   const allowOnce = buttons.find(b => b.innerText.includes('Allow once'))!;
   const more = buttons.find(b => b.getAttribute('aria-label') === 'More allow options')!;
   if (options.persistentChecked) card.appendChild(new DomNode('input', { type: 'checkbox', 'aria-checked': 'true', role: 'checkbox' }, []));
+  if (options.uncheckableChecked) {
+    const box = new DomNode('input', { type: 'checkbox', 'aria-checked': 'true', role: 'checkbox' }, []);
+    box.onClick = () => box.setAttribute('aria-checked', box.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+    card.appendChild(box);
+  }
   // 参数区可滚动；滚到底并触发 scroll 事件后页面才去掉门槛提示（clearsOnScroll 为假时页面不认这次滚动）
   rows.scrollHeight = 400; rows.clientHeight = 100; rows.scrollTop = 0;
   const scrollEvents: any[] = [];
@@ -2172,12 +2177,18 @@ test('阅读门槛：滚动后提示仍在时不点 Allow once，记 skipped / r
   assert.ok(run.results.length <= 36, `重试次数 ${run.results.length} 超过单卡上限`);
 });
 
-test('阅读门槛：卡片带默认勾选的记住选择框时先取消勾选再滚到底并点 Allow once', async () => {
-  const run = await runReadGateScenario({ clearsOnScroll: true, persistentChecked: true });
-  assert.ok(run.rows.scrollTop + run.rows.clientHeight >= run.rows.scrollHeight, '参数区没有滚到底');
-  assert.equal(run.allowOnce.clicks, 1);
-  assert.equal(run.deny.clicks, 0);
-  assert.deepEqual(run.results, [{ status: 'dismissed', readGate: 'read_gate_scrolled' }]);
+test('阅读门槛：卡片带可取消勾选框时先取消再点 Allow once；若取消失败仍勾选则不点且记 skipped', async () => {
+  const okRun = await runReadGateScenario({ clearsOnScroll: true, uncheckableChecked: true });
+  assert.ok(okRun.rows.scrollTop + okRun.rows.clientHeight >= okRun.rows.scrollHeight, '参数区没有滚到底');
+  assert.equal(okRun.allowOnce.clicks, 1);
+  assert.equal(okRun.deny.clicks, 0);
+  assert.deepEqual(okRun.results, [{ status: 'dismissed', readGate: 'read_gate_scrolled' }]);
+
+  const failRun = await runReadGateScenario({ clearsOnScroll: true, persistentChecked: true });
+  assert.equal(failRun.allowOnce.clicks, 0, '取消勾选失败仍处于勾选状态时不得点击 Allow once');
+  assert.equal(failRun.deny.clicks, 0);
+  assert.ok(failRun.results.length >= 1);
+  assert.ok(failRun.results.every(r => r.status === 'skipped'));
 });
 
 test('后台把阅读门槛结果 readGate 写进点同意记录并随同步上报', async () => {
@@ -2228,6 +2239,7 @@ test('阅读门槛：滚动后出现 Plan/remember 或默认勾选框时仍自�
     clearsOnScroll: true,
     changeOnScroll: (card: DomNode) => {
       checkbox = new DomNode('input', { type: 'checkbox', role: 'checkbox', 'aria-checked': 'true' }, []);
+      checkbox.onClick = () => checkbox!.setAttribute('aria-checked', checkbox!.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
       card.appendChild(checkbox);
       card.appendChild(new DomNode('p', {}, ['Plan: proceed with ExitPlanMode, AskUserQuestion (Recommended) 请选择 Always allow remember this choice']));
     },
@@ -2442,4 +2454,88 @@ test('1737-remove-automation：结构识别权限卡不受 plan/AskUserQuestion/
     await bridge.stop();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('记住此选择安全取消：等一帧渲染复核、label 与隐藏 input 去重只点一次、不触碰卡片根节点外的父级或外层 dialog 开关', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+
+  // 场景 A：label + 隐藏 input（若各点一次会勾回去），以及卡片外父节点 / 外层 dialog 上的开关（绝不能被点）
+  const card = DomNode.fromTuple(directFixture.tree);
+  const cardRoot = card.matches('[data-approval-card-root]') ? card : card.querySelector('[data-approval-card-root]')!;
+  const allowBtn = card.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+
+  let rememberChecked = true;
+  const hiddenInput = new DomNode('input', { id: 'rem-1', type: 'checkbox', 'aria-checked': 'true' }, []);
+  hiddenInput.hidden = true;
+  (hiddenInput as any).checked = true;
+  const rememberLabel = new DomNode('label', { for: 'rem-1', role: 'checkbox', 'aria-checked': 'true' }, ['Remember this choice']);
+  rememberLabel.appendChild(hiddenInput);
+
+  const toggleRemember = () => {
+    // 模拟真实框架：点击后下一轮渲染才更新 DOM 状态，且再次点击会重新勾回 true
+    setTimeoutFlagged(() => {
+      rememberChecked = !rememberChecked;
+      (hiddenInput as any).checked = rememberChecked;
+      hiddenInput.setAttribute('aria-checked', String(rememberChecked));
+      rememberLabel.setAttribute('aria-checked', String(rememberChecked));
+    });
+  };
+  rememberLabel.onClick = toggleRemember;
+  hiddenInput.onClick = toggleRemember;
+  cardRoot.appendChild(rememberLabel);
+
+  const outerWrapper = new DomNode('div', {}, []);
+  const outerParentSwitch = new DomNode('button', { role: 'switch', 'aria-checked': 'true' }, ['Page toggle']);
+  outerWrapper.appendChild(outerParentSwitch);
+  outerWrapper.appendChild(card);
+  const outerDialog = new DomNode('div', { role: 'dialog' }, []);
+  const outerDialogSwitch = new DomNode('input', { type: 'checkbox', 'aria-checked': 'true' }, []);
+  (outerDialogSwitch as any).checked = true;
+  outerDialog.appendChild(outerDialogSwitch);
+  outerDialog.appendChild(outerWrapper);
+
+  const body = new DomNode('body', {}, []);
+  body.appendChild(outerDialog);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  const timers: Array<() => void> = [];
+  const setTimeoutFlagged = (fn: () => void) => { timers.push(fn); };
+  const results: string[] = [];
+  let uuid = 0;
+
+  allowBtn.onClick = () => {
+    assert.equal(rememberChecked, false, '点击 Allow once 时记住选择框必须真正变为未勾选');
+    card.parentElement = null;
+  };
+
+  const context = {
+    document: { documentElement: html, body, activeElement: body, querySelectorAll: (sel: string) => html.querySelectorAll(sel), querySelector: (sel: string) => html.querySelector(sel) },
+    location: { origin: 'https://claude.ai', pathname: '/code/session_remember123' },
+    chrome: {
+      storage: { local: { get: async () => ({ approvalEnabled: true }) }, onChanged: { addListener: () => {} } },
+      runtime: { sendMessage: async (msg: any) => {
+        if (msg.type === 'approval-reserve') return { allowed: true, reservationId: `rem-${++uuid}` };
+        if (msg.type === 'approval-result') results.push(msg.status);
+      } },
+    },
+    crypto: { randomUUID: () => `rem-uuid-${++uuid}`, subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() } },
+    TextEncoder, Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void) => { timers.push(fn); }, setInterval: () => {}, Date, WeakMap,
+  };
+
+  runInNewContext(source, context);
+  for (let step = 0; step < 30; step++) {
+    while (timers.length) timers.shift()!();
+    await Promise.resolve();
+  }
+
+  assert.equal(outerParentSwitch.clicks, 0, '不应点击卡片父元素上的开关');
+  assert.equal(outerDialogSwitch.clicks, 0, '不应点击外层 dialog 上的复选框');
+  assert.equal(rememberLabel.clicks + hiddenInput.clicks, 1, 'label 与隐藏 input 去重后只能点一次');
+  assert.equal(rememberChecked, false);
+  assert.equal(allowBtn.clicks, 1);
+  assert.deepEqual(results, ['dismissed']);
 });
