@@ -1,11 +1,10 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import http from "node:http";
-import https from "node:https";
 import os from "node:os";
 import path from "node:path";
-import tls from "node:tls";
 import { z } from "zod";
+import { writeJsonFile } from "../../../core/provider-config.ts";
+import { smartFetch } from "./net.ts";
 import { discoverTokenSwitchAccounts, fetchTokenHubUsage } from "./token-switch.ts";
 import {
   balanceToneFromRemaining,
@@ -145,171 +144,6 @@ function decodeJwtPayload(token: unknown): Record<string, any> | null {
   } catch {
     return null;
   }
-}
-
-function getSystemProxy(): string | null {
-  for (const key of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]) {
-    if (process.env[key]) return process.env[key]!;
-  }
-  try {
-    const out = execFileSync("scutil", ["--proxy"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const enabled = /HTTPEnable\s*:\s*1/u.test(out);
-    const host = out.match(/HTTPProxy\s*:\s*(\S+)/u)?.[1];
-    const port = out.match(/HTTPPort\s*:\s*(\d+)/u)?.[1];
-    if (enabled && host && port) return `http://${host}:${port}`;
-  } catch {
-    // Ignore scutil errors on non-macOS or restricted environments.
-  }
-  return null;
-}
-
-interface SimpleResponse {
-  ok: boolean;
-  status: number;
-  text(): Promise<string>;
-  json(): Promise<any>;
-}
-
-function directFetch(
-  urlString: string,
-  options: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string;
-    timeoutMs?: number;
-  } = {},
-): Promise<SimpleResponse> {
-  const { method = "GET", headers = {}, body, timeoutMs = 15_000 } = options;
-  return new Promise((resolve, reject) => {
-    const target = new URL(urlString);
-    const transport = target.protocol === "https:" ? https : http;
-    const req = transport.request(
-      target,
-      {
-        method,
-        headers: {
-          ...headers,
-          ...(body ? { "Content-Length": String(Buffer.byteLength(body)) } : {}),
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          const status = res.statusCode ?? 0;
-          resolve({
-            ok: status >= 200 && status < 300,
-            status,
-            text: async () => text,
-            json: async () => JSON.parse(text),
-          });
-        });
-      },
-    );
-    req.setTimeout(timeoutMs, () => req.destroy(new Error("request timeout")));
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-function tunnelFetch(
-  urlString: string,
-  proxyUrl: string,
-  options: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string;
-    timeoutMs?: number;
-  } = {},
-): Promise<SimpleResponse> {
-  const { method = "GET", headers = {}, body, timeoutMs = 15_000 } = options;
-  const target = new URL(urlString);
-  if (target.protocol !== "https:") {
-    return directFetch(urlString, options);
-  }
-  const proxy = new URL(proxyUrl);
-  return new Promise((resolve, reject) => {
-    const connectReq = http.request({
-      host: proxy.hostname,
-      port: Number(proxy.port) || 80,
-      method: "CONNECT",
-      path: `${target.hostname}:${target.port || 443}`,
-    });
-    connectReq.setTimeout(timeoutMs, () => {
-      connectReq.destroy(new Error("proxy connect timeout"));
-    });
-    connectReq.on("error", reject);
-    connectReq.on("connect", (res, socket) => {
-      if (res.statusCode !== 200) {
-        socket.destroy();
-        reject(new Error(`proxy CONNECT ${res.statusCode}`));
-        return;
-      }
-      const tlsSocket = tls.connect({
-        socket,
-        servername: target.hostname,
-      });
-      const req = https.request(
-        {
-          hostname: target.hostname,
-          port: target.port || 443,
-          path: `${target.pathname}${target.search}`,
-          method,
-          headers: {
-            Host: target.host,
-            ...headers,
-            ...(body ? { "Content-Length": String(Buffer.byteLength(body)) } : {}),
-          },
-          createConnection: () => tlsSocket,
-        },
-        (response) => {
-          const chunks: Buffer[] = [];
-          response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-          response.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf8");
-            const status = response.statusCode ?? 0;
-            resolve({
-              ok: status >= 200 && status < 300,
-              status,
-              text: async () => text,
-              json: async () => JSON.parse(text),
-            });
-          });
-        },
-      );
-      req.setTimeout(timeoutMs, () => req.destroy(new Error("request timeout")));
-      req.on("error", reject);
-      if (body) req.write(body);
-      req.end();
-    });
-    connectReq.end();
-  });
-}
-
-async function smartFetch(
-  urlString: string,
-  options: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string;
-    timeoutMs?: number;
-    proxyUrl?: string;
-  } = {},
-): Promise<SimpleResponse> {
-  const proxyUrl = options.proxyUrl || getSystemProxy();
-  if (proxyUrl) {
-    try {
-      return await tunnelFetch(urlString, proxyUrl, options);
-    } catch {
-      return await directFetch(urlString, options);
-    }
-  }
-  return await directFetch(urlString, options);
 }
 
 function roundPct(value: number | null | undefined): number | null {
@@ -499,6 +333,7 @@ async function refreshAntigravityAccessToken(
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
     proxyUrl,
+    sensitive: true,
   });
   if (!res.ok) return null;
   const refreshed = await res.json();
@@ -521,9 +356,9 @@ async function refreshAntigravityAccessToken(
   };
   if (typeof refreshed.id_token === "string") next.id_token = refreshed.id_token;
   try {
-    fs.writeFileSync(authPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    writeJsonFile(authPath, next);
   } catch {
-    // Best-effort token cache update.
+    // 写不回时本次仍可用新令牌；下一轮会再刷新。
   }
   return refreshed.access_token;
 }
@@ -691,52 +526,19 @@ function discoverCodexAccounts(scope: UsageScope): UsageAccount[] {
   return accounts;
 }
 
-async function refreshCodexToken(authPath: string, auth: Record<string, any>, proxyUrl?: string) {
-  const refreshToken = auth?.tokens?.refresh_token;
-  if (!refreshToken) return null;
-  const res = await smartFetch("https://auth.openai.com/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      client_id: CODEX_CLIENT_ID,
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-    }),
-    proxyUrl,
-  });
-  if (!res.ok) return null;
-  const refreshed = await res.json();
-  if (!refreshed?.access_token) return null;
-  const next = {
-    ...auth,
-    tokens: {
-      ...auth.tokens,
-      access_token: refreshed.access_token,
-      refresh_token: refreshed.refresh_token || auth.tokens.refresh_token,
-      id_token: refreshed.id_token || auth.tokens.id_token,
-    },
-    last_refresh: new Date().toISOString(),
-  };
-  try {
-    fs.writeFileSync(authPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  } catch {
-    // Best-effort write.
-  }
-  return next;
-}
-
 async function fetchCodexUsage(input: AccountInput): Promise<UsageReport> {
   if (!input.authPath || !fs.existsSync(input.authPath)) {
     return { status: "error", error: "Missing Codex auth.json" };
   }
-  let auth = readJson<Record<string, any>>(input.authPath);
+  const auth = readJson<Record<string, any>>(input.authPath);
   if (!auth?.tokens?.access_token) {
     return { status: "error", error: "Missing Codex access_token" };
   }
 
+  // 不刷新 Codex 令牌：刷新令牌被插件用掉后，Codex CLI 持有的旧令牌失效，会被登出。只提示，让 Codex CLI 自己刷新。
   const claims = decodeJwtPayload(auth.tokens.access_token);
-  if (claims?.exp && claims.exp * 1000 <= Date.now() + 60_000) {
-    auth = (await refreshCodexToken(input.authPath, auth, input.proxyUrl)) || auth;
+  if (claims?.exp && claims.exp * 1000 <= Date.now()) {
+    return { status: "error", error: "Codex 令牌已过期，插件不会刷新（刷新会让 Codex CLI 登出）。请运行一次 codex 或 codex login" };
   }
 
   const callUsage = (token: string, accountId?: string) =>
@@ -750,14 +552,7 @@ async function fetchCodexUsage(input: AccountInput): Promise<UsageReport> {
       proxyUrl: input.proxyUrl,
     });
 
-  let res = await callUsage(auth.tokens.access_token, auth.tokens.account_id);
-  if ((res.status === 401 || res.status === 403) && auth.tokens.refresh_token) {
-    const refreshed = await refreshCodexToken(input.authPath, auth, input.proxyUrl);
-    if (refreshed) {
-      auth = refreshed;
-      res = await callUsage(auth.tokens.access_token, auth.tokens.account_id);
-    }
-  }
+  const res = await callUsage(auth.tokens.access_token, auth.tokens.account_id);
 
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
@@ -894,19 +689,18 @@ async function fetchCursorUsage(input: AccountInput): Promise<UsageReport> {
         refresh_token: auth.refreshToken,
       }),
       proxyUrl: input.proxyUrl,
+      sensitive: true,
     });
     if (refreshRes.ok) {
       const refreshed = await refreshRes.json();
       if (refreshed?.access_token) {
         accessToken = String(refreshed.access_token);
         try {
-          fs.writeFileSync(
-            input.authPath,
-            `${JSON.stringify({ ...auth, accessToken }, null, 2)}\n`,
-            { mode: 0o600 },
-          );
+          // 刷新响应带新的刷新令牌时必须一起保存，否则旧令牌下次失效。
+          const refreshToken = typeof refreshed.refresh_token === "string" && refreshed.refresh_token ? refreshed.refresh_token : auth.refreshToken;
+          writeJsonFile(input.authPath, { ...auth, accessToken, refreshToken });
         } catch {
-          // Best-effort write.
+          // 写不回时本次仍可用新令牌。
         }
       }
     }
@@ -1060,16 +854,34 @@ function discoverGrokAccounts(scope: UsageScope): UsageAccount[] {
   return accounts;
 }
 
+/** 进行中的子进程：模块停止时统一结束。stdin 写入已关闭的管道会触发 error，必须有监听，否则整个进程崩溃。 */
+const usageChildren = new Set<ChildProcess>();
+
+function trackChild<T extends ChildProcess>(child: T): T {
+  usageChildren.add(child);
+  const forget = () => { usageChildren.delete(child); };
+  child.on("close", forget);
+  child.on("error", forget);
+  child.stdin?.on("error", () => {});
+  return child;
+}
+
+export const runningUsageChildren = (): number => usageChildren.size;
+
+export function stopUsageChildren(): void {
+  for (const child of usageChildren) child.kill("SIGTERM");
+}
+
 function refreshGrokWithCli(command: string[], env: Record<string, string> = {}): Promise<void> {
   const [file, ...args] = command;
   if (!file) return Promise.resolve();
   return new Promise((resolve) => {
-    const child = spawn(file, args, {
+    const child = trackChild(spawn(file, args, {
       cwd: "/tmp",
       env: { ...process.env, ...env },
       stdio: ["pipe", "ignore", "ignore"],
       timeout: 30_000,
-    });
+    }));
     child.on("error", () => resolve());
     child.on("close", () => resolve());
     child.stdin.end(ACP_HANDSHAKE);
@@ -1373,13 +1185,13 @@ async function fetchQoderUsage(input: AccountInput): Promise<UsageReport> {
   }
 
   return await new Promise<UsageReport>((resolve) => {
-    const child = spawn(binPath, ["--sdk"], {
+    const child = trackChild(spawn(binPath, ["--sdk"], {
       env: {
         ...process.env,
         HOME: input.homeDir || REAL_HOME,
       },
       stdio: ["pipe", "pipe", "pipe"],
-    });
+    }));
 
     let settled = false;
     let stdoutBuf = "";

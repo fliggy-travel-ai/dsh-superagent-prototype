@@ -17,7 +17,7 @@ import { backupFile, readJsonStrict, writeJsonFile } from '../../core/provider-c
 import { isMainInstance, type Module, type Services } from '../types.ts';
 import { normalizeHideBuiltinId } from './hide-builtin.ts';
 import { privateUsageSource } from './server/usage-display.ts';
-import { createUsageSources } from './server/usage.ts';
+import { createUsageSources, stopUsageChildren } from './server/usage.ts';
 
 const SOURCE_ID_SET = new Set<string>(PROVIDER_QUOTA_SOURCE_IDS);
 
@@ -237,5 +237,7 @@ export const providerQuotasModule: Module<ProviderQuotasConfig> = {
       lastErrors.set(services, message);
       context.fail(new Error(message));
     }
+    // 模块停止时结束进行中的 qodercli、grok 等子进程。
+    return stopUsageChildren;
   },
 };
