@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { BluetoothSnapshot } from '../shared/bluetooth.ts';
 import type { BrowserUsageSettings } from '../shared/browser-usage.ts';
-import type { AgentDefaultRule } from '../shared/defaults.ts';
 import type { EscalationSnapshot } from '../shared/escalation.ts';
 import type { Preferences } from '../shared/model.ts';
 import { ago, until } from './format.ts';
@@ -16,7 +15,6 @@ type ImmediateWindow = EscalationSnapshot['immediate'][number];
 export type DrawerId =
   | 'browser'
   | 'add-browser'
-  | 'session-defaults'
   | 'cloud'
   | 'qa-mode'
   | 'bluetooth'
@@ -24,13 +22,11 @@ export type DrawerId =
   | 'quiet-children'
   | 'speech'
   | 'approval'
-  | 'github-config'
-  | 'machine-config';
+  | 'github-config';
 
 const DRAWER_TITLES: Record<DrawerId, string> = {
   browser: '网页版 claude.ai',
   'add-browser': '添加浏览器环境',
-  'session-defaults': '新建会话默认设置',
   cloud: '云端会话',
   'qa-mode': '问答模式',
   bluetooth: '蓝牙在场判定',
@@ -39,7 +35,6 @@ const DRAWER_TITLES: Record<DrawerId, string> = {
   speech: '语音提醒',
   approval: '精确授权',
   'github-config': 'GitHub 订阅设置',
-  'machine-config': '本机配置',
 };
 
 function SectionTitle({ children }: { children: ReactNode }) {
@@ -114,8 +109,9 @@ function StepRow(props: { num: number; title: string; children?: ReactNode }) {
 }
 
 function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
-  const { s, control } = useUi();
-  const { browser, browserError, automation } = useControlState();
+  const { s, control, theme } = useUi();
+  const { browser, browserError, automation, claudeAccounts, claudeAccountsStatus, claudeAccountsError, moduleReloading } = useControlState();
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const [pairingText, setPairingText] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -156,6 +152,15 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           <Text style={s.text}>读取失败：{browserError}</Text>
         </Notice>
       ) : null}
+      <View style={[s.row, { justifyContent: 'space-between' }]}>
+        <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
+        <Switch accessibilityLabel="新建 Claude 会话默认开启自动继续"
+          disabled={moduleReloading || claudeAccountsStatus !== 'ready' || !claudeAccounts?.enabled || Boolean(claudeAccountsError || claudeAccounts?.error)}
+          value={claudeAccounts?.quotaName.autoResumeDefault ?? false}
+          onValueChange={autoResumeDefault => void control.configureClaudeAccounts({ autoResumeDefault }).catch(e => setResumeError(errorMessage(e)))}
+          trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />
+      </View>
+      {resumeError || claudeAccountsError || claudeAccounts?.error ? <Text style={s.small}>{resumeError ?? claudeAccountsError ?? claudeAccounts?.error}</Text> : null}
       <SectionTitle>已连接的浏览器环境</SectionTitle>
       {browserError ? (
         <Text style={s.muted}>读取失败：{browserError}</Text>
@@ -407,167 +412,6 @@ function AddBrowserDrawer() {
   );
 }
 
-const CONFIGURABLE_PROVIDERS = ['claude*', 'codex', 'opencode', 'glm*', 'qoder'] as const;
-
-function SessionDefaultsDrawer() {
-  const { s, control, theme } = useUi();
-  const { defaults, defaultsError } = useControlState();
-  const [newProvider, setNewProvider] = useState('claude*');
-  const [newMode, setNewMode] = useState('');
-  const [newAutoApprove, setNewAutoApprove] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const rules = defaults?.rules ?? [];
-  const enabled = defaults?.enabled ?? false;
-  const hasDefaultsError = Boolean(defaultsError || defaults?.error);
-
-  const saveRules = async (next: AgentDefaultRule[], nextEnabled?: boolean) => {
-    setBusy(true);
-    setErr(null);
-    try {
-      await control.saveDefaults({
-        ...(nextEnabled !== undefined ? { enabled: nextEnabled } : {}),
-        rules: next,
-      });
-    } catch (failure) {
-      setErr(errorMessage(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const addRule = async () => {
-    const p = newProvider.trim();
-    if (!p || hasDefaultsError) return;
-    const rule: AgentDefaultRule = {
-      provider: p,
-      apply: 'missing',
-      ...(newMode.trim() ? { modeId: newMode.trim() } : {}),
-      ...(newAutoApprove ? { features: { autoApprove: true } } : {}),
-      enabled: true,
-    };
-    setNewMode('');
-    await saveRules([...rules, rule]);
-  };
-
-  return (
-    <View style={{ gap: 12 }}>
-      {defaultsError || defaults?.error ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取失败：{defaultsError ?? defaults?.error}</Text>
-        </Notice>
-      ) : null}
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>启用新建会话默认设置</Text>
-        <Switch
-          accessibilityLabel="启用新建会话默认设置"
-          value={enabled}
-          disabled={!defaults || hasDefaultsError || busy}
-          onValueChange={val => void saveRules(rules, val)}
-          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-          thumbColor={theme.colors.accentForeground}
-        />
-      </View>
-
-      <SectionTitle>本机规则（保存在 machine.json）</SectionTitle>
-      {!defaults ? (
-        <Text style={s.muted}>正在读取默认规则…</Text>
-      ) : rules.length === 0 ? (
-        <Text style={s.muted}>没有规则。可在下方添加本机新建会话默认规则。</Text>
-      ) : (
-        <View>
-          <TableRow first header cells={['Provider', '模式', '自动授权', '额外设置', '启用']} />
-          {rules.map((rule, idx) => {
-            const providerText = Array.isArray(rule.provider) ? rule.provider.join(', ') : rule.provider;
-            const features = rule.features ?? {};
-            const extraEntries = Object.entries(features)
-              .filter(([k]) => k !== 'autoApprove')
-              .map(([k, v]) => `${k}: ${String(v)}`)
-              .join(', ');
-            return (
-              <TableRow
-                key={`${providerText}-${idx}`}
-                cells={[
-                  <Text key="p" style={s.mono}>
-                    {providerText}
-                  </Text>,
-                  <Text key="m" style={s.mono}>
-                    {rule.modeId ?? '—'}
-                  </Text>,
-                  features.autoApprove ? '开启' : '—',
-                  extraEntries || '—',
-                  <Switch
-                    key="sw"
-                    accessibilityLabel={`规则 ${providerText}`}
-                    value={rule.enabled !== false}
-                    disabled={hasDefaultsError || busy}
-                    onValueChange={val => {
-                      const next = rules.map((item, i) => (i === idx ? { ...item, enabled: val } : item));
-                      void saveRules(next);
-                    }}
-                    trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-                    thumbColor={theme.colors.accentForeground}
-                  />,
-                ]}
-              />
-            );
-          })}
-        </View>
-      )}
-
-      <SectionTitle>添加规则</SectionTitle>
-      <View style={s.wrap}>
-        {CONFIGURABLE_PROVIDERS.map(preset => (
-          <Btn
-            key={preset}
-            small
-            primary={newProvider === preset}
-            label={preset}
-            onPress={() => setNewProvider(preset)}
-          />
-        ))}
-      </View>
-      <View style={s.wrap}>
-        <TextInput
-          accessibilityLabel="Provider 匹配模式"
-          style={s.input}
-          value={newProvider}
-          onChangeText={setNewProvider}
-          placeholder="Provider（如 claude*）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-        <TextInput
-          accessibilityLabel="默认模式 ID"
-          style={s.input}
-          value={newMode}
-          onChangeText={setNewMode}
-          placeholder="模式（如 bypassPermissions）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-        <Btn
-          small
-          label={newAutoApprove ? '自动授权：开启' : '自动授权：不改'}
-          onPress={() => setNewAutoApprove(v => !v)}
-        />
-        <Btn
-          primary
-          label="添加规则"
-          disabled={!defaults || hasDefaultsError || !newProvider.trim() || busy}
-          onPress={() => void addRule()}
-        />
-      </View>
-      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
-
-      <RuleNote>
-        网页没有传值时按此表填入；网页显式传了值时以网页为准。Provider 结尾加 * 表示前缀匹配（如 claude* 匹配所有
-        Claude 账号）。
-      </RuleNote>
-    </View>
-  );
-}
 
 function CloudSessionDrawer() {
   const { s } = useUi();
@@ -606,7 +450,7 @@ function CloudSessionDrawer() {
 
 function QaModeDrawer() {
   const { s, control, theme } = useUi();
-  const { presence, presenceError } = useControlState();
+  const { presence, presenceError, moduleReloading } = useControlState();
   const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
 
@@ -636,7 +480,7 @@ function QaModeDrawer() {
         <Text style={s.text}>暂停问答代答与转发</Text>
         <Switch
           accessibilityLabel="暂停问答代答与转发"
-          disabled={!settings}
+          disabled={moduleReloading || !settings}
           value={settings?.paused ?? false}
           onValueChange={paused => {
             if (!settings) return;
@@ -933,7 +777,7 @@ function EscalationDrawer() {
     <View style={{ gap: 12 }}>
       {escModOff ? (
         <Notice tone="neutral">
-          <Text style={s.text}>升级通知模块未启用，请在本机配置中开启，重载后生效。</Text>
+          <Text style={s.text}>升级通知模块未启用，请使用卡片开关开启。</Text>
         </Notice>
       ) : escalation?.blockedReason ? (
         <Notice tone="danger">
@@ -1037,7 +881,7 @@ function EscalationDrawer() {
       >
         {escModOff ? (
           <Text style={s.muted}>
-            升级通知模块未启用，请先在本机配置中开启并重载插件，再设置 Webhook 地址。
+            升级通知模块未启用，请先使用卡片开关开启，再设置 Webhook 地址。
           </Text>
         ) : (
           <>
@@ -1114,7 +958,7 @@ type ScheduleTarget = 'delay' | 'window' | 'remove';
 
 function QuietChildrenDrawer() {
   const { s, control, theme } = useUi();
-  const { quiet, quietStatus, quietError } = useControlState();
+  const { quiet, quietStatus, quietError, moduleReloading } = useControlState();
   const recent = quiet?.recentHandled ?? [];
   const [err, setErr] = useState<string | null>(null);
 
@@ -1137,7 +981,7 @@ function QuietChildrenDrawer() {
         <Text style={s.text}>将子会话异常与提问归并到主会话</Text>
         <Switch
           accessibilityLabel="将子会话异常与提问归并到主会话"
-          disabled={!quiet || quietStatus !== 'ready'}
+          disabled={moduleReloading || !quiet || quietStatus !== 'ready'}
           value={quiet?.forwardEvents ?? false}
           onValueChange={val =>
             void control.configureQuiet({ forwardEvents: val }).catch(e => setErr(errorMessage(e)))
@@ -1180,7 +1024,7 @@ function QuietChildrenDrawer() {
 
 function SpeechDrawer() {
   const { s, control, theme } = useUi();
-  const { presence, presenceError } = useControlState();
+  const { presence, presenceError, moduleReloading } = useControlState();
   const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
 
@@ -1195,7 +1039,7 @@ function SpeechDrawer() {
         <Text style={s.text}>开启语音提醒</Text>
         <Switch
           accessibilityLabel="开启语音提醒"
-          disabled={!settings}
+          disabled={moduleReloading || !settings}
           value={settings?.speechEnabled ?? false}
           onValueChange={speechEnabled => {
             if (!settings) return;
@@ -1577,161 +1421,6 @@ function GithubConfigDrawer() {
   );
 }
 
-function MachineConfigDrawer() {
-  const { s, control, theme } = useUi();
-  const { machineSettings, modules, claudeAccounts, claudeAccountsStatus, claudeAccountsError } = useControlState();
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [backupBusy, setBackupBusy] = useState(false);
-  const [backupResult, setBackupResult] = useState<{ backupPath: string; files: string[] } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const configPath = machineSettings?.configPath ?? modules?.config.path ?? '~/.paseo/github-subscriptions/machine.json';
-  const hostLabel = machineSettings?.machine ?? (modules?.instance.role === 'provider' ? 'Provider 实例' : '本机');
-  const configErrors = machineSettings?.errors ?? modules?.config.errors ?? [];
-  const moduleItems =
-    machineSettings?.modules ??
-    (modules?.modules.map(m => ({
-      id: m.id,
-      label: m.label,
-      enabled: m.state === 'running',
-      state: m.state,
-      reason: m.reason,
-      reloadRequired: true,
-    })) ?? []);
-
-  const toggle = async (id: string, enabled: boolean) => {
-    setBusyId(id);
-    setError(null);
-    try {
-      await control.toggleModule(id, enabled);
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
-  const autoResumeReady = claudeAccountsStatus === 'ready' && Boolean(claudeAccounts?.enabled) && !claudeError;
-  const setAutoResume = async (autoResumeDefault: boolean) => {
-    setError(null);
-    try {
-      await control.configureClaudeAccounts({ autoResumeDefault });
-    } catch (failure) {
-      setError(errorMessage(failure));
-    }
-  };
-
-  const runBackup = async () => {
-    setBackupBusy(true);
-    setError(null);
-    try {
-      const res = await control.exportBackup();
-      setBackupResult({ backupPath: res.backupPath, files: res.files });
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBackupBusy(false);
-    }
-  };
-
-  return (
-    <View style={{ gap: 12 }}>
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>本机标识</Text>
-        <Chip label={hostLabel} tone="neutral" />
-      </View>
-      <View style={{ gap: 4 }}>
-        <Text style={s.text}>配置文件路径：</Text>
-        <Text style={s.mono}>{configPath}</Text>
-      </View>
-      {configErrors.length > 0 ? (
-        <Notice tone="danger">
-          {configErrors.map((err, idx) => (
-            <Text key={idx} style={s.text}>
-              {err}
-            </Text>
-          ))}
-        </Notice>
-      ) : (
-        <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>配置文件格式校验通过。</Text>
-      )}
-      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
-
-      <SectionTitle>启用模块</SectionTitle>
-      {moduleItems.length === 0 ? (
-        <Text style={s.muted}>正在读取模块列表…</Text>
-      ) : (
-        <View style={{ gap: 4 }}>
-          {moduleItems.map((item, idx) => (
-            <View
-              key={item.id}
-              style={[
-                s.row,
-                {
-                  justifyContent: 'space-between',
-                  paddingVertical: 8,
-                  borderTopWidth: idx === 0 ? 0 : 1,
-                  borderTopColor: theme.colors.border,
-                },
-              ]}
-            >
-              <View style={{ flex: 1, gap: 2 }}>
-                <View style={s.wrap}>
-                  <Text style={s.strong}>{item.label}</Text>
-                  <Text style={s.mono}>{item.id}</Text>
-                  <Chip
-                    label={item.state === 'running' ? '运行中' : item.state === 'error' ? '出错' : '已关闭'}
-                    tone={item.state === 'running' ? 'success' : item.state === 'error' ? 'danger' : 'neutral'}
-                  />
-                </View>
-                {item.reason ? <Text style={s.small}>{item.reason}</Text> : null}
-                {item.reloadRequired ? (
-                  <Text style={s.small}>修改后在下次插件启动时生效。</Text>
-                ) : null}
-              </View>
-              <Switch
-                accessibilityLabel={`模块 ${item.label}`}
-                value={item.enabled}
-                disabled={busyId === item.id}
-                onValueChange={val => void toggle(item.id, val)}
-                trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-                thumbColor={theme.colors.accentForeground}
-              />
-            </View>
-          ))}
-        </View>
-      )}
-
-      <SectionTitle>Claude 自动继续</SectionTitle>
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
-        <Switch
-          accessibilityLabel="新建 Claude 会话默认开启自动继续"
-          disabled={!autoResumeReady}
-          value={claudeAccounts?.quotaName.autoResumeDefault ?? false}
-          onValueChange={val => void setAutoResume(val)}
-          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-          thumbColor={theme.colors.accentForeground}
-        />
-      </View>
-      {claudeError ? <Text style={s.small}>读取失败：{claudeError}</Text> : null}
-
-      <View style={[s.wrap, { paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }]}>
-        <Btn label="导出配置备份" onPress={() => void runBackup()} busy={backupBusy} />
-        {backupResult ? (
-          <Text style={s.small}>
-            已导出 {backupResult.files.length} 个文件至 {backupResult.backupPath}
-          </Text>
-        ) : null}
-      </View>
-      <RuleNote>
-        本机模块开关保存在 machine.json 的 modules 字段中，修改后在下次插件启动（或重载插件）时生效。
-      </RuleNote>
-    </View>
-  );
-}
-
 export function DrawerOverlay(props: {
   drawerId: DrawerId | null;
   onClose(): void;
@@ -1747,8 +1436,6 @@ export function DrawerOverlay(props: {
         return <BrowserDrawer onOpenDrawer={onOpenDrawer} />;
       case 'add-browser':
         return <AddBrowserDrawer />;
-      case 'session-defaults':
-        return <SessionDefaultsDrawer />;
       case 'cloud':
         return <CloudSessionDrawer />;
       case 'qa-mode':
@@ -1765,8 +1452,6 @@ export function DrawerOverlay(props: {
         return <ApprovalDrawer />;
       case 'github-config':
         return <GithubConfigDrawer />;
-      case 'machine-config':
-        return <MachineConfigDrawer />;
     }
   };
 

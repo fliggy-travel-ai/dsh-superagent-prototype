@@ -1,5 +1,5 @@
 import type { PluginScreenProps } from '@getpaseo/plugin/client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ComponentProps } from 'react';
 import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { Question, QuestionAnswer, QuestionPrompt } from '../shared/presence.ts';
 import type { TodoItem, TodoType } from '../shared/todo.ts';
@@ -84,15 +84,31 @@ function isModuleOff(
   return false;
 }
 
-function ModuleOffHint({ onOpenMachineConfig }: { onOpenMachineConfig(): void }) {
-  const { s } = useUi();
-  return (
-    <>
-      <Chip label="未启用" tone="neutral" />
-      <Text style={s.small}>模块未启用，在本机配置中开启，重载后生效</Text>
-      <Btn small label="去本机配置开启" onPress={onOpenMachineConfig} />
-    </>
-  );
+function ModuleOffHint() {
+  return <Chip label="未启用" tone="neutral" />;
+}
+
+function ModuleFeatureCard({ moduleId, label, featureEnabled, ...props }: Omit<ComponentProps<typeof FeatureCard>, 'trailing' | 'notice'> & {
+  moduleId: string;
+  label: string;
+  featureEnabled?: boolean;
+}) {
+  const { s, control, theme } = useUi();
+  const { machineSettings, machineSettingsError, moduleReloading, moduleReloadingId, moduleReloadUnverified } = useControlState();
+  const [error, setError] = useState<string | null>(null);
+  const item = machineSettings?.modules.find(m => m.id === moduleId);
+  return <FeatureCard {...props}
+    trailing={<Switch accessibilityLabel={label} disabled={!item || !!machineSettingsError || moduleReloading}
+      value={Boolean(item?.enabled && (featureEnabled ?? true))}
+      onValueChange={enabled => {
+        setError(null);
+        void control.toggleModule(moduleId, enabled).catch(e => setError(errorMessage(e)));
+      }} trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />}
+    notice={moduleReloading && moduleReloadingId === moduleId ? <Text style={s.small}>正在重新加载，约 3 秒后生效</Text> : <>
+      {error ? <Text style={s.small}>{error}</Text> : null}
+      {moduleReloadUnverified === moduleId || (item && item.state !== (item.enabled ? 'running' : 'off')) ? <Text style={s.small}>已保存，未生效，请手动重载插件</Text> : null}
+    </>}
+  />;
 }
 
 function ProvidersPage({
@@ -104,8 +120,6 @@ function ProvidersPage({
   const {
     browser,
     browserError,
-    defaults,
-    defaultsError,
     providerInstance,
     cloudSession,
     cloudSessionError,
@@ -113,39 +127,18 @@ function ProvidersPage({
     claudeAccountsStatus,
     machineSettings,
     machineSettingsError,
+    moduleReloading,
     modules,
     todo,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
-  const [backupBusy, setBackupBusy] = useState(false);
-  const [backupResult, setBackupResult] = useState<{ backupPath: string; files: string[] } | null>(null);
-
-  const configPath =
-    machineSettings?.configPath ?? modules?.config.path ?? '~/.paseo/github-subscriptions/machine.json';
-  const hostLabel = machineSettings?.machine ?? (modules?.instance.role === 'provider' ? 'Provider 实例' : '本机');
-  const configErrors = machineSettings?.errors ?? modules?.config.errors ?? [];
-
-  const runBackup = async () => {
-    setBackupBusy(true);
-    setActionError(null);
-    try {
-      const res = await control.exportBackup();
-      setBackupResult({ backupPath: res.backupPath, files: res.files });
-    } catch (e) {
-      setActionError(errorMessage(e));
-    } finally {
-      setBackupBusy(false);
-    }
-  };
-
   const pausedAll = machineSettings?.pausedAll ?? false;
   const claudeAccountsDisabled =
     isModuleOff('usage.claudeAccounts', machineSettings, modules) ||
     claudeAccountsStatus === 'disabled' ||
     Boolean(claudeAccounts && !claudeAccounts.enabled);
   const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
-  const defaultsModOff = isModuleOff('providers.defaults', machineSettings, modules);
   const accounts = claudeAccounts?.accounts ?? [];
   const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
@@ -165,7 +158,7 @@ function ProvidersPage({
         <Btn
           danger={!pausedAll}
           primary={pausedAll}
-          disabled={!machineSettings || Boolean(machineSettingsError)}
+          disabled={moduleReloading || !machineSettings || Boolean(machineSettingsError)}
           busy={pauseBusy}
           label={pausedAll ? '恢复自动化' : '暂停全部自动化'}
           onPress={() => {
@@ -179,12 +172,6 @@ function ProvidersPage({
           }}
         />
       </View>
-
-      {machineSettingsError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取本机设置失败：{machineSettingsError}</Text>
-        </Notice>
-      ) : null}
 
       {actionError ? (
         <Notice tone="danger">
@@ -218,27 +205,15 @@ function ProvidersPage({
       ) : null}
 
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
-        <FeatureCard
+        <ModuleFeatureCard
           title="网页版 claude.ai"
-          trailing={
-            <Switch
-              accessibilityLabel="启用网页版 claude.ai"
-              disabled={!browser || browserModOff}
-              value={!browserModOff && (browser?.settings.enabled ?? false)}
-              onValueChange={enabled => {
-                if (!browser) return;
-                void control
-                  .configureBrowser({ ...browser.settings, enabled })
-                  .catch(e => setActionError(errorMessage(e)));
-              }}
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
-            />
-          }
+          moduleId="answer.browser"
+          label="启用网页版 claude.ai"
+          featureEnabled={browser?.settings.enabled}
           description="连接 AdsPower 浏览器扩展，自动点击 Allow once 并把网页提问转到 Paseo。"
           kv={
             browserModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : browserError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -262,38 +237,6 @@ function ProvidersPage({
               <Btn small label="编辑" onPress={() => onOpenDrawer('browser')} />
             </>
           }
-        />
-
-        <FeatureCard
-          title="新建会话默认设置"
-          trailing={
-            <Switch
-              accessibilityLabel="新建会话默认设置"
-              disabled={!defaults || Boolean(defaultsError || defaults.error)}
-              value={defaults?.enabled ?? false}
-              onValueChange={enabled =>
-                void control.saveDefaults({ enabled }).catch(e => setActionError(errorMessage(e)))
-              }
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
-            />
-          }
-          description="网页没有指定模式、思考强度或自动授权时，按本机规则填入。"
-          kv={
-            defaultsError || defaults?.error ? (
-              <Text style={s.small}>读取失败：{defaultsError ?? defaults?.error}</Text>
-            ) : !defaults ? (
-              <Text style={s.small}>正在读取…</Text>
-            ) : defaultsModOff && !defaults.enabled ? (
-              <>
-                <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
-                <Text style={s.small}>{defaults.rules.length} 条规则</Text>
-              </>
-            ) : (
-              <Text style={s.small}>{defaults.rules.length} 条规则</Text>
-            )
-          }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('session-defaults')} />}
         />
 
         <FeatureCard
@@ -322,35 +265,6 @@ function ProvidersPage({
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
         />
 
-        <FeatureCard
-          title="本机配置"
-          trailing={<Chip label={hostLabel} tone="neutral" />}
-          description="查看本机配置文件路径与格式校验结果，导出本机配置备份。"
-          kv={
-            <>
-              <Text style={s.mono}>{configPath}</Text>
-              {configErrors.length > 0 ? (
-                <>
-                  <Chip label={`${configErrors.length} 项校验错误`} tone="danger" />
-                  <Text style={s.small}>{configErrors.join('；')}</Text>
-                </>
-              ) : (
-                <Chip label="校验通过" tone="success" />
-              )}
-              {backupResult ? (
-                <Text style={s.small}>
-                  已导出 {backupResult.files.length} 个文件至 {backupResult.backupPath}
-                </Text>
-              ) : null}
-            </>
-          }
-          actions={
-            <>
-              <Btn small label="导出配置备份" busy={backupBusy} onPress={() => void runBackup()} />
-              <Btn small label="编辑" onPress={() => onOpenDrawer('machine-config')} />
-            </>
-          }
-        />
       </View>
     </View>
   );
@@ -370,6 +284,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     quietStatus,
     quietError,
     machineSettings,
+    moduleReloading,
     modules,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
@@ -418,12 +333,12 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
       ) : null}
 
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
-        <FeatureCard
+        <ModuleFeatureCard
           title="问答模式"
-          trailing={
-            presenceModOff ? (
-              <Chip label="未启用" tone="neutral" />
-            ) : settings ? (
+          moduleId="answer.presence"
+          label="启用问答模式、蓝牙和语音提醒"
+          belowTitle={
+            presenceModOff ? null : settings ? (
               <Segmented
                 options={[
                   { value: 'online', label: '在线' },
@@ -431,23 +346,16 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                   { value: 'auto', label: '自动' },
                 ]}
                 value={settings.mode}
-                onChange={mode =>
-                  void control
-                    .configurePresence({ ...settings, mode })
-                    .catch(e => setActionError(errorMessage(e)))
-                }
+                onChange={mode => void control.configurePresence({ ...settings, mode }).catch(e => setActionError(errorMessage(e)))}
               />
             ) : (
-              <Chip
-                label={presenceError ? '读取失败' : '正在读取'}
-                tone={presenceError ? 'danger' : 'neutral'}
-              />
+              <Chip label={presenceError ? '读取失败' : '正在读取'} tone={presenceError ? 'danger' : 'neutral'} />
             )
           }
-          description="会话向你提问时，等待本人回答或自动选推荐项。"
+          description="会话向你提问时，等待本人回答或自动选推荐项。开关同时控制问答模式、蓝牙在场判定和语音提醒。"
           kv={
             presenceModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence || !settings ? (
@@ -490,7 +398,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           description="按随身蓝牙设备是否在场，自动切换在线或离线。"
           kv={
             presenceModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence || !settings ? (
@@ -507,24 +415,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('bluetooth')} />}
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="升级通知"
-          trailing={
-            <Switch
-              accessibilityLabel="升级通知"
-              disabled={escModOff || !escalation || escalationStatus !== 'ready'}
-              value={!escModOff && (escalation?.enabled ?? false)}
-              onValueChange={enabled =>
-                void control.configureEscalation({ enabled }).catch(e => setActionError(errorMessage(e)))
-              }
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
-            />
-          }
+          moduleId="answer.escalation"
+          label="升级通知"
+          featureEnabled={escalation?.enabled}
           description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
           kv={
             escModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : escalationStatus === 'error' || escalationError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -542,24 +441,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('escalation')} />}
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="子会话免提醒"
-          trailing={
-            <Switch
-              accessibilityLabel="子会话免提醒"
-              disabled={quietModOff || !quiet || quietStatus !== 'ready'}
-              value={!quietModOff && (quiet?.enabled ?? false)}
-              onValueChange={enabled =>
-                void control.configureQuiet({ enabled }).catch(e => setActionError(errorMessage(e)))
-              }
-              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-              thumbColor={theme.colors.accentForeground}
-            />
-          }
+          moduleId="answer.quietChildren"
+          label="子会话免提醒"
+          featureEnabled={quiet?.enabled}
           description="子会话和未置顶工作区的会话不直接提醒你，异常归并到主会话。"
           kv={
             quietModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : quietStatus === 'error' || quietError ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -579,7 +469,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="语音提醒"
-              disabled={!settings || presenceModOff}
+              disabled={moduleReloading || !settings || presenceModOff}
               value={!presenceModOff && (settings?.speechEnabled ?? false)}
               onValueChange={speechEnabled => {
                 if (!settings || presenceModOff) return;
@@ -594,7 +484,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           description="判定在线时，用语音播报新提问和停滞的主会话。"
           kv={
             presenceModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : presenceError ? (
               <Text style={s.small}>读取失败：{presenceError}</Text>
             ) : !presence ? (
@@ -606,23 +496,14 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('speech')} />}
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="精确授权"
-          trailing={
-            autoModOff ? (
-              <Chip label="未启用" tone="neutral" />
-            ) : automationError ? (
-              <Chip label="读取失败" tone="danger" />
-            ) : !automation ? (
-              <Chip label="正在读取" tone="neutral" />
-            ) : (
-              <Chip label="已配置" tone="neutral" />
-            )
-          }
+          moduleId="answer.automation"
+          label="启用精确授权"
           description="跨重启保留的单会话命令和工作区路径白名单。"
           kv={
             autoModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : automationError ? (
               <Text style={s.small}>读取失败：{automationError}</Text>
             ) : !automation ? (
@@ -641,7 +522,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, store, theme } = useUi();
   const { snapshot, error } = useStoreState();
-  const { machineSettings, modules } = useControlState();
+  const { machineSettings, modules, moduleReloading } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
 
   const githubModOff = isModuleOff('github', machineSettings, modules);
@@ -679,7 +560,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="启用 GitHub 监听"
-              disabled={!prefs || githubModOff}
+              disabled={moduleReloading || !prefs || githubModOff}
               value={!githubModOff && (prefs?.enabled ?? false)}
               onValueChange={enabled => {
                 if (!prefs) return;
@@ -694,7 +575,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           description="轮询已订阅的仓库与 PR，把新事件直接发到对应会话。"
           kv={
             githubModOff ? (
-              <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
+              <ModuleOffHint />
             ) : error ? (
               <>
                 <Chip label="读取失败" tone="danger" />
@@ -1189,6 +1070,11 @@ export function MainScreen(props: PluginScreenProps) {
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={[s.pageContent, { maxWidth: 980 }]}>
+        {controlState.machineSettingsError || controlState.machineSettings?.errors.length ? (
+          <Notice tone="danger">
+            <Text style={s.text}>读取本机设置失败：{[controlState.machineSettingsError, ...(controlState.machineSettings?.errors ?? [])].filter(Boolean).join('；')}</Text>
+          </Notice>
+        ) : null}
         {page === 'providers' ? <ProvidersPage onOpenDrawer={openDrawer} /> : null}
         {page === 'answer' ? <AnswerPage onOpenDrawer={openDrawer} /> : null}
         {page === 'github' ? <GithubPage onOpenDrawer={openDrawer} /> : null}

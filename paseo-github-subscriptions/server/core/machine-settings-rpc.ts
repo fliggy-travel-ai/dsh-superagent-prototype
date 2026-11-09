@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import { AgentDefaultsSchema, defaultsSave, defaultsSnapshot, type AgentDefaultRule } from '../../shared/defaults.ts';
@@ -9,7 +9,12 @@ import {
   machineSettingsSnapshot,
   machineSettingsToggleModule,
 } from '../../shared/machine-settings.ts';
-import type { LoadedMachineConfig } from './machine-config.ts';
+import { loadMachineConfig, type LoadedMachineConfig, type SectionSpec } from './machine-config.ts';
+import { MAIN_PLUGIN_ID } from '../../shared/instances.ts';
+import { BrowserSettingsSchema, BrowserBindingInputSchema, BrowserApprovalEventSchema } from '../../shared/browser.ts';
+import { createSettingsStore } from './settings-store.ts';
+import { RuntimeSettingsSchema, ESCALATION_FALLBACK, runtimeDefaults } from '../modules/answer-escalation/config.ts';
+import { QuietSettingsSchema, QUIET_FALLBACK, quietDefaults } from '../modules/answer-quiet-children/config.ts';
 import { exportMachineBackup, patchMachineConfig, readRawMachineConfig } from './machine-writer.ts';
 import type { ModuleHost } from './modules.ts';
 import type { Services } from '../modules/types.ts';
@@ -82,6 +87,8 @@ export function registerMachineSettingsRpcs(options: {
   services: Services;
   stateDirectory: string;
   baseDirectory: string;
+  sections?: Readonly<Record<string, SectionSpec>>;
+  reload?: () => Promise<unknown>;
 }): void {
   const { server, machine, host, services, stateDirectory, baseDirectory } = options;
 
@@ -120,6 +127,7 @@ export function registerMachineSettingsRpcs(options: {
     });
   }
 
+  let reloadPending = false;
   const buildSettingsSnapshot = async () => {
     const [raw, pauseState] = await Promise.all([
       readRawMachineConfig(machine.path).catch(() => ({ version: 1 } as Record<string, unknown>)),
@@ -132,11 +140,11 @@ export function registerMachineSettingsRpcs(options: {
       configPath: machine.path,
       source: machine.source,
       machine: (typeof raw.machine === 'string' ? raw.machine : machine.machine) ?? null,
-      errors: [...machine.errors],
+      errors: [...loadMachineConfig(machine.path, options.sections ?? {}).errors],
       modules: MODULE_DEFS.map(def => {
         const enabled = Boolean(rawModules[def.id] ?? machine.modules[def.id] ?? def.defaultEnabled);
         const live = liveById.get(def.id);
-        const state = live ? live.state : (enabled ? ('running' as const) : ('off' as const));
+        const state = live?.state ?? ('off' as const);
         const reason = live?.reason ?? live?.lastUncaught?.summary;
         return {
           id: def.id,
@@ -149,20 +157,117 @@ export function registerMachineSettingsRpcs(options: {
         };
       }),
       pausedAll: pauseState.paused,
+      reloadInProgress: reloadPending,
     };
   };
 
   server.handle(machineSettingsSnapshot, () => buildSettingsSnapshot());
 
-  server.handle(machineSettingsToggleModule, async ({ id, enabled }) => {
-    await patchMachineConfig(machine.path, raw => ({
-      ...raw,
-      modules: {
-        ...(raw.modules && typeof raw.modules === 'object' ? (raw.modules as Record<string, unknown>) : {}),
-        [id]: enabled,
-      },
-    }));
-    return buildSettingsSnapshot();
+  const moduleSections: Record<string, string> = {
+    'providers.defaults': 'agentDefaults', 'providers.antigravity': 'antigravity',
+    'answer.escalation': 'escalation', 'answer.quietChildren': 'quietChildren',
+    'usage.claudeAccounts': 'claudeAccounts', 'usage.providerQuotas': 'providerQuotas',
+  };
+  server.handle(machineSettingsToggleModule, ({ id, enabled }) => {
+    if (reloadPending) return Promise.reject(new Error('插件正在重新加载，请稍后再试'));
+    reloadPending = true;
+    const run = (async () => {
+      if (!MODULE_DEFS.some(def => def.id === id)) throw new Error('未知模块');
+      const section = moduleSections[id];
+      const spec = section ? options.sections?.[section] : undefined;
+      const checked = loadMachineConfig(machine.path, section && spec ? { [section]: spec } : {});
+      if (checked.errors.length) throw new Error(`配置无效，未保存：${checked.errors.join('；')}`);
+      // 功能内部开关与模块开关同步，失败时恢复先写的功能状态。
+      let rollback: (() => Promise<unknown>) | undefined;
+      let committed = false;
+      try {
+        if (id === 'answer.browser' && services.main) {
+          if (host.status().modules.some(m => m.id === id && m.state === 'running')) {
+            const browser = await services.main.readyBrowser();
+            const previous = browser.snapshot().settings;
+            rollback = () => browser.configure(previous);
+            await browser.configure({ ...previous, enabled });
+          } else {
+            const path = join(stateDirectory, 'browser-state.json');
+            let state: Record<string, unknown>;
+            let previousText: string | null = null;
+            try {
+              previousText = await readFile(path, 'utf8');
+              const parsed: unknown = JSON.parse(previousText);
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('浏览器状态文件无效');
+              state = parsed as Record<string, unknown>;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器状态文件无效，未保存');
+              state = {};
+            }
+            const settings = BrowserSettingsSchema.parse(state.settings ?? {});
+            const bindings = BrowserBindingInputSchema.extend({ agentId: BrowserBindingInputSchema.shape.agentId.unwrap() }).array().parse(state.bindings ?? []);
+            const approvals = BrowserApprovalEventSchema.array().parse(state.approvals ?? []);
+            rollback = async () => {
+              if (previousText === null) await unlink(path).catch(() => {});
+              else {
+                const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+                await writeFile(temp, previousText, { mode: 0o600 });
+                await rename(temp, path);
+              }
+            };
+            await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+            const temp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+            await writeFile(temp, JSON.stringify({ ...state, settings: { ...settings, enabled }, bindings, approvals }), { mode: 0o600 });
+            await rename(temp, path);
+            await chmod(path, 0o600);
+          }
+        }
+        if (id === 'answer.escalation') {
+          if (services.main?.escalation) {
+            const runtime = services.main.escalation;
+            const previous = (await runtime.snapshot()).enabled;
+            rollback = () => runtime.configure({ enabled: previous });
+            await runtime.configure({ enabled });
+          }
+          else {
+            const store = createSettingsStore(join(stateDirectory, 'escalation', 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(ESCALATION_FALLBACK));
+            if (store.error()) throw new Error(store.error()!);
+            const previous = store.read().enabled;
+            rollback = async () => store.update({ enabled: previous });
+            store.update({ enabled });
+          }
+        }
+        if (id === 'answer.quietChildren') {
+          if (services.main?.quiet) {
+            const runtime = services.main.quiet;
+            const previous = (await runtime.snapshot()).enabled;
+            rollback = () => runtime.configure({ enabled: previous });
+            await runtime.configure({ enabled });
+          }
+          else {
+            const store = createSettingsStore(join(stateDirectory, 'quiet-children', 'settings.json'), QuietSettingsSchema, quietDefaults(QUIET_FALLBACK));
+            if (store.error()) throw new Error(store.error()!);
+            const previous = store.read().enabled;
+            rollback = async () => store.update({ enabled: previous });
+            store.update({ enabled });
+          }
+        }
+        await patchMachineConfig(machine.path, raw => ({
+          ...raw,
+          modules: { ...(raw.modules && typeof raw.modules === 'object' ? raw.modules as Record<string, unknown> : {}), [id]: enabled },
+        }));
+        committed = true;
+        const result = await buildSettingsSnapshot();
+        // 响应先发送，再通过守护进程重载当前插件；重载会关闭此子进程。
+        setTimeout(() => {
+          const reload = options.reload ?? (async () => (await services.daemon.ready()).client.reloadPlugin(MAIN_PLUGIN_ID));
+          void Promise.resolve().then(reload).catch(error => console.error('插件自动重载失败', error)).finally(() => { reloadPending = false; });
+        }, 500);
+        return result;
+      } catch (error) {
+        if (!committed && rollback) {
+          try { await rollback(); } catch { throw new Error('保存失败且功能状态回滚失败，请检查配置'); }
+        }
+        throw error;
+      }
+    })();
+    return run.catch(error => { reloadPending = false; throw error; });
   });
 
   let pauseQueue: Promise<unknown> = Promise.resolve();

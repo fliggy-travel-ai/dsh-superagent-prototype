@@ -156,6 +156,7 @@ export class FakeDaemon {
     machine: 'macbook',
     errors: [],
     pausedAll: false,
+    reloadInProgress: false,
     modules: [
       { id: 'providers.defaults', label: '新建会话默认设置', enabled: false, state: 'off', reloadRequired: true },
       { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: true },
@@ -315,6 +316,9 @@ export class FakeDaemon {
         const id = String(input.id);
         const enabled = Boolean(input.enabled);
         this.setModuleState(id, enabled);
+        if (id === 'answer.escalation') this.escalation = { ...this.escalation, enabled };
+        if (id === 'answer.quietChildren') this.quiet = { ...this.quiet, enabled };
+        if (id === 'answer.browser') this.browser = { ...this.browser, settings: { ...this.browser.settings, enabled } };
         return this.machineSettings;
       }
       case 'machine.settings.pause-all':
