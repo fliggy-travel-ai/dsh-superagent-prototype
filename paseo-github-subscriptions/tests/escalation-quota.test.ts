@@ -126,7 +126,7 @@ test("凭据解析：总控安全文件目录的 url/key 单行文件，json 优
   assert.equal(await quotaWebhookCredentials({}, json, join(dir)), null);
 });
 
-function fixture(reportsByAccount: Record<string, UsageReportLike[]>) {
+function fixture(reportsByAccount: Record<string, UsageReportLike[]>, enabled: () => boolean = () => true) {
   const posted: QuotaAlertPayload[] = [];
   const audits: Record<string, unknown>[] = [];
   let available = true;
@@ -155,9 +155,22 @@ function fixture(reportsByAccount: Record<string, UsageReportLike[]>) {
     hostId: "macmini",
     statePath: join(tmpdir(), `quota-alerts-${process.pid}-${posted.length}-${Math.random().toString(36).slice(2)}.json`),
     now: () => clock,
+    enabled,
   });
   return { alerts, posted, audits, set: (r: UsageReportLike[]) => { reportsByAccount["claude-accounts:acc1"] = r; }, recover: () => (available = true), cut: () => (available = false), tick: (ms: number) => (clock += ms) };
 }
+
+test("升级通知关闭时额度报警不发送，重新开启后仍能发送", async () => {
+  let enabled = false;
+  const f = fixture({ "claude-accounts:acc1": [report()] }, () => enabled);
+  await f.alerts.start();
+  f.alerts.stop();
+  await f.alerts.onSessionQuotaError("主会话", "usage limit");
+  assert.equal(f.posted.length, 0);
+  enabled = true;
+  await f.alerts.onSessionQuotaError("主会话", "usage limit");
+  assert.equal(f.posted.length, 1);
+});
 
 test("同一账号同一档只推一次，恢复后重新武装", async () => {
   const f = fixture({ "claude-accounts:acc1": [report()] });

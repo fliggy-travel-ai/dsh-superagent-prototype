@@ -250,6 +250,7 @@ export class EscalationRuntime {
         machine: machineName,
         hostId: machineName,
         statePath: join(directory, 'quota-alerts.json'),
+        enabled: () => this.settings().enabled,
       });
       const alerts = this.quotaAlerts;
       attempt.add(() => { alerts.stop(); if (this.quotaAlerts === alerts) this.quotaAlerts = null; });

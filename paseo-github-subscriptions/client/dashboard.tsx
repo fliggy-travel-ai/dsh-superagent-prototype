@@ -213,9 +213,7 @@ function ProvidersPage({
 
       {providerInstance && !instanceRunning ? (
         <Notice tone="danger">
-          <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
-            <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
-          </View>
+          <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
         </Notice>
       ) : null}
 
