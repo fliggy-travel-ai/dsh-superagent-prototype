@@ -17,7 +17,6 @@ export type DrawerId =
   | 'browser'
   | 'add-browser'
   | 'session-defaults'
-  | 'provider-instance'
   | 'cloud'
   | 'antigravity'
   | 'qa-mode'
@@ -33,7 +32,6 @@ const DRAWER_TITLES: Record<DrawerId, string> = {
   browser: '网页版 claude.ai',
   'add-browser': '添加浏览器环境',
   'session-defaults': '新建会话默认设置',
-  'provider-instance': 'Provider 实例',
   cloud: '云端会话',
   antigravity: 'Antigravity 账号',
   'qa-mode': '问答模式',
@@ -568,46 +566,6 @@ function SessionDefaultsDrawer() {
       <RuleNote>
         网页没有传值时按此表填入；网页显式传了值时以网页为准。Provider 结尾加 * 表示前缀匹配（如 claude* 匹配所有
         Claude 账号）。
-      </RuleNote>
-    </View>
-  );
-}
-
-function ProviderInstanceDrawer() {
-  const { s } = useUi();
-  const { providerInstance, providerInstanceError } = useControlState();
-  const running = providerInstance
-    ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
-    : false;
-  const providers = providerInstance ? providerInstance.providers.map(p => p.id).join(', ') || '无' : '—';
-  const runningCount = providerInstance?.runningSessionsCount ?? 0;
-
-  return (
-    <View style={{ gap: 12 }}>
-      {providerInstanceError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取失败：{providerInstanceError}</Text>
-        </Notice>
-      ) : null}
-      <TableRow
-        first
-        cells={[
-          '状态',
-          providerInstanceError ? (
-            <Chip key="st" label="读取失败" tone="danger" />
-          ) : !providerInstance ? (
-            <Chip key="st" label="正在读取" tone="neutral" />
-          ) : (
-            <Chip key="st" label={running ? '运行中' : '未运行'} tone={running ? 'success' : 'danger'} />
-          ),
-        ]}
-      />
-      <TableRow cells={['状态目录', <Text key="dir" style={s.mono}>~/.paseo/providers</Text>]} />
-      <TableRow cells={['承载的 Provider', <Text key="p" style={s.mono}>{providers}</Text>]} />
-      <TableRow cells={['运行中的会话', providerInstance ? `${runningCount} 个` : '—']} />
-      <RuleNote>
-        为什么单独开一个实例：重载“开发自动化”插件（改界面、规则、GitHub 订阅）不会重启这个实例，正在跑的
-        Antigravity 和云端会话不会中断。只有在更新 Provider 代码后、且当前没有运行中的会话时，才重载该实例。
       </RuleNote>
     </View>
   );
@@ -1918,8 +1876,6 @@ export function DrawerOverlay(props: {
         return <AddBrowserDrawer />;
       case 'session-defaults':
         return <SessionDefaultsDrawer />;
-      case 'provider-instance':
-        return <ProviderInstanceDrawer />;
       case 'cloud':
         return <CloudSessionDrawer />;
       case 'antigravity':

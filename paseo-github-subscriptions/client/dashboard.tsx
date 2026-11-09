@@ -107,7 +107,6 @@ function ProvidersPage({
     defaults,
     defaultsError,
     providerInstance,
-    providerInstanceError,
     cloudSession,
     cloudSessionError,
     claudeAccounts,
@@ -227,7 +226,6 @@ function ProvidersPage({
         <Notice tone="danger">
           <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
             <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
-            <Btn small label="查看" onPress={() => onOpenDrawer('provider-instance')} />
           </View>
         </Notice>
       ) : null}
@@ -309,33 +307,6 @@ function ProvidersPage({
             )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('session-defaults')} />}
-        />
-
-        <FeatureCard
-          title="Provider 实例"
-          trailing={
-            providerInstanceError ? (
-              <Chip label="读取失败" tone="danger" />
-            ) : !providerInstance ? (
-              <Chip label="正在读取" tone="neutral" />
-            ) : (
-              <Chip
-                label={instanceRunning ? '运行中' : '未运行'}
-                tone={instanceRunning ? 'success' : 'danger'}
-              />
-            )
-          }
-          description="独立守护进程，重载本插件时不会中断正在运行的会话。"
-          kv={
-            providerInstanceError ? (
-              <Text style={s.small}>读取失败：{providerInstanceError}</Text>
-            ) : !providerInstance ? (
-              <Text style={s.small}>正在读取…</Text>
-            ) : (
-              <Text style={s.small}>{providerInstance.runningSessionsCount} 个会话正在运行</Text>
-            )
-          }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('provider-instance')} />}
         />
 
         <FeatureCard
