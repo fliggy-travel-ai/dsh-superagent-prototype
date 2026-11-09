@@ -281,6 +281,8 @@ export function FeatureCard(props: {
   title: string;
   trailing?: ReactNode;
   description: string;
+  belowTitle?: ReactNode;
+  notice?: ReactNode;
   kv?: ReactNode;
   actions?: ReactNode;
 }) {
@@ -304,7 +306,9 @@ export function FeatureCard(props: {
           <Text style={[s.strong, { fontSize: 14 }]}>{props.title}</Text>
           {props.trailing}
         </View>
+        {props.belowTitle}
         <Text style={s.small}>{props.description}</Text>
+        {props.notice}
       </View>
       <View
         style={[

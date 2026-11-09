@@ -1,5 +1,5 @@
 import type { PluginScreenProps } from '@getpaseo/plugin/client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ComponentProps } from 'react';
 import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
 import type { Question, QuestionAnswer, QuestionPrompt } from '../shared/presence.ts';
 import type { TodoItem, TodoType } from '../shared/todo.ts';
@@ -88,24 +88,27 @@ function ModuleOffHint() {
   return <Chip label="未启用" tone="neutral" />;
 }
 
-function ModuleSwitch({ id, label, featureEnabled }: { id: string; label: string; featureEnabled?: boolean }) {
+function ModuleFeatureCard({ moduleId, label, featureEnabled, ...props }: Omit<ComponentProps<typeof FeatureCard>, 'trailing' | 'notice'> & {
+  moduleId: string;
+  label: string;
+  featureEnabled?: boolean;
+}) {
   const { s, control, theme } = useUi();
   const { machineSettings, machineSettingsError } = useControlState();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const item = machineSettings?.modules.find(m => m.id === id);
-  return <View style={{ gap: 4 }}>
-    <Switch accessibilityLabel={label} disabled={!item || !!machineSettingsError || busy}
+  const item = machineSettings?.modules.find(m => m.id === moduleId);
+  return <FeatureCard {...props}
+    trailing={<Switch accessibilityLabel={label} disabled={!item || !!machineSettingsError || busy}
       value={Boolean(item?.enabled && (featureEnabled ?? true))}
       onValueChange={enabled => {
         setBusy(true); setError(null);
-        void control.toggleModule(id, enabled).then(() => {
+        void control.toggleModule(moduleId, enabled).then(() => {
           setTimeout(() => { void Promise.allSettled([control.refresh(), control.refreshUnify()]).finally(() => setBusy(false)); }, 3000);
         }).catch(e => { setError(errorMessage(e)); setBusy(false); });
-      }} trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />
-    {busy ? <Text style={s.small}>正在重新加载，约 3 秒后生效</Text> : null}
-    {error ? <Text style={s.small}>{error}</Text> : null}
-  </View>;
+      }} trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />}
+    notice={busy ? <Text style={s.small}>正在重新加载，约 3 秒后生效</Text> : error ? <Text style={s.small}>{error}</Text> : null}
+  />;
 }
 
 function ProvidersPage({
@@ -207,9 +210,11 @@ function ProvidersPage({
       ) : null}
 
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
-        <FeatureCard
+        <ModuleFeatureCard
           title="网页版 claude.ai"
-          trailing={<ModuleSwitch id="answer.browser" label="启用网页版 claude.ai" featureEnabled={browser?.settings.enabled} />}
+          moduleId="answer.browser"
+          label="启用网页版 claude.ai"
+          featureEnabled={browser?.settings.enabled}
           description="连接 AdsPower 浏览器扩展，自动点击 Allow once 并把网页提问转到 Paseo。"
           kv={
             browserModOff ? (
@@ -332,14 +337,12 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
       ) : null}
 
       <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
-        <FeatureCard
+        <ModuleFeatureCard
           title="问答模式"
-          trailing={
-            <View style={{ gap: 6 }}>
-              <ModuleSwitch id="answer.presence" label="启用问答模式、蓝牙和语音提醒" />
-              {            presenceModOff ? (
-              <Chip label="未启用" tone="neutral" />
-            ) : settings ? (
+          moduleId="answer.presence"
+          label="启用问答模式、蓝牙和语音提醒"
+          belowTitle={
+            presenceModOff ? null : settings ? (
               <Segmented
                 options={[
                   { value: 'online', label: '在线' },
@@ -347,19 +350,11 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                   { value: 'auto', label: '自动' },
                 ]}
                 value={settings.mode}
-                onChange={mode =>
-                  void control
-                    .configurePresence({ ...settings, mode })
-                    .catch(e => setActionError(errorMessage(e)))
-                }
+                onChange={mode => void control.configurePresence({ ...settings, mode }).catch(e => setActionError(errorMessage(e)))}
               />
             ) : (
-              <Chip
-                label={presenceError ? '读取失败' : '正在读取'}
-                tone={presenceError ? 'danger' : 'neutral'}
-              />
-            )}
-            </View>
+              <Chip label={presenceError ? '读取失败' : '正在读取'} tone={presenceError ? 'danger' : 'neutral'} />
+            )
           }
           description="会话向你提问时，等待本人回答或自动选推荐项。开关同时控制问答模式、蓝牙在场判定和语音提醒。"
           kv={
@@ -424,9 +419,11 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('bluetooth')} />}
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="升级通知"
-          trailing={<ModuleSwitch id="answer.escalation" label="升级通知" featureEnabled={escalation?.enabled} />}
+          moduleId="answer.escalation"
+          label="升级通知"
+          featureEnabled={escalation?.enabled}
           description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
           kv={
             escModOff ? (
@@ -448,9 +445,11 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('escalation')} />}
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="子会话免提醒"
-          trailing={<ModuleSwitch id="answer.quietChildren" label="子会话免提醒" featureEnabled={quiet?.enabled} />}
+          moduleId="answer.quietChildren"
+          label="子会话免提醒"
+          featureEnabled={quiet?.enabled}
           description="子会话和未置顶工作区的会话不直接提醒你，异常归并到主会话。"
           kv={
             quietModOff ? (
@@ -501,9 +500,10 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('speech')} />}
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="精确授权"
-          trailing={<ModuleSwitch id="answer.automation" label="启用精确授权" />}
+          moduleId="answer.automation"
+          label="启用精确授权"
           description="跨重启保留的单会话命令和工作区路径白名单。"
           kv={
             autoModOff ? (
