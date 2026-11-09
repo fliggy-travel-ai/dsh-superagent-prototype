@@ -43,6 +43,10 @@ export const QuestionSchema = BrowserQuestionSchema.extend({
   }).optional(),
   delegatedTo: z.string().optional(),
   browserSubmittedAt: z.string().optional(),
+  // 云端提问对应的网页会话（session_<后缀>）；网页作答未确认时据此找回提问。
+  webSessionId: z.string().max(200).optional(),
+  // 网页作答未确认、等待用户去 claude.ai 重试；扫描不自动结束，云端确认后清除。
+  webRetry: z.boolean().optional(),
 });
 export const BrowserDecisionSchema = z.strictObject({
   id: z.string(), sessionId: z.string(), fingerprint: z.string(),

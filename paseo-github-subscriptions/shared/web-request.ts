@@ -19,6 +19,27 @@ export type WebRequestResult =
 
 export type AnswerWebRequest = (request: WebRequestAnswer) => Promise<WebRequestResult>;
 
+const DETAIL_REASONS: Record<string, string> = {
+  unsupported_tool: '不是 AskUserQuestion',
+  dismissed: '已在 Paseo 忽略',
+  invalid_answer: '答案对不上原问题',
+  request_changed: '原请求已变化',
+  answer_changed: '回答已变化',
+  bridge_not_connected: '配对浏览器未连接',
+  scan_stale: '浏览器扫描不新鲜',
+  not_found: '页面上找不到对应提问',
+  scan_incomplete: '页面扫描不完整',
+  multiple_candidates: '页面上有多个候选提问',
+  other_not_on_page: '页面上该题没有其他输入框',
+  not_claimed: '浏览器未及时领取',
+  no_receipt: '未收到浏览器回执',
+  page_unknown: '扩展复核未通过',
+};
+
+export function webRequestDetailReason(detail: string): string {
+  return DETAIL_REASONS[detail] ?? (detail || '未知原因');
+}
+
 export type CloudRequestOutcome = 'answered' | 'denied' | 'canceled';
 
 export type ResolveWebRequest = (input: {
@@ -52,7 +73,14 @@ export const WebRequestAuditEntrySchema = z.strictObject({
     instanceId: z.string().nullable().optional(),
     status: z.enum(['submitted', 'unknown']),
     detail: z.string().optional(),
+    // 旧版本把迟到回执写在这里并覆盖首个结果；保留字段只为读取旧记录。
     lateReceipt: z.boolean().optional(),
+  }).optional(),
+  // 首个网页结果之后才到的扩展回执；webSubmitted 保持首个结果不变。
+  lateReceipt: z.strictObject({
+    at: z.string(),
+    status: z.enum(['submitted', 'unknown']),
+    detail: z.string().optional(),
   }).optional(),
   cloudConfirmed: z.strictObject({
     at: z.string(),

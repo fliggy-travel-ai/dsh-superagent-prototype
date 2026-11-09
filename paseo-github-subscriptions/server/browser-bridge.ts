@@ -11,6 +11,7 @@ const EXTENSION_PATH = fileURLToPath(new URL('../browser-extension', import.meta
 const ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 const MAX_BODY = 65536;
 const MAX_AGE = 150_000;
+const SYNC_DECISION_BUDGET_MS = 3000;
 const cleanTitle = (title: string) => title.replace(/\s+/g, ' ').trim().slice(0, 120) || '未命名会话';
 const key = (instanceId: string, sessionId: string) => `${instanceId}:${sessionId}`;
 
@@ -75,6 +76,8 @@ export class BrowserBridge {
       if (req.method !== 'POST' || (req.url !== '/sync' && req.url !== '/usage') || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) { res.writeHead(404).end(); return; }
       let size = 0; const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_BODY) { res.writeHead(413).end(); req.destroy(); } else chunks.push(chunk); });
+      // 扩展等同步响应最多 5 秒；收到请求 3 秒后才算出的答案留到下一次同步，避免答案随被放弃的响应丢失。
+      const decisionDeadline = Date.now() + SYNC_DECISION_BUDGET_MS;
       req.on('end', () => { if (size > MAX_BODY) return; void this.serial(async () => {
         try {
           if (req.url === '/usage') { await this.usageRoute?.(JSON.parse(Buffer.concat(chunks).toString('utf8'))); res.writeHead(204).end(); return; }
@@ -112,7 +115,7 @@ export class BrowserBridge {
           const nowIso = new Date().toISOString();
           this.seen.set(input.instanceId, Date.now());
           this.knownInstances.set(input.instanceId, { instanceName: input.instanceName, lastSeenAt: nowIso });
-          const decisions = await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds) ?? [];
+          const decisions = await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds, { deadline: decisionDeadline }) ?? [];
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ sessions: next.map(({ sessionId, groupTitle }) => ({ sessionId, groupTitle })), decisions }));
         } catch { if (!res.headersSent) res.writeHead(400).end(); }
       }); });

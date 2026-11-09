@@ -491,13 +491,16 @@ test('20 秒未领取撤销、15 秒无回执与迟到回执只写审计', async
       },
     ]);
     const claimStart = env.now;
+    // 回执在领取后约 18 秒才到（超过 15 秒回执时限），由执行器的迟到回执跟踪发现
+    const lateIso = new Date(claimStart + 18_500).toISOString();
     env.setOnSleep((_ms, currentNow) => {
       env.setSessions([{ instanceId: 'inst-1', sessionId: 'abc123', lastSeenAt: currentNow }]);
+      const st = env.states.get(candId)!;
       if (currentNow - claimStart === 500) {
-        const st = env.states.get(candId)!;
         st.state = 'submitted';
         st.claimedAt = new Date(currentNow).toISOString();
       }
+      if (currentNow - claimStart >= 18_500 && !st.browserSubmittedAt) st.browserSubmittedAt = lateIso;
     });
     assert.deepEqual(
       await executor.answerWebRequest({
@@ -515,16 +518,13 @@ test('20 秒未领取撤销、15 秒无回执与迟到回执只写审计', async
     assert.equal(entryBefore?.webSubmitted?.status, 'unknown');
     assert.equal(entryBefore?.webSubmitted?.detail, 'no_receipt');
 
-    // 模拟迟到回执到达
-    const lateIso = new Date(env.now + 3_000).toISOString();
-    env.states.get(candId)!.browserSubmittedAt = lateIso;
     executor.confirmCloud({ webSessionId: 'session_abc123', toolUseId: 'toolu_noreceipt', outcome: 'answered' });
 
     const afterLate = await executor.audit();
     const entryAfter = afterLate.entries.find(e => e.toolUseId === 'toolu_noreceipt');
-    assert.equal(entryAfter?.webSubmitted?.status, 'submitted');
-    assert.equal(entryAfter?.webSubmitted?.at, lateIso);
-    assert.equal(entryAfter?.webSubmitted?.lateReceipt, true);
+    // 首个结果保持不变，迟到回执另记
+    assert.deepEqual(entryAfter?.webSubmitted, entryBefore?.webSubmitted);
+    assert.deepEqual(entryAfter?.lateReceipt, { at: lateIso, status: 'submitted' });
     assert.equal(entryAfter?.cloudConfirmed?.outcome, 'answered');
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -8,7 +8,7 @@ import { ProviderEventSchema, type ProviderConnection, type ProviderEvent, type 
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import * as rpc from '../../shared/cloud-session.ts';
 import { cloudSessionStatus } from '../../shared/provider-instance.ts';
-import type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult } from '../../shared/web-request.ts';
+import { webRequestDetailReason, type AnswerWebRequest, type ResolveWebRequest, type WebRequestAnswer, type WebRequestContext, type WebRequestResult } from '../../shared/web-request.ts';
 import { toWebAnswer } from '../web-request/normalize.ts';
 
 export type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult };
@@ -22,29 +22,14 @@ const caps = ['prompt.message', 'prompt.steer', 'session.persistence', 'permissi
 type PendingRequest = { toolUseId: string; toolName: string; kind: 'question' | 'tool'; input: Record<string, unknown> };
 export const CLOUD_MANUAL_REQUEST_MARKER = 'cloudSessionManual';
 
-const detailReasons: Record<string, string> = {
-  unsupported_tool: '不是 AskUserQuestion',
-  dismissed: '已在 Paseo 忽略',
-  invalid_answer: '答案对不上原问题',
-  request_changed: '原请求已变化',
-  answer_changed: '回答已变化',
-  bridge_not_connected: '配对浏览器未连接',
-  scan_stale: '浏览器扫描不新鲜',
-  not_found: '页面上找不到对应提问',
-  scan_incomplete: '页面扫描不完整',
-  multiple_candidates: '页面上有多个候选提问',
-  other_not_on_page: '页面上该题没有其他输入框',
-  not_claimed: '浏览器未及时领取',
-  no_receipt: '未收到浏览器回执',
-  page_unknown: '扩展复核未通过',
-};
+
 
 function timelineMessage(result: WebRequestResult): string {
   if (result.status === 'submitted') return '已在 claude.ai 页面提交，等待云端确认';
   if (result.status === 'page_not_open') return 'claude.ai 页面没有打开，请在 claude.ai 作答';
   if (result.detail === 'tool_in_browser') return '权限请求由 claude.ai 页面处理，Paseo 里的回答没有提交，请在 claude.ai 核对';
   if (result.detail === 'multiple_instances') return '多个浏览器环境打开了此会话，没有提交，请在 claude.ai 作答';
-  const reason = detailReasons[result.detail] ?? (result.detail || '未知原因');
+  const reason = webRequestDetailReason(result.detail);
   return `结果不确定（${reason}），请在 claude.ai 核对`;
 }
 
