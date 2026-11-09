@@ -146,12 +146,17 @@ function readSnapshotFromDisk(machinePath: string, services: Services, overrideE
   };
 }
 
+// 设置页的 RPC 每个插件实例只注册一次：模块启用时由模块注册，未启用时由核心层兜底（server/core/plugin.ts）。
+const rpcsRegistered = new WeakSet<object>();
+
 export function registerProviderQuotasRpcs(options: {
   server: PluginServerContext;
   machinePath: string;
   services: Services;
 }): void {
   const { server, machinePath, services } = options;
+  if (rpcsRegistered.has(services)) return;
+  rpcsRegistered.add(services);
 
   server.handle(providerQuotasSnapshot, async () => readSnapshotFromDisk(machinePath, services));
 

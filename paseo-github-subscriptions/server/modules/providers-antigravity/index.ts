@@ -162,8 +162,13 @@ export interface AntigravityRpcOptions {
 
 const sameSet = (left: ReadonlySet<string>, right: readonly string[]) => left.size === right.length && right.every(id => left.has(id));
 
+// 设置页的 RPC 每个插件实例只注册一次：模块启用时由模块注册，未启用时由核心层兜底（server/core/plugin.ts）。
+const rpcsRegistered = new WeakSet<object>();
+
 export function registerAntigravityRpcs(options: AntigravityRpcOptions): void {
   const { server, machinePath, services } = options;
+  if (rpcsRegistered.has(services)) return;
+  rpcsRegistered.add(services);
   const writeJson = options.writeJson ?? writeJsonFile;
   const paseoConfigPath = join(services.home, 'config.json');
 
