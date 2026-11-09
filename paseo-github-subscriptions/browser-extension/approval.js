@@ -39,6 +39,27 @@
   function triggerApprovalClick(target) {
     target.click();
   }
+  // 阅读门槛：claude.ai 部分权限卡片要求先把参数区滚到底（提示“Scroll to the end to allow this.”），
+  // 否则点“允许”无效。用户决定（#1704 评论 6732392628）：对原本就会自动批准的卡片先滚到底，提示消失后再点。
+  const READ_GATE_TEXT = /scroll to the end to allow/i;
+  const READ_GATE_SETTLE_MS = 300;
+  function readGateHint(scope) {
+    const root = getCardRoot(scope);
+    const hint = root?.querySelector?.('[data-testid="approval-read-hint"]');
+    return hint && visible(hint) && READ_GATE_TEXT.test(hint.innerText || hint.textContent || '') ? hint : null;
+  }
+  async function passReadGate(scope) {
+    const root = getCardRoot(scope);
+    for (const node of [root, ...(root?.querySelectorAll?.('*') || [])]) {
+      if (!(node?.scrollHeight - node?.clientHeight > 1)) continue;
+      node.scrollTop = node.scrollHeight;
+      node.dispatchEvent?.(new Event('scroll'));
+    }
+    const rows = [...(root?.querySelectorAll?.('[data-testid="approval-read-rows"] li') || [])];
+    rows.at(-1)?.scrollIntoView?.({ block: 'end' });
+    await new Promise(resolve => setTimeout(resolve, READ_GATE_SETTLE_MS));
+    return !readGateHint(scope);
+  }
   function pruneCardHistory(now = Date.now()) {
     const ttl = Math.max(APPROVAL_HISTORY_TTL_MS, maxRetryDurationMs() * 2);
     for (const [key, state] of cardHistory) {
@@ -239,12 +260,24 @@
         }
         return;
       }
-      const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
+      const report = (status, readGate) => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status, ...(readGate ? { readGate } : {}) });
       if (!enabled || !pageVisible() || currentPath !== location.pathname || scope.isConnected === false || !button.isConnected || ensureCardId(scope) !== cardId || label(button) !== buttonLabel || (scope.innerText || scope.textContent || '') !== text || !eligible(button, scope, text)) {
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
         await report('skipped');
         return;
+      }
+      let readGate;
+      if (readGateHint(scope)) {
+        const passed = await passReadGate(scope);
+        if (!passed || !enabled || !pageVisible() || currentPath !== location.pathname || scope.isConnected === false || !button.isConnected || !visible(button) || button.disabled || ensureCardId(scope) !== cardId || label(button) !== buttonLabel) {
+          recordCardAttempt(cardId);
+          recordCardResult(cardId, 'skipped');
+          await report('skipped', 'read_gate_blocked');
+          if (pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) setTimeout(schedule, retryIntervalMs());
+          return;
+        }
+        readGate = 'read_gate_scrolled';
       }
       recordCardAttempt(cardId);
       triggerApprovalClick(button);
@@ -252,7 +285,7 @@
       const status = scope.isConnected === false || !button.isConnected || !visible(button) ? 'dismissed' : 'still-visible';
       recordCardResult(cardId, status);
       if (status === 'dismissed') clearCardId(scope);
-      await report(status);
+      await report(status, readGate);
       if (status === 'still-visible' && pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) {
         setTimeout(schedule, retryIntervalMs());
       }
@@ -291,12 +324,24 @@
         }
         return;
       }
-      const report = status => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status });
+      const report = (status, readGate) => chrome.runtime.sendMessage({ type: 'approval-result', digest, reservationId: reservation.reservationId, status, ...(readGate ? { readGate } : {}) });
       if (!enabled || !pageVisible() || currentPath !== location.pathname || ensureCardId(card) !== cardId || (card.innerText || card.textContent || '') !== text || !menuCardEligible(moreButton, card, text)) {
         recordCardAttempt(cardId);
         recordCardResult(cardId, 'skipped');
         await report('skipped');
         return;
+      }
+      let readGate;
+      if (readGateHint(card)) {
+        const passed = await passReadGate(card);
+        if (!passed || !enabled || !pageVisible() || currentPath !== location.pathname || !card.isConnected || !moreButton.isConnected || !visible(moreButton) || ensureCardId(card) !== cardId) {
+          recordCardAttempt(cardId);
+          recordCardResult(cardId, 'skipped');
+          await report('skipped', 'read_gate_blocked');
+          if (pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) setTimeout(schedule, retryIntervalMs());
+          return;
+        }
+        readGate = 'read_gate_scrolled';
       }
       triggerApprovalClick(moreButton);
       let item = findAllowOnceMenuItem(moreButton);
@@ -320,7 +365,7 @@
       const status = !card.isConnected || !visible(card) || !moreButton.isConnected || !visible(moreButton) ? 'dismissed' : 'still-visible';
       recordCardResult(cardId, status);
       if (status === 'dismissed') clearCardId(card);
-      await report(status);
+      await report(status, readGate);
       if (status === 'still-visible' && pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) {
         setTimeout(schedule, retryIntervalMs());
       }

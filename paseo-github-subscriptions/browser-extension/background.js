@@ -203,7 +203,7 @@ async function reconcile() {
     sentResults = ((await chrome.storage.local.get('questionState')).questionState?.results || []).slice(0, MAX_QUESTIONS);
     const instanceName = typeof data.instanceName === 'string' && data.instanceName.trim() ? data.instanceName.trim().slice(0, 120) : '未命名浏览器环境';
     const storedApprovals = (await chrome.storage.local.get('approvalAudit')).approvalAudit;
-    const approvals = (Array.isArray(storedApprovals) ? storedApprovals : []).slice(-30).map(({ sessionId, reservationId, digest, button, at, observedAt, status }) => ({ sessionId, reservationId, digest, button, at, observedAt, status }));
+    const approvals = (Array.isArray(storedApprovals) ? storedApprovals : []).slice(-30).map(({ sessionId, reservationId, digest, button, at, observedAt, status, readGate }) => ({ sessionId, reservationId, digest, button, at, observedAt, status, ...(readGate ? { readGate } : {}) }));
     response = await fetch(pairing.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${pairing.token}` }, body: JSON.stringify({ instanceId, instanceName, sessions: [...sessions.values()].map(({ tabs: _tabs, ...s }) => s), observedSessionIds, approvals, questions: [...reported.values()].map(item => item.question), results: sentResults }), signal: AbortSignal.timeout(5000), redirect: 'error', credentials: 'omit' });
     if (!response.ok) return;
     response = await response.json();
@@ -391,6 +391,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (!previous || previous.tabId !== sender.tab.id || previous.status !== 'reserved' || !['dismissed', 'still-visible', 'skipped'].includes(message.status)) return { allowed: false };
         previous.status = message.status;
         previous.observedAt = new Date(now).toISOString();
+        if (message.readGate === 'read_gate_scrolled' || message.readGate === 'read_gate_blocked') previous.readGate = message.readGate;
         await chrome.storage.local.set({ approvalAudit: audit.slice(-300) });
         schedule();
         return { allowed: true, reservationId: previous.reservationId };
