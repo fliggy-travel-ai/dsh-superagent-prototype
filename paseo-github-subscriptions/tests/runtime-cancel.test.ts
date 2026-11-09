@@ -16,13 +16,13 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'runtime-cancel-'));
   const counts = { hooksAdded: 0, hooksRemoved: 0, released: 0, subscribed: 0, unsubscribed: 0 };
   const server = { addHook: () => { counts.hooksAdded++; return () => { counts.hooksRemoved++; }; } };
-  const listGate = gate<void>(); const readyGate = gate<void>();
+  const listGate = gate<void>(); const listCalledGate = gate<void>(); const readyGate = gate<void>();
   const subscription = { release: async () => { counts.released++; }, subscribe: () => { counts.subscribed++; return () => { counts.unsubscribed++; }; } };
-  const paseo = { agents: { list: async () => { await listGate.promise; return { subscription }; }, ref: () => ({}) }, workspaces: { list: async () => ({ entries: [] }) }, projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} } };
+  const paseo = { agents: { list: async () => { listCalledGate.resolve(); await listGate.promise; return { subscription }; }, ref: () => ({}) }, workspaces: { list: async () => ({ entries: [] }) }, projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} } };
   const client = { getLastServerInfoMessage: () => ({ serverId: 'srv' }) };
   const daemon = { ready: async () => { await readyGate.promise; return { paseo, client }; } };
   const roles = { read: async () => parseWorkspaceRoles([]) };
-  return { dir, counts, server, daemon, roles, listGate, readyGate, done: () => rmSync(dir, { recursive: true, force: true }) };
+  return { dir, counts, server, daemon, roles, listGate, listCalledGate, readyGate, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 for (const kind of ['escalation', 'forward'] as const) {
@@ -52,7 +52,7 @@ for (const kind of ['escalation', 'forward'] as const) {
       const runtime = make(f);
       const started = runtime.start();
       f.readyGate.resolve();
-      for (let index = 0; index < 20 && f.counts.hooksAdded < 3; index++) await new Promise(resolve => setImmediate(resolve));
+      await f.listCalledGate.promise;
       assert.equal(f.counts.hooksAdded, 3);
       await runtime.stop();
       f.listGate.resolve();

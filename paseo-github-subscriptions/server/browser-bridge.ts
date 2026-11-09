@@ -2,8 +2,11 @@ import { createServer, type Server } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BrowserApprovalEventSchema, BrowserBindingInputSchema, BrowserSettingsSchema, BrowserSyncSchema, type AnswerWebRequest, type BrowserBindingInput, type BrowserPairing, type BrowserSettings, type BrowserSnapshot, type WebRequestAnswer, type WebRequestResult } from '../shared/browser.ts';
 import type { PresenceRuntime } from './presence.ts';
+
+const EXTENSION_PATH = fileURLToPath(new URL('../browser-extension', import.meta.url));
 
 const ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 const MAX_BODY = 65536;
@@ -17,6 +20,7 @@ export class BrowserBridge {
   private approvals: NonNullable<BrowserSnapshot['approvals']> = [];
   private sessions = new Map<string, BrowserSnapshot['sessions'][number]>();
   private seen = new Map<string, number>();
+  private knownInstances = new Map<string, { instanceName: string; lastSeenAt: string }>();
   private server: Server | null = null;
   private token = '';
   private error: string | null = null;
@@ -105,7 +109,9 @@ export class BrowserBridge {
           if (bindingsChanged || previousApprovals !== JSON.stringify(this.approvals)) await this.save();
           for (const [k, session] of this.sessions) if (session.instanceId === input.instanceId) this.sessions.delete(k);
           for (const session of next) this.sessions.set(key(session.instanceId, session.sessionId), session);
+          const nowIso = new Date().toISOString();
           this.seen.set(input.instanceId, Date.now());
+          this.knownInstances.set(input.instanceId, { instanceName: input.instanceName, lastSeenAt: nowIso });
           const decisions = await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds) ?? [];
           res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ sessions: next.map(({ sessionId, groupTitle }) => ({ sessionId, groupTitle })), decisions }));
         } catch { if (!res.headersSent) res.writeHead(400).end(); }
@@ -119,7 +125,23 @@ export class BrowserBridge {
   async stop(): Promise<void> { return this.serial(async () => { await this.close(); this.started = false; }); }
   snapshot(): BrowserSnapshot {
     const now = Date.now(); const active = [...this.seen.values()].some(t => now - t < MAX_AGE);
-    return { settings: { ...this.settings }, connected: !!this.server && active, error: this.error, approvals: this.approvals.map(entry => ({ ...entry })), sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })), bindings: this.bindings.map(b => ({ ...b })) };
+    const instances = [...this.knownInstances.entries()].map(([instanceId, info]) => ({
+      instanceId,
+      instanceName: info.instanceName,
+      account: null,
+      connected: !!this.server && (now - (this.seen.get(instanceId) ?? 0) < MAX_AGE),
+      lastSeenAt: info.lastSeenAt,
+    }));
+    return {
+      settings: { ...this.settings },
+      connected: !!this.server && active,
+      error: this.error,
+      approvals: this.approvals.map(entry => ({ ...entry })),
+      sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })),
+      bindings: this.bindings.map(b => ({ ...b })),
+      extensionPath: EXTENSION_PATH,
+      instances,
+    };
   }
   async configure(value: BrowserSettings): Promise<BrowserSnapshot> { return this.serial(async () => {
     if (!this.started) throw new Error('浏览器桥接尚未启动');

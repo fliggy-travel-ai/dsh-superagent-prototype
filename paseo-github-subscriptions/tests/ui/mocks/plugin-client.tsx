@@ -15,3 +15,7 @@ export function useAgent<T>(_agentId: string, _selector: (agent: AgentSnapshotLi
 export function useWorkspace<T>(_workspaceId: string, _selector: (workspace: never) => T): T | null {
   throw new Error('Plugin state hooks must run inside a workspace panel');
 }
+
+export function useRpc(): (_contract: unknown, _input: unknown) => Promise<unknown> {
+  return async () => ({});
+}

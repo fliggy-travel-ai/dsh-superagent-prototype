@@ -107,6 +107,7 @@ export class RenewalService {
     this.timer = setTimeout(() => {
       void this.tick().finally(() => this.schedule(60_000));
     }, ms);
+    this.timer.unref?.();
   }
   tick(): Promise<void> {
     if (this.running) return this.running;

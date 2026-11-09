@@ -8,11 +8,22 @@ export const BrowserPairingSchema = z.strictObject({ url: z.string().url(), toke
 export const BrowserApprovalSchema = z.strictObject({ sessionId: id, reservationId: z.string().min(1).max(128), digest: z.string().regex(/^[a-f0-9]{64}$/), button: z.string().max(100), at: z.string().datetime(), observedAt: z.string().datetime().optional(), status: z.enum(['reserved', 'dismissed', 'still-visible', 'skipped']) });
 export const BrowserApprovalEventSchema = BrowserApprovalSchema.extend({ instanceId: id, instanceName: z.string().max(120) });
 export const BrowserActivitySchema = z.strictObject({ state: z.enum(['working', 'waiting', 'limited', 'unknown']), reason: z.string().max(300), lastMessage: z.string().max(2000), observedAt: z.string().datetime() });
+export const BrowserInstanceInfoSchema = z.strictObject({
+  instanceId: id,
+  instanceName: z.string().min(1).max(120),
+  account: z.string().nullable().default(null),
+  connected: z.boolean(),
+  lastSeenAt: z.string(),
+});
+export type BrowserInstanceInfo = z.infer<typeof BrowserInstanceInfoSchema>;
+
 export const BrowserSnapshotSchema = z.strictObject({
   settings: BrowserSettingsSchema, connected: z.boolean(), error: z.string().nullable(),
   sessions: z.array(z.strictObject({ instanceId: id, instanceName: z.string().min(1).max(120), sessionId: id, title: z.string(), url: z.string(), tabCount: z.number().int().positive(), lastSeenAt: z.string(), agentId: id.nullable(), groupTitle: z.string(), activity: BrowserActivitySchema.optional() })),
   bindings: z.array(z.strictObject({ instanceId: id, sessionId: id, agentId: id })),
   approvals: z.array(BrowserApprovalEventSchema).optional(),
+  extensionPath: z.string().optional(),
+  instances: z.array(BrowserInstanceInfoSchema).optional(),
 });
 export type BrowserSettings = z.infer<typeof BrowserSettingsSchema>;
 export type BrowserBindingInput = z.infer<typeof BrowserBindingInputSchema>;

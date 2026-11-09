@@ -88,7 +88,6 @@
   },
   "claudeAccounts": {
     "sourceId": "claude-accounts",
-    "labelWithQuota": true,
     "autoResumeDefault": false,
     "renewal": true,
     "loginWorkspaceName": "账号登录",
@@ -100,7 +99,7 @@
         "id": "antigravity-cy517",
         "label": "Antigravity · 账号一",
         "command": [
-          "agy"
+          "agy-paseo"
         ]
       },
       {
@@ -108,7 +107,7 @@
         "label": "Antigravity · 账号二",
         "enabled": false,
         "command": [
-          "agy"
+          "agy-paseo"
         ]
       }
     ]

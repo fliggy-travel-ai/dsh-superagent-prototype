@@ -1,101 +1,129 @@
-import type { PluginScreenProps } from '@getpaseo/plugin/client';
+import type { PluginSurfaceProps } from '@getpaseo/plugin/client';
 import { useToast } from '@getpaseo/plugin/client/ui';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState } from 'react';
 import { ScrollView, Switch, Text, TextInput, View } from 'react-native';
-import type { Preferences } from '../../shared/model.ts';
+import type { BrowserUsageSettings } from '../../shared/browser-usage.ts';
 import { until } from '../format.ts';
 import { errorMessage } from '../store.ts';
-import { Btn, Card, Chip, Notice, Segmented, useStoreState, useUi } from '../ui.tsx';
+import { Btn, Card, Chip, Notice, useControlState, useStoreState, useUi } from '../ui.tsx';
 
-const ORG_PATTERN = /^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i;
-const REPO_PATTERN = /^[\w.-]+\/[\w.-]+$/;
-const KNOWN_PROVIDERS: readonly { id: string; label: string }[] = [
-  { id: 'claude', label: 'Claude Code' },
-  { id: 'codex', label: 'Codex' },
-  { id: 'opencode', label: 'OpenCode' },
-];
+export function AdsPowerKeyCard() {
+  const { s, control, theme } = useUi();
+  const [settings, setSettings] = useState<BrowserUsageSettings | null>(null);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState<'save' | 'remove' | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-function Field(props: { label: string; hint?: string; children: ReactNode }) {
-  const { s } = useUi();
-  return (
-    <View style={s.stack}>
-      <Text style={s.strong}>{props.label}</Text>
-      {props.hint ? <Text style={s.muted}>{props.hint}</Text> : null}
-      {props.children}
-    </View>
-  );
-}
+  useEffect(() => {
+    let active = true;
+    control
+      .usageSettings()
+      .then(res => {
+        if (active) setSettings(res);
+      })
+      .catch(() => {
+        if (active) setSettings({ adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' });
+      });
+    return () => {
+      active = false;
+    };
+  }, [control]);
 
-function SwitchRow(props: { label: string; hint: string; value: boolean; onChange(value: boolean): void }) {
-  const { s, theme } = useUi();
-  return (
-    <View style={[s.row, { justifyContent: 'space-between' }]}>
-      <View style={{ flex: 1, gap: 2 }}>
-        <Text style={s.strong}>{props.label}</Text>
-        <Text style={s.muted}>{props.hint}</Text>
-      </View>
-      <Switch
-        accessibilityLabel={props.label}
-        value={props.value}
-        onValueChange={props.onChange}
-        trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-        thumbColor={theme.colors.accentForeground}
-      />
-    </View>
-  );
-}
-
-/** 一个可增删的字符串列表：先在草稿里改，点“保存设置”才写入。 */
-function ListEditor(props: { items: readonly string[]; placeholder: string; validate(value: string): string | null; onChange(items: string[]): void; empty: string }) {
-  const { s, theme } = useUi();
-  const [text, setText] = useState('');
-  const [problem, setProblem] = useState<string | null>(null);
-  const add = () => {
-    const value = text.trim();
-    if (!value) return;
-    const invalid = props.validate(value);
-    if (invalid) return setProblem(invalid);
-    if (!props.items.includes(value)) props.onChange([...props.items, value]);
-    setText('');
-    setProblem(null);
+  const save = async () => {
+    const candidate = value.trim();
+    if (!candidate || busy) return;
+    setBusy('save');
+    setError(null);
+    try {
+      const res = await control.saveAdsPowerApiKey(candidate);
+      setValue('');
+      setSettings(res);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
   };
+
+  const remove = async () => {
+    if (busy) return;
+    setBusy('remove');
+    setError(null);
+    try {
+      const res = await control.removeAdsPowerApiKey();
+      setValue('');
+      setSettings(res);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const isConfigured = Boolean(settings?.adspowerApiKeyConfigured);
+  const isFromEnv = settings?.adspowerApiKeySource === 'env';
+  const canClear = isConfigured && !isFromEnv;
+  const statusLabel =
+    settings === null
+      ? '读取中'
+      : isFromEnv
+        ? '已配置（来自环境变量）'
+        : isConfigured
+          ? '已配置'
+          : '未配置';
+
   return (
-    <View style={{ gap: 8 }}>
+    <Card
+      title="额度设置（AdsPower API key）"
+      trailing={<Chip label={statusLabel} tone={isConfigured ? 'success' : 'neutral'} />}
+    >
+      <Text style={s.text}>当前状态：{settings === null ? '正在读取…' : statusLabel}</Text>
+      <Text style={s.muted}>
+        用于通过本机 AdsPower 本地 API（默认 http://127.0.0.1:50325）查询浏览器环境的名称。API key
+        只保存在本机插件状态里（文件权限 0600），不写日志，不返回给前端；保留环境变量
+        PASEO_ADSPOWER_API_KEY / ADSPOWER_API_KEY 作为后备来源。
+      </Text>
+      <Text style={s.muted}>
+        要准确显示浏览器环境名称，请在浏览器扩展选项页填写一次环境序号；单环境自动识别只在单个活跃环境且单个扩展上报时生效。
+      </Text>
+      <TextInput
+        accessibilityLabel="AdsPower API key"
+        style={s.input}
+        value={value}
+        onChangeText={setValue}
+        placeholder={isConfigured ? '重新填写 AdsPower API key 以更换' : '填写 AdsPower API key'}
+        placeholderTextColor={theme.colors.foregroundMuted}
+        secureTextEntry
+        autoCapitalize="none"
+        autoCorrect={false}
+        autoComplete="off"
+        spellCheck={false}
+        contextMenuHidden
+      />
+      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
       <View style={s.wrap}>
-        {props.items.length === 0 ? <Text style={s.muted}>{props.empty}</Text> : null}
-        {props.items.map((item) => (
-          <View key={item} style={[s.chip, s.row, { gap: 6 }]}>
-            <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>{item}</Text>
-            <Text
-              accessibilityRole="button"
-              accessibilityLabel={`移除 ${item}`}
-              onPress={() => props.onChange(props.items.filter((other) => other !== item))}
-              style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}
-            >
-              ×
-            </Text>
-          </View>
-        ))}
-      </View>
-      <View style={s.row}>
-        <TextInput
-          style={s.input}
-          value={text}
-          onChangeText={setText}
-          onSubmitEditing={add}
-          placeholder={props.placeholder}
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-          autoCorrect={false}
+        <Btn
+          primary
+          label={isConfigured ? '重新填写并保存' : '保存 API key'}
+          disabled={!value.trim() || busy !== null}
+          busy={busy === 'save'}
+          onPress={() => void save()}
         />
-        <Btn label="添加" onPress={add} disabled={!text.trim()} />
+        {canClear ? (
+          <Btn
+            danger
+            label="清除 API key"
+            disabled={busy !== null}
+            busy={busy === 'remove'}
+            onPress={() => void remove()}
+          />
+        ) : null}
       </View>
-      {problem ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{problem}</Text> : null}
-    </View>
+    </Card>
   );
 }
 
-function TokenCard() {
+export function TokenCard() {
   const { s, store, now, theme } = useUi();
   const toast = useToast();
   const { snapshot } = useStoreState();
@@ -112,13 +140,16 @@ function TokenCard() {
     try {
       const status = await store.saveToken(candidate);
       setValue('');
-      toast.show(status.error ? `令牌已保存，但检查未通过：${status.error}` : '令牌已保存', { variant: status.error ? 'warning' : 'success' });
+      toast.show(status.error ? `令牌已保存，但检查未通过：${status.error}` : '令牌已保存', {
+        variant: status.error ? 'warning' : 'success',
+      });
     } catch (error) {
       setFailure(errorMessage(error));
     } finally {
       setBusy(null);
     }
   };
+
   const run = async (kind: 'remove' | 'check', action: () => Promise<void>) => {
     setBusy(kind);
     setFailure(null);
@@ -132,7 +163,15 @@ function TokenCard() {
   };
 
   return (
-    <Card title="GitHub 令牌">
+    <Card
+      title="GitHub 令牌"
+      trailing={
+        <Chip
+          label={token?.configured ? '已保存' : '未配置'}
+          tone={token?.configured ? (token.error ? 'warning' : 'success') : 'warning'}
+        />
+      }
+    >
       {token?.configured ? (
         <View style={{ gap: 4 }}>
           <Text style={s.mono}>{token.prefix ?? '已保存'}（已保存）</Text>
@@ -147,6 +186,7 @@ function TokenCard() {
         <Text style={{ color: theme.colors.statusWarning, fontSize: 13 }}>还没有保存令牌。</Text>
       )}
       <TextInput
+        accessibilityLabel="GitHub 令牌"
         style={s.input}
         value={value}
         onChangeText={setValue}
@@ -161,186 +201,297 @@ function TokenCard() {
       />
       {failure ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{failure}</Text> : null}
       <View style={s.wrap}>
-        <Btn primary label={token?.configured ? '更换令牌' : '保存令牌'} onPress={() => void save()} disabled={!value.trim()} busy={busy === 'save'} />
-        {token?.configured ? <Btn label="重新检查" onPress={() => void run('check', () => store.pollNow())} busy={busy === 'check'} /> : null}
-        {token?.configured ? <Btn danger label="移除令牌" onPress={() => void run('remove', () => store.removeToken())} busy={busy === 'remove'} /> : null}
+        <Btn
+          primary
+          label={token?.configured ? '更换令牌' : '保存令牌'}
+          onPress={() => void save()}
+          disabled={!value.trim()}
+          busy={busy === 'save'}
+        />
+        {token?.configured ? (
+          <Btn label="重新检查" onPress={() => void run('check', () => store.pollNow())} busy={busy === 'check'} />
+        ) : null}
+        {token?.configured ? (
+          <Btn
+            danger
+            label="移除令牌"
+            onPress={() => void run('remove', () => store.removeToken())}
+            busy={busy === 'remove'}
+          />
+        ) : null}
       </View>
-      <Text style={s.small}>令牌只保存在本机插件目录，仅本人可读。界面只显示前缀和账号，保存后输入框立即清空。</Text>
+      <Text style={s.small}>
+        令牌只保存在本机插件目录（文件权限 0600），仅本人可读。界面只显示前缀和账号，保存后输入框立即清空。
+      </Text>
     </Card>
   );
 }
 
-export function SettingsScreen(_props: PluginScreenProps) {
-  const { s, store, openScreen, theme } = useUi();
-  const toast = useToast();
-  const { snapshot, error } = useStoreState();
-  const [draft, setDraft] = useState<Preferences | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [customProvider, setCustomProvider] = useState('');
+function MachineConfigCard() {
+  const { s, control, theme } = useUi();
+  const { machineSettings, modules } = useControlState();
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupResult, setBackupResult] = useState<{ backupPath: string; files: string[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  if (!snapshot) {
-    return (
-      <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
-        <Text style={s.h1}>GitHub 订阅设置</Text>
-        {error ? (
-          <Notice tone="danger">
-            <Text style={s.text}>无法读取设置：{error}</Text>
-          </Notice>
-        ) : (
-          <Text style={s.muted}>正在读取…</Text>
-        )}
-      </ScrollView>
-    );
-  }
+  const configPath = machineSettings?.configPath ?? modules?.config.path ?? '~/.paseo/github-subscriptions/machine.json';
+  const hostLabel = machineSettings?.machine ?? (modules?.instance.role === 'provider' ? 'Provider 实例' : '本机');
+  const configErrors = machineSettings?.errors ?? modules?.config.errors ?? [];
+  const moduleItems =
+    machineSettings?.modules ??
+    (modules?.modules.map(m => ({
+      id: m.id,
+      label: m.label,
+      enabled: m.state === 'running',
+      state: m.state,
+      reason: m.reason,
+      reloadRequired: false,
+    })) ?? []);
 
-  const base = snapshot.preferences;
-  const view = draft ?? base;
-  const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(base);
-  const change = (patch: Partial<Preferences>) => setDraft({ ...view, ...patch });
-  const orgValid = ORG_PATTERN.test(view.organization);
-  const providerIds = [...new Set([...KNOWN_PROVIDERS.map((p) => p.id), ...Object.keys(view.providerPolicies)])];
-  const providerLabel = (id: string) => KNOWN_PROVIDERS.find((p) => p.id === id)?.label ?? id;
-  const setPolicy = (id: string, policy: 'interrupt' | 'skip') => change({ providerPolicies: { ...view.providerPolicies, [id]: policy } });
-
-  const save = async () => {
-    if (!orgValid) return;
-    setSaving(true);
-    setSaveError(null);
+  const toggle = async (id: string, enabled: boolean) => {
+    setBusyId(id);
+    setError(null);
     try {
-      await store.savePreferences(view);
-      setDraft(null);
-      toast.show('设置已保存', { variant: 'success' });
+      await control.toggleModule(id, enabled);
     } catch (failure) {
-      setSaveError(errorMessage(failure));
+      setError(errorMessage(failure));
     } finally {
-      setSaving(false);
+      setBusyId(null);
+    }
+  };
+
+  const runBackup = async () => {
+    setBackupBusy(true);
+    setError(null);
+    try {
+      const res = await control.exportBackup();
+      setBackupResult({ backupPath: res.backupPath, files: res.files });
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBackupBusy(false);
     }
   };
 
   return (
-    <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <View style={{ flex: 1, gap: 4 }}>
-          <Text style={s.h1}>GitHub 订阅设置</Text>
-          <Text style={s.muted}>监听组织仓库的 GitHub 事件，按会话订阅直接发到会话。轮询间隔固定 {snapshot.intervalSeconds} 秒。</Text>
-        </View>
-        <Btn label="返回订阅页" onPress={() => openScreen({ screenId: 'main' })} />
+    <Card
+      title="机器配置（machine.json）"
+      trailing={<Chip label={hostLabel} tone="neutral" />}
+    >
+      <View style={{ gap: 4 }}>
+        <Text style={s.text}>配置文件路径：</Text>
+        <Text style={s.mono}>{configPath}</Text>
       </View>
-
-      <Card title="运行方式">
-        <SwitchRow label="启用监听" hint="关闭后不再轮询 GitHub，订阅保留。" value={view.enabled} onChange={(enabled) => change({ enabled })} />
-        <SwitchRow
-          label="影子模式"
-          hint={view.shadow ? '开启中：事件只记日志，不发给任何会话。用来先观察事件是否正确。' : '已关闭：事件会实际发送到订阅的会话。'}
-          value={view.shadow}
-          onChange={(shadow) => change({ shadow })}
-        />
-        {!view.shadow ? (
-          <Notice tone="warning">
-            <Text style={s.text}>关闭影子模式并保存后，订阅的会话会立即收到消息，包括正在运行的会话。</Text>
-          </Notice>
-        ) : null}
-      </Card>
-
-      <TokenCard />
-
-      <Card title="会话工具">
-        {snapshot.toolInjection ? (
-          <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>“给会话注入 MCP 工具”已打开。所有会话都能用订阅工具。</Text>
-        ) : (
-          <>
-            <Text style={{ color: theme.colors.statusWarning, fontSize: 13 }}>“给会话注入 MCP 工具”未打开，会话看不到订阅工具，无法订阅。</Text>
-            <Text style={s.muted}>修复：打开 Paseo 设置 → 守护进程 → “给会话注入 MCP 工具”，然后重启守护进程。已打开的会话会在下一次空闲时重开并拿到工具。</Text>
-          </>
-        )}
-        <View style={s.row}>
-          <Btn label="重新检查" onPress={() => void store.refresh()} />
-        </View>
-      </Card>
-
-      <Card title="监听范围">
-        <Field label="组织" hint="组织里新建的仓库默认会被监听。">
-          <TextInput
-            style={s.input}
-            value={view.organization}
-            onChangeText={(organization) => change({ organization })}
-            placeholder="组织名"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          {!orgValid ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>组织名只能包含字母、数字和连字符。</Text> : null}
-        </Field>
-        <Field label="排除的仓库" hint="这些仓库不监听。填写仓库名，不含组织。">
-          <ListEditor
-            items={view.excludedRepos}
-            empty="没有排除的仓库"
-            placeholder="仓库名，例如 rea"
-            validate={(value) => (/^[\w.-]+$/.test(value) ? null : '仓库名只能包含字母、数字、点、下划线和连字符。')}
-            onChange={(excludedRepos) => change({ excludedRepos })}
-          />
-        </Field>
-        <Field label="额外仓库" hint="组织以外要监听的仓库，格式 owner/repo。">
-          <ListEditor
-            items={view.extraRepos}
-            empty="无"
-            placeholder="owner/repo"
-            validate={(value) => (REPO_PATTERN.test(value) ? null : '请输入 owner/repo。')}
-            onChange={(extraRepos) => change({ extraRepos })}
-          />
-        </Field>
-      </Card>
-
-      <Card title="会话忙时（按提供方）">
-        <Text style={s.muted}>
-          “立即发送”：会话忙或空闲都立即发送；提供方不支持插入当前回合时，Paseo 会中断当前回合。“跳过本轮”：会话忙时不发送这一批事件，也不排队补发。
-        </Text>
-        {providerIds.map((id) => (
-          <View key={id} style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
-            <Text style={s.strong}>{providerLabel(id)}</Text>
-            <Segmented
-              value={view.providerPolicies[id] ?? 'interrupt'}
-              onChange={(policy) => setPolicy(id, policy)}
-              options={[
-                { value: 'interrupt', label: '立即发送' },
-                { value: 'skip', label: '跳过本轮' },
-              ]}
-            />
-          </View>
-        ))}
-        <View style={s.row}>
-          <TextInput
-            style={s.input}
-            value={customProvider}
-            onChangeText={setCustomProvider}
-            placeholder="其他提供方名称（小写英文），例如 gemini"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <Btn
-            label="添加"
-            disabled={!customProvider.trim()}
-            onPress={() => {
-              const id = customProvider.trim();
-              if (id && !(id in view.providerPolicies)) setPolicy(id, 'interrupt');
-              setCustomProvider('');
-            }}
-          />
-        </View>
-      </Card>
-
-      {saveError ? (
+      {configErrors.length > 0 ? (
         <Notice tone="danger">
-          <Text style={s.text}>保存失败：{saveError}</Text>
+          {configErrors.map((err, idx) => (
+            <Text key={idx} style={s.text}>
+              {err}
+            </Text>
+          ))}
         </Notice>
-      ) : null}
-      <View style={s.row}>
-        <Btn primary label="保存设置" onPress={() => void save()} disabled={!dirty || !orgValid} busy={saving} />
-        {dirty ? <Btn label="放弃修改" onPress={() => setDraft(null)} /> : null}
-        {dirty ? <Chip label="有未保存的修改" tone="warning" /> : null}
+      ) : (
+        <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>配置文件格式校验通过。</Text>
+      )}
+      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
+
+      <View style={{ gap: 8, marginTop: 4 }}>
+        <Text style={s.strong}>本机模块开关</Text>
+        {moduleItems.length === 0 ? (
+          <Text style={s.muted}>正在读取模块列表…</Text>
+        ) : (
+          moduleItems.map((item, idx) => (
+            <View
+              key={item.id}
+              style={[
+                s.row,
+                {
+                  justifyContent: 'space-between',
+                  paddingVertical: 8,
+                  borderTopWidth: idx === 0 ? 0 : 1,
+                  borderTopColor: theme.colors.border,
+                },
+              ]}
+            >
+              <View style={{ flex: 1, gap: 2 }}>
+                <View style={s.wrap}>
+                  <Text style={s.strong}>{item.label}</Text>
+                  <Text style={s.mono}>{item.id}</Text>
+                  <Chip
+                    label={item.state === 'running' ? '运行中' : item.state === 'error' ? '出错' : '已关闭'}
+                    tone={item.state === 'running' ? 'success' : item.state === 'error' ? 'danger' : 'neutral'}
+                  />
+                </View>
+                {item.reason ? <Text style={s.small}>{item.reason}</Text> : null}
+                {item.reloadRequired ? (
+                  <Text style={s.small}>涉及 Provider 或额度来源注册，修改后在下次插件启动时生效。</Text>
+                ) : null}
+              </View>
+              <Switch
+                accessibilityLabel={`模块 ${item.label}`}
+                value={item.enabled}
+                disabled={busyId === item.id}
+                onValueChange={val => void toggle(item.id, val)}
+                trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+                thumbColor={theme.colors.accentForeground}
+              />
+            </View>
+          ))
+        )}
       </View>
+
+      <View style={[s.wrap, { paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }]}>
+        <Btn label="导出配置备份" onPress={() => void runBackup()} busy={backupBusy} />
+        {backupResult ? (
+          <Text style={s.small}>
+            已导出 {backupResult.files.length} 个文件至 {backupResult.backupPath}
+          </Text>
+        ) : null}
+      </View>
+    </Card>
+  );
+}
+
+function WebhookCredentialCard() {
+  const { s, control, theme } = useUi();
+  const { escalation, escalationStatus } = useControlState();
+  const [url, setUrl] = useState('');
+  const [secret, setSecret] = useState('');
+  const [busy, setBusy] = useState<'save' | 'test' | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const webhook = escalation?.webhook;
+  const disabled = escalationStatus === 'disabled';
+
+  const save = async () => {
+    if (!url.trim() || busy) return;
+    setBusy('save');
+    setError(null);
+    setMessage(null);
+    try {
+      await control.configureEscalationWebhook({ url: url.trim(), auth: secret.trim() || undefined });
+      setUrl('');
+      setSecret('');
+      setMessage('Webhook 凭据已保存（0600 权限）');
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const testWebhook = async () => {
+    if (busy) return;
+    setBusy('test');
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await control.testEscalationWebhook();
+      setMessage(res.sent ? `测试发送已响应：${res.message}` : `测试未通过：${res.message}`);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card
+      title="Webhook 凭据状态（升级通知）"
+      trailing={
+        disabled ? (
+          <Chip label="模块未启用" tone="neutral" />
+        ) : (
+          <Chip
+            label={webhook?.configured ? '已配置' : '未配置'}
+            tone={webhook?.configured ? 'success' : 'neutral'}
+          />
+        )
+      }
+    >
+      {disabled ? (
+        <Text style={s.muted}>
+          升级通知模块（answer.escalation）当前未启用或服务端尚未合并。启用后可在此查看和更换 Webhook 凭据。
+        </Text>
+      ) : (
+        <>
+          <View style={{ gap: 4 }}>
+            <Text style={s.text}>
+              凭据文件：{webhook?.configured ? '已存在（0600 权限）' : '未创建'} · 目标域名：
+              {webhook?.hostname ?? '—'}
+            </Text>
+            <Text style={s.text}>
+              指纹：<Text style={s.mono}>{webhook?.fingerprint ?? '未配置'}</Text>
+            </Text>
+          </View>
+          <TextInput
+            accessibilityLabel="Webhook 地址"
+            style={s.input}
+            value={url}
+            onChangeText={setUrl}
+            placeholder={webhook?.configured ? '填写新的 Webhook 地址以更换' : '填写 Webhook 地址'}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <TextInput
+            accessibilityLabel="Webhook 认证头"
+            style={s.input}
+            value={secret}
+            onChangeText={setSecret}
+            placeholder="可选：签名密钥或认证头（保存后不回显）"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
+          {message ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{message}</Text> : null}
+          <View style={s.wrap}>
+            <Btn
+              primary
+              label={webhook?.configured ? '更换 Webhook 凭据' : '保存 Webhook 凭据'}
+              disabled={!url.trim() || busy !== null}
+              busy={busy === 'save'}
+              onPress={() => void save()}
+            />
+            {webhook?.configured ? (
+              <Btn label="发测试通知" disabled={busy !== null} busy={busy === 'test'} onPress={() => void testWebhook()} />
+            ) : null}
+          </View>
+          <Text style={s.small}>
+            Webhook 完整地址和密钥只保存在本机 0600 凭据文件中，界面与日志只显示域名和 8 位指纹。
+          </Text>
+        </>
+      )}
+    </Card>
+  );
+}
+
+export function SettingsScreen(_props: PluginSurfaceProps) {
+  const { s, openScreen } = useUi();
+
+  return (
+    <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
+      <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+        <View style={{ flex: 1, gap: 4 }}>
+          <Text style={s.h1}>开发自动化设置</Text>
+          <Text style={s.muted}>管理本机模块开关、配置文件、GitHub 令牌、AdsPower API key 与 Webhook 凭据。</Text>
+        </View>
+        <Btn label="打开开发自动化" onPress={() => openScreen({ screenId: 'main' })} />
+      </View>
+
+      <MachineConfigCard />
+      <TokenCard />
+      <AdsPowerKeyCard />
+      <WebhookCredentialCard />
     </ScrollView>
   );
 }

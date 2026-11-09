@@ -229,7 +229,7 @@ export function registerAntigravityRpcs(options: AntigravityRpcOptions): void {
     const env: Record<string, string> = { ...(existing.env ?? {}) };
     if (input.homeDir) env.HOME = input.homeDir;
     if (input.proxy) { env.HTTPS_PROXY = input.proxy; env.HTTP_PROXY = input.proxy; }
-    const entry = { ...existing, enabled: true, label: input.label, command: input.command ?? normalizeCommand(existing.command) ?? ['agy'], ...(Object.keys(env).length > 0 ? { env } : {}) };
+    const entry = { ...existing, enabled: true, label: input.label, command: input.command ?? normalizeCommand(existing.command) ?? ['agy-paseo'], ...(Object.keys(env).length > 0 ? { env } : {}) };
     const configBackup = backupConfigFile(services.home);
     try {
       if (readJsonStrict(machinePath)) backupFile(machinePath);

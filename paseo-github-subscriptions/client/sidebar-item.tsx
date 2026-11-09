@@ -1,27 +1,65 @@
 import type { PluginSidebarItemProps } from '@getpaseo/plugin/client';
 import { SidebarRow } from '@getpaseo/plugin/client/ui';
-import { Text } from 'react-native';
+import { Text, View } from 'react-native';
 import { githubIcon } from './icons.ts';
-import { useStoreState, useUi } from './ui.tsx';
+import { computeHasAlert, computeTodoCount, getLastNonTodoPage, setLastNonTodoPage } from './sidebar-state.ts';
+import { useControlState, useStoreState, useUi } from './ui.tsx';
 
-const HOUR_MS = 3_600_000;
+export { computeHasAlert, computeTodoCount, getLastNonTodoPage, setLastNonTodoPage };
 
 export function SidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  const { theme, now } = useUi();
-  const { snapshot, error } = useStoreState();
-  const recent = snapshot ? snapshot.events.filter((event) => now - Date.parse(event.at) < HOUR_MS).length : 0;
-  const problem = Boolean(error) || Boolean(snapshot?.error) || Boolean(snapshot?.repositories.some((repo) => repo.error));
-  const shadow = snapshot?.preferences.shadow ?? true;
-  const text = problem ? '!' : recent > 0 ? String(recent) : shadow ? '影子' : '';
-  const color = problem ? theme.colors.statusWarning : theme.colors.foregroundMuted;
-  const active = currentScreen?.screenId === 'main' || currentScreen?.screenId === 'settings';
+  const { theme } = useUi();
+  const storeState = useStoreState();
+  const controlState = useControlState();
+  const hasAlert = computeHasAlert(storeState, controlState);
+  const active = currentScreen?.screenId === 'main' && currentScreen?.params?.page !== 'todo';
+
   return (
     <SidebarRow
       icon={githubIcon}
       label="开发自动化"
       active={active}
-      onPress={() => openScreen({ screenId: 'main' })}
-      trailing={text ? <Text style={{ color, fontSize: 12, paddingRight: 8 }}>{text}</Text> : undefined}
+      onPress={() => openScreen({ screenId: 'main', params: { page: getLastNonTodoPage() } })}
+      trailing={
+        hasAlert ? (
+          <Text style={{ color: theme.colors.statusDanger, fontSize: 12, fontWeight: '700', paddingRight: 8 }}>!</Text>
+        ) : undefined
+      }
+    />
+  );
+}
+
+export function SidebarTodoItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+  const { theme } = useUi();
+  const controlState = useControlState();
+  const count = computeTodoCount(controlState);
+  const active = currentScreen?.screenId === 'main' && currentScreen?.params?.page === 'todo';
+
+  return (
+    <SidebarRow
+      icon={githubIcon}
+      label="待办"
+      active={active}
+      onPress={() => openScreen({ screenId: 'main', params: { page: 'todo' } })}
+      trailing={
+        count > 0 ? (
+          <View
+            style={{
+              backgroundColor: theme.colors.surface2,
+              borderColor: theme.colors.statusWarning,
+              borderWidth: 1,
+              borderRadius: 999,
+              paddingHorizontal: 7,
+              paddingVertical: 1,
+              marginRight: 4,
+            }}
+          >
+            <Text style={{ color: theme.colors.statusWarning, fontSize: 11, fontWeight: '600' }}>{count}</Text>
+          </View>
+        ) : (
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, paddingRight: 8 }}>0</Text>
+        )
+      }
     />
   );
 }

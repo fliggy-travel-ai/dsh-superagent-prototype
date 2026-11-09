@@ -31,7 +31,7 @@ export const EscalationConfigureSchema = z.strictObject({
   enabled: z.boolean().optional(),
   delivery: DeliverySchema.optional(),
   timezone: z.string().min(1).optional(),
-  immediate: z.array(z.strictObject({ days: z.enum(['daily', 'weekdays', 'weekends']), from: z.string(), to: z.string() })).optional(),
+  immediate: z.array(ImmediateWindowOutSchema).optional(),
   delayMinutes: z.number().int().min(0).optional(),
 });
 

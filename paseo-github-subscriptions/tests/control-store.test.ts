@@ -225,3 +225,35 @@ test('已读写入不被较早快照覆盖，失败时保留未读状态', async
     assert.equal(store.getState().presence?.questions[0].answer?.readAt, undefined);
   } finally { store.dispose(); }
 });
+
+test('其他会话的 RPC 未注册或模块未开启时标记为 disabled 且不报错；已开启模块运行报错时记录 error', async () => {
+  const store = createControlStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'modules.status') {
+      return {
+        instance: { role: 'main', legacy: false },
+        config: { path: '/x/machine.json', source: 'file', errors: [] },
+        modules: [
+          { id: 'usage.claudeAccounts', label: 'Claude 账号', state: 'off', reason: '默认关闭' },
+          { id: 'answer.escalation', label: '升级通知', state: 'running' },
+        ],
+      };
+    }
+    if (contract.name === 'answer.escalation' || contract.name === 'escalation.snapshot') {
+      throw new Error('Webhook 状态文件损坏');
+    }
+    throw new Error(`未知调用 ${contract.name}`);
+  }) as Parameters<typeof createControlStore>[0]['rpc'] });
+  try {
+    await store.refreshUnify();
+    const state = store.getState();
+    assert.equal(state.claudeAccountsStatus, 'disabled');
+    assert.equal(state.claudeAccountsError, null);
+    assert.equal(state.antigravityStatus, 'disabled');
+    assert.equal(state.antigravityError, null);
+    assert.equal(state.quietStatus, 'disabled');
+    assert.equal(state.quietError, null);
+    assert.equal(state.escalationStatus, 'error');
+    assert.match(state.escalationError ?? '', /Webhook 状态文件损坏/);
+  } finally { store.dispose(); }
+});
+

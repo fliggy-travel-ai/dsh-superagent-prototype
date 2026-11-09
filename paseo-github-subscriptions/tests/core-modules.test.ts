@@ -70,6 +70,17 @@ test('默认关闭的模块要在 machine.json 中打开；显式关闭的模块
   assert.deepEqual(toggled.host.status().modules.map(m => [m.id, m.state]), [['off', 'running'], ['on', 'off']]);
   assert.match(toggled.host.status().modules[1]!.reason!, /已关闭/);
   assert.equal(opened, 2);
+
+  // 始终开启的模块（如云端会话）即使旧配置写 false 也会启动
+  let alwaysStarted = 0;
+  const always = start([def('providers.cloudSession', () => { alwaysStarted++; }, { alwaysEnabled: true })], {
+    json: { version: 1, modules: { 'providers.cloudSession': false } },
+  });
+  assert.deepEqual(always.host.status().modules.map(m => [m.id, m.state]), [['providers.cloudSession', 'running']]);
+  assert.equal(alwaysStarted, 1);
+  await closed.host.dispose();
+  await toggled.host.dispose();
+  await always.host.dispose();
 });
 
 test('不属于本实例角色的模块不出现', () => {

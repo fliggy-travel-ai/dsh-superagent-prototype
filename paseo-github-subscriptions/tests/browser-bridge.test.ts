@@ -151,6 +151,8 @@ test('answerWebRequest 转调执行器且 freshSessions 只返回 70 秒内的�
     assert.deepEqual(res, { status: 'submitted' });
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], request);
+    assert.equal(bridge.snapshot().extensionPath?.startsWith('/'), true);
+    assert.equal(bridge.snapshot().extensionPath?.endsWith('/browser-extension'), true);
   } finally {
     await bridge.stop();
     await rm(dir, { recursive: true, force: true });

@@ -155,6 +155,7 @@ test('providers.antigravity：按配置注册多个账号，保持 antigravity-c
     providerId: 'antigravity-cy517',
     label: 'Antigravity · 账号一',
   });
+  assert.deepEqual(created.command, ['agy-paseo']);
   const noLaunchStatus = await created.status!({ launch: undefined } as never);
   assert.equal(noLaunchStatus.available, false);
   const cacheKey = await created.getCatalogCacheKey!({
@@ -275,7 +276,7 @@ test('account.add：先备份两处配置，直接写 Paseo 配置（command/env
   assert.deepEqual(result.accounts[1], { providerId: 'antigravity-beibeimao', label: 'Antigravity · 账号二', enabled: true, homeDir: '~/.agy-2' });
   assert.deepEqual(patches, []);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-beibeimao'], {
-    enabled: true, label: 'Antigravity · 账号二', command: ['agy'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
+    enabled: true, label: 'Antigravity · 账号二', command: ['agy-paseo'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
   });
   assert.equal(readMachine(machinePath).antigravity.accounts[1].providerId, 'antigravity-beibeimao');
   assert.equal(backupsOf(root, 'config.json').length, 1);

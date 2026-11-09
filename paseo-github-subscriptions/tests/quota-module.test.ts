@@ -8,6 +8,7 @@ import * as nodeModule from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { loadMachineConfig } from '../server/core/machine-config.ts';
 import { startModules } from '../server/core/modules.ts';
+import { claudeAccountsConfigure } from '../shared/claude-accounts.ts';
 import { resolveInstance } from '../shared/instances.ts';
 
 // 复制来的上游文件用 .js 导入；Node 直接跑测试时把它们解析到 .ts（生产环境由 Paseo 打包）。
@@ -25,10 +26,14 @@ hooks.deregister();
 
 const RELAY = 'private' + 'relay.appleid.example';
 
-function setup(options: { plugins?: Record<string, unknown>; json?: unknown; legacy?: Record<string, string>; rawConfig?: string } = {}) {
+function setup(options: { plugins?: Record<string, unknown>; json?: unknown; legacy?: Record<string, string>; rawConfig?: string; settingsJson?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'quota-module-'));
   const home = join(root, 'paseo'); const state = join(home, 'github-subscriptions');
   mkdirSync(state, { recursive: true });
+  if (options.settingsJson !== undefined) {
+    mkdirSync(join(state, 'quota'), { recursive: true });
+    writeFileSync(join(state, 'quota', 'settings.json'), options.settingsJson);
+  }
   const configDir = join(root, 'claude-2'); mkdirSync(configDir);
   writeFileSync(join(configDir, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'acc1', organizationUuid: 'org1', emailAddress: `x@${RELAY}` } }));
   writeFileSync(join(home, 'config.json'), JSON.stringify({ plugins: options.plugins ?? {}, agents: { providers: {
@@ -111,13 +116,21 @@ test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：不注册
   } finally { await run.done(); }
 });
 
-test('设置：自动继续默认值和名称带额度写入设置文件并立即生效', async () => {
-  const run = setup();
+test('设置：自动继续默认值写入设置文件并立即生效；名称带额度始终开启且忽略旧关闭配置', async () => {
+  const run = setup({
+    json: { version: 1, modules: { 'usage.claudeAccounts': true }, claudeAccounts: { labelWithQuota: false } },
+    settingsJson: JSON.stringify({ labelWithQuota: false, autoResumeDefault: false }),
+  });
   try {
-    const next = await run.handlers.get('claude-accounts.configure')!({ autoResumeDefault: true, labelWithQuota: false });
+    const initial = await run.handlers.get('claude-accounts.snapshot')!({});
+    assert.equal(initial.quotaName.enabled, true);
+    assert.equal(initial.error, null);
+
+    const next = await run.handlers.get('claude-accounts.configure')!({ autoResumeDefault: true });
     assert.equal(next.quotaName.autoResumeDefault, true);
-    assert.equal(next.quotaName.enabled, false);
-    assert.deepEqual(JSON.parse(readFileSync(join(run.state, 'quota', 'settings.json'), 'utf8')), { autoResumeDefault: true, labelWithQuota: false });
+    assert.equal(next.quotaName.enabled, true);
+    assert.deepEqual(JSON.parse(readFileSync(join(run.state, 'quota', 'settings.json'), 'utf8')), { autoResumeDefault: true });
+    assert.equal(claudeAccountsConfigure.input.safeParse({ labelWithQuota: false }).success, false);
     // 新会话默认开：没选择过的会话算开启；单独关闭的会话保持关闭。
     assert.equal((await run.handlers.get('claude-accounts.set-auto-resume')!({ agentId: 'a', enabled: false })).enabled, false);
     assert.equal((await run.handlers.get('claude-accounts.retry-status')!({ agentId: 'b', text: 'x' }, { paseo: {} })).enabled, true);
@@ -160,4 +173,25 @@ test('旧状态目录存在时启动自动复制，旧文件不动', async () =>
     assert.equal(readFileSync(join(run.home, 'claude-quota-resume', 'enabled-agents.json'), 'utf8'), '["a"]');
     assert.deepEqual(JSON.parse(readFileSync(join(run.state, 'labels.json'), 'utf8')), { 'h@example.test': '真实（Apple 登录）' });
   } finally { await run.done(); }
+});
+
+test('L：machine.json 没有 usage.claudeAccounts 时模块默认启动且 Claude 名称带额度生效；显式设 false 时可关闭', async () => {
+  const defaultRun = setup({ json: { version: 1, modules: {} } });
+  try {
+    assert.equal(defaultRun.host.status().modules[0]!.state, 'running');
+    assert.deepEqual(defaultRun.sources.map(source => source.id), ['claude-accounts']);
+    const snapshot = await defaultRun.handlers.get('claude-accounts.snapshot')!({});
+    assert.equal(snapshot.enabled, true);
+    assert.equal(snapshot.quotaName.enabled, true);
+  } finally {
+    await defaultRun.done();
+  }
+
+  const disabledRun = setup({ json: { version: 1, modules: { 'usage.claudeAccounts': false } } });
+  try {
+    assert.equal(disabledRun.host.status().modules[0]!.state, 'off');
+    assert.deepEqual(disabledRun.sources, []);
+  } finally {
+    await disabledRun.done();
+  }
 });

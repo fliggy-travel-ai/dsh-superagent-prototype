@@ -21,13 +21,26 @@ const themes: Record<'light' | 'dark', MockHostTheme> = {
   dark: { colors: { surface0: '#151517', surface1: '#1c1c1f', surface2: '#2b2b2f', border: '#303035', foreground: '#ececef', foregroundMuted: '#8e8e95', accent: '#5b8cff', accentForeground: '#ffffff', statusSuccess: '#4cc274', statusWarning: '#e3a33b', statusDanger: '#ff6b66' } },
 };
 
-type Route = { kind: 'screen'; screenId: string; params: Record<string, string> } | { kind: 'agent'; agentId: string };
+type Route =
+  | { kind: 'screen'; screenId: string; params: Record<string, string> }
+  | { kind: 'settings'; settingsId: string }
+  | { kind: 'agent'; agentId: string };
 type Popover = { kind: 'sidebar' | 'pill'; Content: ComponentType<never>; props: Record<string, unknown> } | null;
 
 function parseRoute(text: string): Route {
-  const [kind, id] = text.split(':');
+  const [rawTarget, rawQuery] = text.split('?');
+  const [kind, id] = (rawTarget ?? '').split(':');
+  const params: Record<string, string> = {};
+  if (rawQuery) {
+    for (const pair of rawQuery.split('&')) {
+      const [k, v] = pair.split('=');
+      if (k) params[decodeURIComponent(k)] = decodeURIComponent(v ?? '');
+    }
+  }
   if (kind === 'agent' && id) return { kind: 'agent', agentId: id };
-  return { kind: 'screen', screenId: id || 'main', params: {} };
+  if (kind === 'settings') return { kind: 'settings', settingsId: id || 'dev-automation' };
+  if (kind === 'screen' && id === 'settings') return { kind: 'settings', settingsId: params.id || 'dev-automation' };
+  return { kind: 'screen', screenId: id || 'main', params };
 }
 
 export interface PreviewHandle {
@@ -51,12 +64,21 @@ export function createPreview(options: PreviewOptions) {
           const found = agents.find((agent) => agent.id === agentId);
           return { id: agentId, workspaceId: found?.workspaceId ?? null, refresh: async () => null };
         },
+        async list() {
+          return {
+            entries: agents.map(a => ({ agent: { id: a.id, status: 'idle', archivedAt: null } })),
+            pageInfo: { hasMore: false },
+          };
+        },
       },
     },
     rpc: (contract: Parameters<FakeDaemon['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
     openScreen: (input: { screenId: string; params?: Record<string, string> }) => route.set({ kind: 'screen', screenId: input.screenId, params: input.params ?? {} }),
+    openSettings: (id: string) => route.set({ kind: 'settings', settingsId: id }),
     addScreen: (entry: Parameters<Registry['addScreen']>[0]) => registry.addScreen(entry),
+    addSettingsScreen: (entry: Parameters<Registry['addSettingsScreen']>[0]) => registry.addSettingsScreen(entry),
     addSidebarHeaderItem: (entry: Parameters<Registry['addSidebar']>[0]) => registry.addSidebar(entry),
+    addCommandCenterItem: (entry: Parameters<Registry['addCommandCenterItem']>[0]) => registry.addCommandCenterItem(entry),
     addComposerPill: (entry: PillEntry) => registry.addPill(entry),
   } as unknown as PluginClientContext;
 
@@ -123,6 +145,23 @@ export function createPreview(options: PreviewOptions) {
             />
           );
         })}
+        {[...registry.settingsScreens.values()].map((entry) => (
+          <Pressable
+            key={entry.id}
+            accessibilityRole="button"
+            accessibilityLabel={`设置 → ${entry.title}`}
+            onPress={() => route.set({ kind: 'settings', settingsId: entry.id })}
+            style={{
+              paddingVertical: 8,
+              paddingHorizontal: 20,
+              backgroundColor: current.kind === 'settings' && current.settingsId === entry.id ? c.surface2 : 'transparent',
+              marginHorizontal: 8,
+              borderRadius: 10,
+            }}
+          >
+            <Text style={text(13)}>设置 → {entry.title}</Text>
+          </Pressable>
+        ))}
         <View style={{ height: 1, backgroundColor: c.border, marginVertical: 8, marginHorizontal: 12 }} />
         <Text style={[text(12, true), { paddingHorizontal: 20, paddingBottom: 4 }]}>已置顶</Text>
         {agents.map((agent) => (
@@ -150,6 +189,20 @@ export function createPreview(options: PreviewOptions) {
           <Screen
             {...hostProps}
             params={current.params}
+            navigation={{ openAgent: ({ agentId }: { agentId: string }) => route.set({ kind: 'agent', agentId }), openWorkspace: () => undefined }}
+          />
+        );
+      }
+    } else if (current.kind === 'settings') {
+      const settingsScreen = registry.settingsScreens.get(current.settingsId);
+      if (!settingsScreen) {
+        body = <Text style={[text(14), { padding: 24 }]}>设置页 {current.settingsId} 不存在</Text>;
+      } else {
+        title = `设置 → ${settingsScreen.title}`;
+        const Screen = settingsScreen.Component as ComponentType<Record<string, unknown>>;
+        body = (
+          <Screen
+            {...hostProps}
             navigation={{ openAgent: ({ agentId }: { agentId: string }) => route.set({ kind: 'agent', agentId }), openWorkspace: () => undefined }}
           />
         );

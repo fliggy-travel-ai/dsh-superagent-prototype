@@ -17,7 +17,6 @@ import {
   builtinPluginIdsFor,
   normalizeHideBuiltinId,
   normalizeUsagePins,
-  suppressBuiltinUsagePlugins,
 } from '../server/modules/usage-provider-quotas/hide-builtin.ts';
 import { sanitizeUsageReport } from '../server/modules/usage-provider-quotas/server/usage-display.ts';
 import { parseTokenHubCredits } from '../server/modules/usage-provider-quotas/server/token-hub-quota.ts';
@@ -260,31 +259,6 @@ test('usage.providerQuotas：隐藏内置额度来源配置项与侧栏固定项
     'grok-usage-source',
   ]);
 
-  const patchedPayloads: Array<Record<string, unknown>> = [];
-  const disabledIds: string[] = [];
-  const { root } = createFakeEnv({
-    paseoConfigJson: {
-      plugins: {
-        'github-subscriptions': { source: 'directory', path: '/tmp/ghsub', enabled: true },
-      },
-    },
-  });
-
-  const suppressRes = await suppressBuiltinUsagePlugins(['codex', 'zai'], {
-    paseoHome: root,
-    patchPlugins: async plugins => {
-      patchedPayloads.push(plugins);
-    },
-    disablePlugin: async id => {
-      disabledIds.push(id);
-    },
-  });
-  assert.deepEqual(suppressRes.disabledPluginIds, ['codex-usage-source', 'zai-usage-source']);
-  assert.deepEqual(disabledIds, ['codex-usage-source', 'zai-usage-source']);
-  assert.equal(patchedPayloads.length, 2);
-  assert.equal('codex-usage-source' in patchedPayloads[0]!, true);
-  assert.equal('codex-usage-source' in patchedPayloads[1]!, false);
-
   const normalizedPins = normalizeUsagePins(
     [
       { sourceId: 'codex', windowId: '5h' },
@@ -353,12 +327,98 @@ test('provider-quotas.configure：machine.json 损坏时报错，不覆盖；写
   assert.match(snapshot.error, /machine\.json 无法解析/);
 });
 
-test('provider-quotas.snapshot：隐藏内置额度来源目前只保存配置，快照明确标为未生效', async () => {
-  const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, providerQuotas: { sources: [], hideBuiltin: ['codex'] } } });
+import { syncHideBuiltinUsage } from '../client/paseo-internal.ts';
+
+test('client/paseo-internal：只在显示计算层过滤，不改写持久化存储；清空 hideBuiltin 后原固定项可恢复，模块未命中时返回 applied: false', async () => {
+  const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, providerQuotas: { sources: [], hideBuiltin: ['codex', 'grok-usage-source'] } } });
   registerProviderQuotasRpcs({ server, machinePath, services });
   const snapshot = await handlers.get('provider-quotas.snapshot')!({});
-  assert.deepEqual(snapshot.hideBuiltin, ['codex']);
+  assert.deepEqual(snapshot.hideBuiltin, ['codex', 'grok']);
+  // 服务端不伪造客户端生效状态
   assert.equal(snapshot.hideBuiltinApplied, false);
+
+  // 无宿主内部模块时如实返回 applied: false
+  const notApplied = syncHideBuiltinUsage(snapshot.hideBuiltin, {});
+  assert.equal(notApplied.applied, false);
+
+  const originalPins = [
+    { sourceId: 'codex', windowId: '5h' },
+    { sourceId: 'grok', windowId: 'daily' },
+    { sourceId: 'codex-multi', windowId: 'weekly' },
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ];
+  let storageWritten = false;
+  const viewMod = {
+    settleReports: (_cur: any, next: any) => next,
+    upsertReport: (cur: any, item: any) => [...(cur ?? []), item],
+    resolveUsageView: (input: any) => ({ kind: 'ready', reports: input.reports }),
+  };
+  const pinsMod = {
+    effectiveUsagePins: (prefs: any, reports: any) =>
+      prefs?.pins ?? reports.map((r: any) => ({ sourceId: r.sourceId, windowId: 'effective' })),
+  };
+
+  // 使用任意非固定模块编号（如 7001 / 7002）验证按导出特征发现模块
+  const metroRequire = Object.assign(
+    (id: number) => (id === 7001 ? viewMod : id === 7002 ? pinsMod : null),
+    {
+      getModules: () => ({
+        7001: { isInitialized: true, publicModule: { exports: viewMod } },
+        7002: { isInitialized: true, publicModule: { exports: pinsMod } },
+      }),
+    },
+  );
+
+  const appliedRes = syncHideBuiltinUsage(snapshot.hideBuiltin, {
+    localStorage: {
+      getItem: () => JSON.stringify({ usage: { pins: originalPins } }),
+      setItem: () => {
+        storageWritten = true;
+      },
+    },
+    __r: metroRequire,
+  });
+  assert.equal(appliedRes.applied, true);
+  assert.equal(storageWritten, false, '不应改写 localStorage 中的 @paseo:app-settings');
+
+  const rawReports = [
+    { id: 'r1', sourceId: 'codex' },
+    { id: 'r2', sourceId: 'grok' },
+    { id: 'r3', sourceId: 'codex-multi' },
+    { id: 'r4', sourceId: 'zai' },
+  ];
+  assert.deepEqual(viewMod.settleReports([], rawReports), [
+    { id: 'r3', sourceId: 'codex-multi' },
+    { id: 'r4', sourceId: 'zai' },
+  ]);
+  assert.deepEqual(viewMod.resolveUsageView({ reports: rawReports }).reports, [
+    { id: 'r3', sourceId: 'codex-multi' },
+    { id: 'r4', sourceId: 'zai' },
+  ]);
+  assert.deepEqual(pinsMod.effectiveUsagePins({ pins: originalPins }, rawReports), [
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ]);
+
+  // 清空 hideBuiltin 后，原本固定的 codex 和 grok 立即恢复
+  syncHideBuiltinUsage([], { __r: metroRequire });
+  assert.deepEqual(pinsMod.effectiveUsagePins({ pins: originalPins }, rawReports), [
+    { sourceId: 'codex', windowId: '5h' },
+    { sourceId: 'grok', windowId: 'daily' },
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ]);
+
+  // K：当 __r 没有 getModules 时（正式版包），绝不按固定编号调用 __r(id)，如实返回 applied: false
+  const calledIds: number[] = [];
+  const metroWithoutGetModules = (id: number) => {
+    calledIds.push(id);
+    return null;
+  };
+  const noGetModulesRes = syncHideBuiltinUsage(['codex'], { __r: metroWithoutGetModules });
+  assert.equal(noGetModulesRes.applied, false);
+  assert.deepEqual(calledIds, [], '没有 getModules 时不应调用 __r(编号)');
 });
 
 test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：全部来源跳过，模块出错', () => {

@@ -10,7 +10,7 @@ import { APPLE_SUFFIX, isAppleRelay, listAccounts } from './accounts.ts';
 import { CLAUDE_ACCOUNTS_FALLBACK, ClaudeAccountsSectionSchema, QuotaSettingsSchema, quotaDefaults, type ClaudeAccountsSection } from './config.ts';
 import { ContinuousUsage } from './continuous-usage.ts';
 import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../../core/provider-config.ts';
-import { baseLabel, withQuota } from './labels.ts';
+import { withQuota } from './labels.ts';
 import { readLabels, setLabel } from './labels-file.ts';
 import { ensureConfigDirectory, LoginFlows, readAuthStatus } from './login.ts';
 import { migrateLegacyClaudeQuota } from './migrate.ts';
@@ -34,7 +34,7 @@ const emptySnapshot = (error: string): rpc.ClaudeAccountsSnapshot => ({
 export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
   id: 'usage.claudeAccounts',
   label: 'Claude 账号额度',
-  defaultEnabled: false,
+  defaultEnabled: true,
   appliesTo: isMainInstance,
   config: { section: 'claudeAccounts', spec: { schema: ClaudeAccountsSectionSchema, fallback: CLAUDE_ACCOUNTS_FALLBACK } },
   register(context) {
@@ -64,7 +64,7 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     // 自带的 Claude 额度插件只读默认账号。它在时本来源只补其他账号；它不在时本来源报告全部账号。
     const includeDefault = !bundledClaudeUsageInstalled();
     const usage = new ContinuousUsage({ home, directory, renewal: config.renewal });
-    server.registerUsageSource({
+    server.registerUsageSource?.({
       id: config.sourceId,
       label: includeDefault ? 'Claude' : 'Claude 其他账号',
       icon: ICON,
@@ -88,11 +88,11 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       service.setEnabled(agentId, enabled);
       return { enabled: service.isEnabled(agentId) };
     });
-    const removeStart = server.on('agent.turn_started', async ({ agent }) => {
+    const removeStart = server.on?.('agent.turn_started', async ({ agent }) => {
       if (isClaudeProvider(agent.provider)) await service.cancel(agent.id);
-    });
-    const removeArchive = server.on('agent.archived', async ({ agent }) => { await service.forget(agent.id); });
-    const removeEnd = server.on('agent.turn_ended', async (event, { paseo }) => {
+    }) ?? (() => {});
+    const removeArchive = server.on?.('agent.archived', async ({ agent }) => { await service.forget(agent.id); }) ?? (() => {});
+    const removeEnd = server.on?.('agent.turn_ended', async (event, { paseo }) => {
       if (!isClaudeProvider(event.agent.provider) || event.outcome.kind === 'canceled') return;
       try {
         const page = await paseo.agents.ref(event.agent.id).timeline.refetch({ direction: 'tail', limit: 100 });
@@ -107,8 +107,8 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       } catch (error) { console.warn('无法检查 Claude 会话：', String(error)); }
     });
     void service.start();
-    // 选择 Agent 的列表没有插件扩展位置，所以把剩余额度写进 Provider 显示名称。
-    const labels = new QuotaLabelService({ discover: usage.discover, cached: key => usage.history.cached(key), home, sourceId: config.sourceId, enabled: settings.read().labelWithQuota });
+    // 选择 Agent 的列表没有插件扩展位置，所以把剩余额度写进 Provider 显示名称（默认功能，始终开启）。
+    const labels = new QuotaLabelService({ discover: usage.discover, cached: key => usage.history.cached(key), home, sourceId: config.sourceId, enabled: true });
     labels.start();
     usage.start();
 
@@ -168,7 +168,7 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       return {
         enabled: true,
         accounts,
-        quotaName: { enabled: current.labelWithQuota, lowestRemainingPct: known.length ? Math.min(...known) : null, autoResumeDefault: current.autoResumeDefault, hiddenBuiltinSources: bundledClaudeUsageInstalled() ? [] : ['claude-usage-source'] },
+        quotaName: { enabled: true, lowestRemainingPct: known.length ? Math.min(...known) : null, autoResumeDefault: current.autoResumeDefault, hiddenBuiltinSources: bundledClaudeUsageInstalled() ? [] : ['claude-usage-source'] },
         activeFlow: flows.current(),
         error: settings.error(),
       };
@@ -176,14 +176,13 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     server.handle(rpc.claudeAccountsSnapshot, snapshot);
     server.handle(rpc.claudeAccountsConfigure, async input => {
       settings.update(input);
-      if (input.labelWithQuota !== undefined) await labels.setEnabled(input.labelWithQuota);
       return snapshot();
     });
     server.handle(rpc.claudeAccountsRename, async ({ providerId, label, realEmail }) => {
       const provider = providersRaw()[providerId] ?? (providerId === 'claude' ? {} : undefined);
       if (!provider) throw new Error(`Provider ${providerId} 不存在`);
       const quota = labels.quotas().get(providerId) ?? null;
-      const withName = (name: string) => settings.read().labelWithQuota ? withQuota(name, quota) : baseLabel(name);
+      const withName = (name: string) => withQuota(name, quota);
       if (realEmail !== undefined) {
         const real = realEmail.trim().toLowerCase();
         if (!(await flows.confirmRealEmail(providerId, real))) {

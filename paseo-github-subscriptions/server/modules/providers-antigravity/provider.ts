@@ -35,7 +35,7 @@ export function createAntigravityProvider(account: AntigravityProviderAccount): 
   const command: readonly [string, ...string[]] =
     account.command && account.command.length > 0
       ? [account.command[0]!, ...account.command.slice(1)]
-      : ['agy'];
+      : ['agy-paseo'];
   return {
     id: account.providerId,
     label: account.label,

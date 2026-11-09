@@ -37,6 +37,8 @@ export interface ModuleDefinition<Config, Services> {
   readonly id: string;
   readonly label: string;
   readonly defaultEnabled: boolean;
+  /** 始终开启的内置功能（如云端会话），即使旧配置写 false 也按开启处理。 */
+  readonly alwaysEnabled?: boolean;
   appliesTo(instance: ResolvedInstance): boolean;
   readonly config?: { readonly section: string; readonly spec: SectionSpec<Config> };
   /** 自定义脱敏；默认用 summarizeError。 */
@@ -115,14 +117,37 @@ export function startModules<Services>(definitions: readonly ModuleDefinition<an
   });
   options.server.handle(modulesStatus, async () => snapshot());
 
+  let disposed: Promise<void> | null = null;
+  const host: ModuleHost = {
+    status: snapshot,
+    currentModule,
+    runInModule,
+    dispose() {
+      disposed ??= (async () => {
+        for (const entry of [...entries].reverse()) {
+          if (!entry.cleanup) continue;
+          try { await runInModule(entry.id, entry.cleanup); }
+          catch (error) { log(`${entry.label}清理失败：${entry.redact(error)}`); }
+        }
+        proc.off('unhandledRejection', onRejection);
+        proc.off('uncaughtException', onException);
+      })();
+      return disposed;
+    },
+  };
+  const mainSvc = (options.services as { main?: { host?: ModuleHost | null } } | undefined)?.main;
+  if (mainSvc) mainSvc.host = host;
+
   for (const definition of definitions) {
     if (!definition.appliesTo(options.instance)) continue;
     const entry: Entry = { id: definition.id, label: definition.label, state: 'off', redact: error => definition.redact ? definition.redact(error) : summarizeError(error) };
     entries.push(entry);
     byId.set(entry.id, entry);
     const switched = options.machine.modules[definition.id];
-    if (switched === false) { entry.reason = 'machine.json 中已关闭'; continue; }
-    if (switched === undefined && !definition.defaultEnabled) { entry.reason = '默认关闭，在 machine.json 的 modules 中打开'; continue; }
+    if (!definition.alwaysEnabled) {
+      if (switched === false) { entry.reason = 'machine.json 中已关闭'; continue; }
+      if (switched === undefined && !definition.defaultEnabled) { entry.reason = '默认关闭，在 machine.json 的 modules 中打开'; continue; }
+    }
     let config: unknown;
     if (definition.config) {
       const section = options.machine.section(definition.config.section);
@@ -146,24 +171,7 @@ export function startModules<Services>(definitions: readonly ModuleDefinition<an
     }
   }
 
-  let disposed: Promise<void> | null = null;
-  return {
-    status: snapshot,
-    currentModule,
-    runInModule,
-    dispose() {
-      disposed ??= (async () => {
-        for (const entry of [...entries].reverse()) {
-          if (!entry.cleanup) continue;
-          try { await runInModule(entry.id, entry.cleanup); }
-          catch (error) { log(`${entry.label}清理失败：${entry.redact(error)}`); }
-        }
-        proc.off('unhandledRejection', onRejection);
-        proc.off('uncaughtException', onException);
-      })();
-      return disposed;
-    },
-  };
+  return host;
 }
 
 type Wrap = <T>(operation: () => T) => T;

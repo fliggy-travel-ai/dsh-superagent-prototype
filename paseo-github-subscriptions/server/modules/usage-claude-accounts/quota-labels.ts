@@ -24,7 +24,8 @@ export class QuotaLabelService {
   constructor(options: { discover: typeof discover; cached?: (key: string) => { at: number; report: UsageReport } | null; home?: string; sourceId?: string; enabled?: boolean }) {
     this.discover = options.discover;
     this.cached = options.cached ?? (() => null);
-    this.path = join(options.home ?? paseoHome(process.env), "config.json");
+    this.home = options.home ?? paseoHome(process.env);
+    this.path = join(this.home, "config.json");
     this.sourceId = options.sourceId ?? "claude-accounts";
     this.sources = new Set(["claude", this.sourceId]);
     this.enabled = options.enabled ?? true;
@@ -32,6 +33,7 @@ export class QuotaLabelService {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running: Promise<void> | null = null;
   private stopped = false;
+  private readonly home: string;
   private readonly path: string;
 
   start() {
@@ -53,6 +55,7 @@ export class QuotaLabelService {
         .catch((error) => console.warn("无法更新账号额度显示：", String(error)))
         .finally(() => { this.running = null; this.schedule(INTERVAL_MS); });
     }, delay);
+    this.timer.unref?.();
   }
 
   /** Provider ID to launch environment for the default login and each CLAUDE_CONFIG_DIR login. */
@@ -62,7 +65,7 @@ export class QuotaLabelService {
       if (typeof value === "string" && key !== "CLAUDE_CONFIG_DIR") base[key] = value;
     }
     const envs = new Map([["claude", base]]);
-    for (const [id, env] of configDirProviders()) envs.set(id, { ...base, ...env });
+    for (const [id, env] of configDirProviders({ ...process.env, PASEO_HOME: this.home })) envs.set(id, { ...base, ...env });
     return envs;
   }
 
