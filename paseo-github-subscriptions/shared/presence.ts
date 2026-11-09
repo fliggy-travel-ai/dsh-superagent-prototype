@@ -57,7 +57,8 @@ export const BrowserDecisionSchema = z.strictObject({
   source: z.enum(['automatic', 'manual']).optional(),
   expiresAt: z.number(),
 });
-export const LocalSpeechStateSchema = z.strictObject({ enabled: z.boolean() });
+export const LocalSpeechInputSchema = z.strictObject({ enabled: z.boolean() });
+export const LocalSpeechStateSchema = z.strictObject({ enabled: z.boolean(), configured: z.boolean().optional() });
 export const PresenceSnapshotSchema = z.strictObject({
   settings: PresenceSettingsSchema, observation: PresenceObservationSchema,
   questions: z.array(QuestionSchema), hostName: z.string(),
@@ -65,6 +66,7 @@ export const PresenceSnapshotSchema = z.strictObject({
   error: z.string().nullable(),
   speech: z.array(SpeechEventSchema).optional(),
   localSpeechEnabled: z.boolean().optional(),
+  hasSpeechTarget: z.boolean().optional(),
 });
 export type LocalSpeechState = z.infer<typeof LocalSpeechStateSchema>;
 export type PresenceSettings = z.infer<typeof PresenceSettingsSchema>;
@@ -84,6 +86,6 @@ export const presenceAnswer = defineRpc({ name: 'presence.answer', input: Questi
 export const presenceRead = defineRpc({ name: 'presence.read', input: QuestionReadSchema, output: PresenceSnapshotSchema });
 export const presenceLocal = defineRpc({ name: 'presence.local', input: z.object({}), output: PresenceObservationSchema });
 export const presenceLocalSpeech = defineRpc({ name: 'presence.local-speech', input: z.object({}), output: LocalSpeechStateSchema });
-export const presenceConfigureLocalSpeech = defineRpc({ name: 'presence.configure-local-speech', input: LocalSpeechStateSchema, output: PresenceSnapshotSchema });
+export const presenceConfigureLocalSpeech = defineRpc({ name: 'presence.configure-local-speech', input: LocalSpeechInputSchema, output: PresenceSnapshotSchema });
 export const presenceSpeak = defineRpc({ name: 'presence.speak', input: z.strictObject({ id: z.string().max(200), text: z.string().max(500) }), output: SpeechResultSchema });
 export const presenceSpeakCancel = defineRpc({ name: 'presence.speak-cancel', input: z.strictObject({ id: z.string().min(1).max(200) }), output: z.strictObject({ cancelled: z.boolean() }) });

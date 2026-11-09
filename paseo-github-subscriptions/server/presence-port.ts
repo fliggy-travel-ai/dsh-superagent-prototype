@@ -1,5 +1,5 @@
 import type { connectDaemon } from './daemon.ts';
-import type { PresencePort, QuestionAgent } from './presence.ts';
+import { isMissingRpcMethodError, type PresencePort, type QuestionAgent } from './presence.ts';
 import { LocalSpeechStateSchema, PresenceObservationSchema } from '../shared/presence.ts';
 import { readGuardPresence } from './guard-presence.ts';
 import { GuardSpeech } from './speech.ts';
@@ -9,6 +9,8 @@ import { BluetoothConfigSchema, BluetoothSnapshotSchema, type BluetoothTarget } 
 import { HostRouter } from './core/hosts.ts';
 
 const timeouts: Record<string, number> = { 'presence.speak': 100_000, 'bluetooth.local-list': 25_000, 'presence.local-speech': 3_000 };
+
+export { isMissingRpcMethodError };
 
 export class PresenceHosts extends HostRouter {
   private speech = new GuardSpeech();
@@ -27,9 +29,20 @@ export class PresenceHosts extends HostRouter {
   async observe(hostId: string | null) {
     return !this.sameHost(hostId, null) ? PresenceObservationSchema.parse(await this.invoke(hostId!, 'presence.local', {})) : readGuardPresence();
   }
+  async remoteSpeechState(hostId: string): Promise<{ enabled: boolean; configured: boolean }> {
+    if (this.sameHost(hostId, null)) return { enabled: true, configured: true };
+    try {
+      const parsed = LocalSpeechStateSchema.parse(await this.invoke(hostId, 'presence.local-speech', {}));
+      return { enabled: parsed.enabled, configured: parsed.configured ?? true };
+    } catch (error) {
+      if (isMissingRpcMethodError(error)) {
+        return { enabled: false, configured: false };
+      }
+      throw error;
+    }
+  }
   async remoteSpeechEnabled(hostId: string): Promise<boolean> {
-    if (this.sameHost(hostId, null)) return true;
-    return LocalSpeechStateSchema.parse(await this.invoke(hostId, 'presence.local-speech', {})).enabled;
+    return (await this.remoteSpeechState(hostId)).enabled;
   }
   async bluetooth(hostId: string | null) {
     return this.sameHost(hostId, null) ? listBluetoothTargets() : BluetoothSnapshotSchema.parse(await this.invoke(hostId!, 'bluetooth.local-list', {}));
@@ -68,5 +81,6 @@ export function presencePort(connection: Awaited<ReturnType<typeof connectDaemon
       return id === 'local' ? null : id;
     },
     remoteSpeechEnabled: hostId => hosts.remoteSpeechEnabled(hostId),
+    remoteSpeechState: hostId => hosts.remoteSpeechState(hostId),
   };
 }

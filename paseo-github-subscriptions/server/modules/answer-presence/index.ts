@@ -20,7 +20,10 @@ export const presenceModule: Module = {
     server.handle(presenceRpc.presenceAnswer, async input => (await ready()).answer(input));
     server.handle(presenceRpc.presenceRead, async input => (await ready()).markRead(input));
     server.handle(presenceRpc.presenceLocal, async () => readGuardPresence());
-    server.handle(presenceRpc.presenceLocalSpeech, async () => ({ enabled: (await ready()).localSpeechEnabled() }));
+    server.handle(presenceRpc.presenceLocalSpeech, async () => {
+      const current = await ready();
+      return { enabled: current.localSpeechEnabled(), configured: current.localSpeechConfigured() };
+    });
     server.handle(presenceRpc.presenceConfigureLocalSpeech, async ({ enabled }) => (await ready()).configureLocalSpeech(enabled));
     server.handle(presenceRpc.presenceSpeak, async ({ id, text }) => { await ready(); return services.presenceHosts!.localSpeech(id, text); });
     server.handle(presenceRpc.presenceSpeakCancel, async ({ id }) => ({ cancelled: services.presenceHosts?.localCancel(id) ?? false }));

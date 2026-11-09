@@ -527,6 +527,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                   label={presence.localSpeechEnabled ? '本机播放开启' : '本机不播放'}
                   tone={presence.localSpeechEnabled ? 'success' : 'neutral'}
                 />
+                {settings?.speechEnabled && presence.hasSpeechTarget === false ? (
+                  <Chip label="当前没有主机会播放" tone="warning" />
+                ) : null}
                 <Text style={s.small}>{presence.hostName || '本机'}</Text>
               </>
             )

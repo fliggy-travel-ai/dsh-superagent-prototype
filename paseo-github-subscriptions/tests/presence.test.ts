@@ -890,3 +890,208 @@ test('1737-speech-local 任一成功即 notified 且重启不误报错误；全�
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('1737-speech-local 审阅项 1：两台来源主机均为自动（sourceHostId=null）且均未显式保存时，提问只在本机播；远端显式开启后两台都播', async () => {
+  const dirA = await mkdtemp(join(tmpdir(), 'presence-auto-a-'));
+  const dirB = await mkdtemp(join(tmpdir(), 'presence-auto-b-'));
+  let now = 5_000_000;
+  const spokenOnA: Array<string | null> = [];
+  const questionsA: QuestionAgent[] = [agent()];
+
+  // 模拟对端主机 B：sourceHostId 也为 null（自动），未显式保存过 localSpeechEnabled
+  const portB: PresencePort = {
+    list: async () => [],
+    refresh: async () => null,
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async () => ({ played: true, engine: 'neural' }),
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_b', name: 'Host B', online: true },
+      { id: 'srv_a', name: 'Host A', online: true },
+    ],
+    selfId: () => 'srv_b',
+  };
+  const runtimeB = new PresenceRuntime(dirB, portB, () => now);
+  await runtimeB.start();
+  await runtimeB.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: null });
+
+  const portA: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsA),
+    refresh: async id => structuredClone(questionsA.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async hostId => {
+      spokenOnA.push(hostId);
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_a', name: 'Host A', online: true },
+      { id: 'srv_b', name: 'Host B', online: true },
+    ],
+    selfId: () => 'srv_a',
+    // 对端 B 的本机默认值为 true，但未显式保存（configured: false）
+    remoteSpeechEnabled: async () => runtimeB.localSpeechEnabled(),
+    remoteSpeechState: async () => ({
+      enabled: runtimeB.localSpeechEnabled(),
+      configured: (runtimeB as unknown as { localSpeechConfigured?: () => boolean }).localSpeechConfigured?.() ?? false,
+    }),
+  };
+
+  const runtimeA = new PresenceRuntime(dirA, portA, () => now);
+  await runtimeA.start();
+  try {
+    await runtimeA.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: null });
+    await eventually(() => spokenOnA.length >= 1);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.deepEqual(spokenOnA, ['srv_a'], '两台都是自动且都未显式保存时，提问只应在本机 srv_a 播报');
+
+    // 当 B 显式保存开启“在这台电脑播放”后，新提问应在两台各播一次
+    await runtimeB.configureLocalSpeech(true);
+    now += 180_001;
+    questionsA.push({ ...agent(), id: 'agent-auto-2', pendingPermissions: [{ ...request(), id: 'req-auto-2' }] });
+    await runtimeA.refresh();
+    await eventually(() => spokenOnA.length === 3);
+    assert.deepEqual(spokenOnA.slice(1), ['srv_a', 'srv_b']);
+  } finally {
+    await runtimeA.stop();
+    await runtimeB.stop();
+    await rm(dirA, { recursive: true, force: true });
+    await rm(dirB, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 审阅项 2：远端旧版插件缺少 presence.local-speech RPC 时回退为“对方是我的来源主机才播”；超时与离线仍跳过', async () => {
+  const { PresenceHosts } = await import('../server/presence-port.ts');
+  const { DeadlineError } = await import('../server/core/hosts.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'presence-legacy-rpc-'));
+  let now = 6_000_000;
+  const spoken: Array<string | null> = [];
+  let sourceRpcMode: 'missing' | 'timeout' = 'missing';
+  const questionsList: QuestionAgent[] = [agent()];
+
+  // 通过真实 PresenceHosts 验证 RPC 错误识别与回退逻辑
+  const fakeOrigin = {
+    getLastServerInfoMessage: () => ({ serverId: 'srv_mini' }),
+    listHosts: async () => ({
+      self: { serverId: 'srv_mini', label: 'Mac Mini' },
+      hosts: [
+        { serverId: 'srv_macbook', label: 'MacBook', enabled: true, status: 'online' },
+        { serverId: 'srv_other_old', label: 'Old Host', enabled: true, status: 'online' },
+        { serverId: 'srv_offline_src', label: 'Offline Host', enabled: true, status: 'offline' },
+      ],
+    }),
+  };
+  const hosts = new PresenceHosts(fakeOrigin as never);
+  hosts.invokePlugin = async (_hostId: string, method: string) => {
+    if (method === 'presence.local-speech') {
+      if (_hostId === 'srv_macbook' && sourceRpcMode === 'timeout') {
+        throw new DeadlineError('来源主机响应超时');
+      }
+      throw new Error(`Plugin github-subscriptions does not contribute RPC ${method}`);
+    }
+    throw new Error(`unexpected ${method}`);
+  };
+
+  const port: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async hostId => {
+      spoken.push(hostId);
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: () => hosts.hosts(),
+    selfId: () => 'srv_mini',
+    remoteSpeechEnabled: hostId => hosts.remoteSpeechEnabled(hostId),
+    remoteSpeechState: hostId => (hosts as unknown as { remoteSpeechState: (id: string) => Promise<{ enabled: boolean; configured: boolean }> }).remoteSpeechState(hostId),
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    // 1. 对方旧版无此 RPC：只有作为 sourceHostId 的 srv_macbook 会播报，srv_other_old 不播
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await eventually(() => spoken.length === 1);
+    assert.deepEqual(spoken, ['srv_macbook'], '旧版插件缺少 RPC 时，来源主机应回退播报，非来源旧主机不播');
+
+    // 2. 来源主机超时（非方法不存在）：必须跳过，不向超时主机发 speak
+    sourceRpcMode = 'timeout';
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-timeout', pendingPermissions: [{ ...request(), id: 'req-timeout' }] });
+    await runtime.refresh();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(spoken.length, 1, '来源主机查询超时时必须跳过，不应继续播报');
+  } finally {
+    await runtime.stop();
+    await hosts.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 审阅项 3 & 4：任一台 played 立即落盘 notified 且不阻塞后续提问，卡住主机稍后返回再补记录；全部主机关闭时 hasSpeechTarget=false', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-fast-notified-'));
+  let now = 7_000_000;
+  const speakCalls: Array<[string | null, string]> = [];
+  const questionsList: QuestionAgent[] = [agent()];
+  let resolveStuckMacbook!: (res: SpeechResult) => void;
+  let remoteEnabled = true;
+
+  const port: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async (hostId, id) => {
+      speakCalls.push([hostId, id]);
+      if (hostId === 'srv_macbook' && speakCalls.filter(([h]) => h === 'srv_macbook').length === 1) {
+        return new Promise<SpeechResult>(r => { resolveStuckMacbook = r; });
+      }
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_mini', name: 'Mac Mini', online: true },
+      { id: 'srv_macbook', name: 'MacBook', online: true },
+    ],
+    selfId: () => 'srv_mini',
+    remoteSpeechEnabled: async () => remoteEnabled,
+    remoteSpeechState: async () => ({ enabled: remoteEnabled, configured: true }),
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    await runtime.configureLocalSpeech(true);
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+
+    // srv_mini 已立即返回 played:true，srv_macbook 仍卡住未返回
+    await eventually(() => (runtime.snapshot().speech?.length ?? 0) === 1);
+    const diskWhileStuck = JSON.parse(await readFile(join(dir, 'presence.json'), 'utf8'));
+    assert.equal(diskWhileStuck.notified.length, 1, '任一台主机 played 后应立即写入 notified，不等卡住主机');
+    assert.equal(diskWhileStuck.speech.length, 1);
+    assert.equal(diskWhileStuck.speech[0].hostId, 'srv_mini');
+
+    // srv_macbook 仍在卡住期间，冷却过后新提问到达，后续提问不被卡住主机阻塞
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-next', pendingPermissions: [{ ...request(), id: 'req-next' }] });
+    await runtime.refresh();
+    await eventually(() => speakCalls.some(([h, qid]) => h === 'srv_mini' && qid !== diskWhileStuck.notified[0]));
+
+    // 卡住的 srv_macbook 稍后返回失败回执，补写 speech 记录且不标错
+    resolveStuckMacbook({ played: false, detail: '来源主机响应超时' });
+    await eventually(() => (runtime.snapshot().speech?.filter(s => s.id === diskWhileStuck.notified[0]).length ?? 0) === 2);
+    assert.equal(runtime.snapshot().error, null);
+
+    // 审阅项 4：当所有主机开关都关时，snapshot().hasSpeechTarget 为 false
+    remoteEnabled = false;
+    const allOffSnap = await runtime.configureLocalSpeech(false);
+    assert.equal((allOffSnap as { hasSpeechTarget?: boolean }).hasSpeechTarget, false, '所有主机播放开关均关闭时 hasSpeechTarget 应为 false');
+  } finally {
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -1547,6 +1547,10 @@ test('1737-speech-local：语音提醒卡片与抽屉展示“在这台电脑播
     );
     const updatedSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
     assert.equal(Boolean(updatedSwitch?.props.value), !initialVal, '切换后本机播放开关状态应立即更新');
+    assert.ok(
+      collectText(tree).includes('当前没有主机会播放'),
+      '所有主机播放开关都关闭且总开关开启时，语音提醒卡片应提示“当前没有主机会播放”',
+    );
 
     // 打开语音提醒编辑面板，同样展示并可切换本机播放开关
     renderer.reset();

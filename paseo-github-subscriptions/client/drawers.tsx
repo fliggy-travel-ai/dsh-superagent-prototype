@@ -1068,6 +1068,11 @@ function SpeechDrawer() {
         />
       </View>
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
+      {settings?.speechEnabled && presence?.hasSpeechTarget === false ? (
+        <Notice tone="warning">
+          <Text style={s.text}>当前没有主机会播放：请至少在一台在线电脑上开启“在这台电脑播放”。</Text>
+        </Notice>
+      ) : null}
       <RuleNote>
         只在判定在线且总开关开启时，向所有开启“在这台电脑播放”的主机播报新提问；本机开关只保存在当前电脑，不跨主机同步；你在任一端回答后立即停止播报。
       </RuleNote>
