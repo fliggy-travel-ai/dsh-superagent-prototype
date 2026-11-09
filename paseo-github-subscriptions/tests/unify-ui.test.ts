@@ -259,7 +259,7 @@ function createTestRenderer() {
   };
 }
 
-test('设置页并入主页面：无独立设置页引导、凭据在对应编辑面板可设置/可移除且不显原文、本机配置卡片显示路径/校验/备份且无重复模块开关', async () => {
+test('设置页并入主页面：无独立设置页引导、凭据在对应编辑面板可设置/可移除且不显原文、本机配置显示路径/校验/备份并在编辑面板提供全部 MODULE_DEFS 模块开关', async () => {
   const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
   installTsxAndReactNativeHooks();
   const { MainScreen } = await import('../client/dashboard.tsx');
@@ -267,8 +267,6 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
   const { FakeDaemon } = await import('./ui/fake-daemon.ts');
   const { createSnapshotStore } = await import('../client/store.ts');
   const { createControlStore } = await import('../client/control-store.ts');
-  const { escalationSnapshot } = await import('../shared/escalation.ts');
-  const { quietSnapshot } = await import('../shared/quiet.ts');
 
   const daemon = new FakeDaemon('shadow');
   daemon.latencyMs = 0;
@@ -290,9 +288,6 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       { id: 'todo.stalled', enabled: true },
     ],
   );
-  // 模块默认关闭时接口未注册
-  await assert.rejects(() => daemon.rpc(escalationSnapshot, {}), /未知调用/);
-  await assert.rejects(() => daemon.rpc(quietSnapshot, {}), /未知调用/);
 
   const fakeClient = {
     rpc: (contract: Parameters<(typeof daemon)['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
@@ -355,18 +350,16 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     assert.match(providersText, /校验通过/);
     assert.match(providersText, /导出配置备份/);
     assert.match(providersText, /Antigravity/, 'Antigravity 模块关闭时卡片照常显示');
-    const agSwitch = findNodes(providersTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '启用 Antigravity')[0];
-    assert.ok(agSwitch, 'Antigravity 卡片应有启用开关');
-    assert.equal(agSwitch.props.value, false, 'Antigravity 默认关闭时卡片开关为关');
-    assert.equal(Boolean(agSwitch.props.disabled), false, 'Antigravity 模块未启用时卡片开关可点击');
-
-    // 打开 Antigravity 卡片开关 → 写入模块开关并启用
-    (agSwitch.props.onValueChange as (v: boolean) => void)(true);
-    await new Promise(r => setTimeout(r, 20));
-    providersTree = renderMain({ page: 'providers' });
-    const agSwitchAfter = findNodes(providersTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '启用 Antigravity')[0];
-    assert.equal(agSwitchAfter?.props.value, true, '打开 Antigravity 开关后应变为开启');
-    assert.equal(daemon.antigravity.enabled, true);
+    assert.match(
+      providersText,
+      /模块未启用，在本机配置中开启，重载后生效/,
+      '未启用模块的卡片应显示“模块未启用，在本机配置中开启，重载后生效”',
+    );
+    const openMachineConfigBtns = findNodes(
+      providersTree,
+      n => n.props.accessibilityLabel === '去本机配置开启',
+    );
+    assert.ok(openMachineConfigBtns.length >= 1, '未启用模块的卡片应有“去本机配置开启”按钮');
 
     // 点击卡片上的“导出配置备份”
     const backupBtn = findNodes(providersTree, n => n.props.accessibilityLabel === '导出配置备份')[0];
@@ -376,39 +369,53 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     const afterBackupText = collectText(renderMain({ page: 'providers' }));
     assert.match(afterBackupText, /backups\/backup-demo/);
 
-    // 2. 打开“本机配置”编辑面板（machine-config）：只显示确实没有卡片的模块（停滞会话检查、其他 Provider 额度），不含 todo 或已有卡片的模块
+    // 2. 打开“本机配置”编辑面板（machine-config）：列出全部 MODULE_DEFS 模块开关，显示“修改后在下次插件启动时生效”，不含不存在的“待办汇总”
     renderer.reset();
-    const machineDrawerTree = renderMain({ page: 'providers', drawer: 'machine-config' });
+    let machineDrawerTree = renderMain({ page: 'providers', drawer: 'machine-config' });
     const machineDrawerText = collectText(machineDrawerTree);
     assert.match(machineDrawerText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
     assert.match(machineDrawerText, /配置文件格式校验通过/);
+    assert.match(machineDrawerText, /修改后在下次插件启动时生效/);
     assert.equal(machineDrawerText.includes('待办汇总'), false, '说明与列表均不应出现不存在的“待办汇总”模块开关');
-    assert.equal(machineDrawerText.includes('网关'), false, '说明不应出现不存在的“网关”模块开关');
-    assert.equal(
-      findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 停滞会话检查').length,
-      1,
-      '本机配置抽屉应包含“停滞会话检查”模块开关',
-    );
-    assert.equal(
-      findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 其他 Provider 额度').length,
-      1,
-      '本机配置抽屉应包含“其他 Provider 额度”模块开关',
-    );
-    for (const dupLabel of [
-      '模块 待办汇总',
-      '模块 网页版 claude.ai',
+    for (const label of [
       '模块 新建会话默认设置',
+      '模块 问答模式与蓝牙',
+      '模块 精确授权',
+      '模块 网页版 claude.ai',
       '模块 升级通知',
       '模块 子会话免提醒',
-      '模块 精确授权',
-      '模块 GitHub 订阅',
-      '模块 问答模式与蓝牙',
       '模块 Claude 账号与额度',
+      '模块 其他 Provider 额度',
       '模块 Antigravity 多账号',
+      '模块 GitHub 订阅',
+      '模块 停滞会话检查',
     ]) {
-      const dup = findNodes(machineDrawerTree, n => n.props.accessibilityLabel === dupLabel);
-      assert.equal(dup.length, 0, `不应在“本机配置”抽屉中出现：${dupLabel}`);
+      assert.equal(
+        findNodes(machineDrawerTree, n => n.props.accessibilityLabel === label).length,
+        1,
+        `本机配置面板应能看到模块开关：${label}`,
+      );
     }
+    assert.equal(
+      findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 待办汇总').length,
+      0,
+      '本机配置面板不应出现不存在的“模块 待办汇总”',
+    );
+
+    // 在本机配置面板切换 Antigravity 多账号模块开关
+    const agModSwitch = findNodes(
+      machineDrawerTree,
+      n => n.type === 'Switch' && n.props.accessibilityLabel === '模块 Antigravity 多账号',
+    )[0];
+    assert.ok(agModSwitch, '应有模块 Antigravity 多账号开关');
+    assert.equal(agModSwitch.props.value, false);
+    (agModSwitch.props.onValueChange as (v: boolean) => void)(true);
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(
+      daemon.machineSettings.modules.find(m => m.id === 'providers.antigravity')?.enabled,
+      true,
+      '在本机配置面板切换后应写入模块开关',
+    );
 
     // 3. GitHub 订阅“监听”编辑面板（github-config）：可设置、可移除 GitHub 令牌，且不显示令牌原文
     renderer.reset();
@@ -480,8 +487,23 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     const addBrowserText = collectText(renderMain({ page: 'providers', drawer: 'add-browser' }));
     assert.equal(addBrowserText.includes('设置 → 开发自动化'), false);
 
-    // 5. 审阅项 1 & 3：
-    // 5a. 升级通知模块默认未启用时，Webhook 凭据卡片只显示说明，不显示填写框和“发测试通知”按钮
+    // 5. 未启用模块卡片提示与 Webhook 凭据（审阅第 3 项）：
+    // 5a. 升级通知与子会话免提醒默认未启用时，问题答复页卡片显示“模块未启用，在本机配置中开启，重载后生效”，且可一键打开本机配置面板
+    renderer.reset();
+    let answerTree = renderMain({ page: 'answer' });
+    const answerText = collectText(answerTree);
+    assert.match(
+      answerText,
+      /模块未启用，在本机配置中开启，重载后生效/,
+      '问题答复页未启用模块卡片应显示提示“模块未启用，在本机配置中开启，重载后生效”',
+    );
+    const answerOpenMachineBtns = findNodes(
+      answerTree,
+      n => n.props.accessibilityLabel === '去本机配置开启',
+    );
+    assert.ok(answerOpenMachineBtns.length >= 2, '升级通知和子会话免提醒未启用时均应有“去本机配置开启”按钮');
+
+    // 5b. 升级通知模块默认未启用时，Webhook 凭据卡片只显示说明，不显示填写框和“发测试通知”按钮
     renderer.reset();
     let escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     assert.equal(
@@ -495,43 +517,50 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       '升级通知模块未启用时，不应显示发测试通知按钮',
     );
 
-    // 5b. 问题答复页：升级通知与子会话免提醒默认未启用时，卡片开关为关且可点击；打开开关后先写模块开关再启用功能，接口随之注册
-    renderer.reset();
-    let answerTree = renderMain({ page: 'answer' });
-    const escCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '升级通知')[0];
-    const quietCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0];
-    assert.ok(escCardSwitch, '升级通知卡片应有开关');
-    assert.equal(escCardSwitch.props.value, false);
-    assert.equal(Boolean(escCardSwitch.props.disabled), false, '升级通知模块未启用时卡片开关不能禁用');
-    assert.ok(quietCardSwitch, '子会话免提醒卡片应有开关');
-    assert.equal(quietCardSwitch.props.value, false);
-    assert.equal(Boolean(quietCardSwitch.props.disabled), false, '子会话免提醒模块未启用时卡片开关不能禁用');
-
-    // 先将 webhook 设为未配置，验证启用模块但未配置凭据时不显示“发测试通知”
+    // 5c. 在本机配置面板开启“模块 升级通知”与“模块 子会话免提醒”后，卡片开关控制功能内部状态；Webhook 未配置时不显示“发测试通知”，保存后才显示
     daemon.escalation = {
       ...daemon.escalation,
       webhook: { configured: false, hostname: null, fingerprint: null },
     };
+    renderer.reset();
+    machineDrawerTree = renderMain({ page: 'answer', drawer: 'machine-config' });
+    const escModSwitch = findNodes(
+      machineDrawerTree,
+      n => n.type === 'Switch' && n.props.accessibilityLabel === '模块 升级通知',
+    )[0];
+    const quietModSwitch = findNodes(
+      machineDrawerTree,
+      n => n.type === 'Switch' && n.props.accessibilityLabel === '模块 子会话免提醒',
+    )[0];
+    assert.ok(escModSwitch, '本机配置面板应有模块 升级通知开关');
+    assert.ok(quietModSwitch, '本机配置面板应有模块 子会话免提醒开关');
+    (escModSwitch.props.onValueChange as (v: boolean) => void)(true);
+    (quietModSwitch.props.onValueChange as (v: boolean) => void)(true);
+    await new Promise(r => setTimeout(r, 20));
+
+    // 模块启用后，卡片开关只改功能内部状态（不调用 machine.settings.toggle-module）
+    renderer.reset();
+    answerTree = renderMain({ page: 'answer' });
+    const escCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '升级通知')[0];
+    const quietCardSwitch = findNodes(answerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === '子会话免提醒')[0];
+    assert.ok(escCardSwitch, '升级通知卡片应有开关');
+    assert.ok(quietCardSwitch, '子会话免提醒卡片应有开关');
     const logLenBeforeEsc = daemon.log.length;
     (escCardSwitch.props.onValueChange as (v: boolean) => void)(true);
-    await new Promise(r => setTimeout(r, 20));
-    const escRpcCalls = daemon.log.slice(logLenBeforeEsc).map(e => e.name);
-    assert.ok(
-      escRpcCalls.indexOf('machine.settings.toggle-module') !== -1 &&
-        escRpcCalls.indexOf('escalation.configure') > escRpcCalls.indexOf('machine.settings.toggle-module'),
-      `打开升级通知开关应先写模块开关再启用功能，实际调用：${escRpcCalls.join(' -> ')}`,
-    );
-    // 此时升级通知接口已注册可用
-    const escSnapLive = (await daemon.rpc(escalationSnapshot, {})) as { enabled: boolean };
-    assert.equal(escSnapLive.enabled, true);
-
-    // 打开子会话免提醒开关 → 先写模块开关再启用功能，接口注册
     (quietCardSwitch.props.onValueChange as (v: boolean) => void)(true);
     await new Promise(r => setTimeout(r, 20));
-    const quietSnapLive = (await daemon.rpc(quietSnapshot, {})) as { enabled: boolean };
-    assert.equal(quietSnapLive.enabled, true);
+    const cardRpcCalls = daemon.log.slice(logLenBeforeEsc).map(e => e.name);
+    assert.equal(
+      cardRpcCalls.includes('machine.settings.toggle-module'),
+      false,
+      '卡片开关只管功能内部状态，不应调用 machine.settings.toggle-module',
+    );
+    assert.ok(cardRpcCalls.includes('escalation.configure'));
+    assert.ok(cardRpcCalls.includes('quiet.configure'));
+    assert.equal(daemon.escalation.enabled, true);
+    assert.equal(daemon.quiet.enabled, true);
 
-    // 5c. 升级通知已启用、但 Webhook 未配置时：显示填写框，但不显示“发测试通知”按钮；保存后才显示“发测试通知”
+    // 5d. 升级通知已启用、但 Webhook 未配置时：显示填写框，但不显示“发测试通知”按钮；保存后才显示“发测试通知”
     renderer.reset();
     escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     const escText = collectText(escDrawerTree);
@@ -567,42 +596,6 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     await new Promise(r => setTimeout(r, 20));
     escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
     assert.match(collectText(escDrawerTree), /测试/);
-
-    // 5d. 其他卡片开关（网页版 claude.ai、精确授权、问答模式、Claude 账号与额度、GitHub 订阅）关闭后仍可在卡片上重新打开
-    for (const item of [
-      { page: 'providers', label: '启用网页版 claude.ai', modId: 'answer.browser' },
-      { page: 'providers', label: '启用 Claude 账号与额度', modId: 'usage.claudeAccounts' },
-      { page: 'answer', label: '精确授权', modId: 'answer.automation' },
-      { page: 'answer', label: '问答模式', modId: 'answer.presence' },
-      { page: 'github', label: '启用 GitHub 监听', modId: 'github' },
-    ]) {
-      renderer.reset();
-      let pageTree = renderMain({ page: item.page });
-      let sw = findNodes(pageTree, n => n.type === 'Switch' && n.props.accessibilityLabel === item.label)[0];
-      assert.ok(sw, `卡片应有开关：${item.label}`);
-      assert.equal(sw.props.value, true, `${item.label} 初始应为开启`);
-      // 关闭
-      (sw.props.onValueChange as (v: boolean) => void)(false);
-      await new Promise(r => setTimeout(r, 20));
-      assert.equal(
-        daemon.machineSettings.modules.find(m => m.id === item.modId)?.enabled,
-        false,
-        `关闭 ${item.label} 后模块 ${item.modId} 应为已关闭`,
-      );
-      pageTree = renderMain({ page: item.page });
-      sw = findNodes(pageTree, n => n.type === 'Switch' && n.props.accessibilityLabel === item.label)[0];
-      assert.ok(sw, `关闭 ${item.label} 后开关仍应显示`);
-      assert.equal(sw.props.value, false);
-      assert.equal(Boolean(sw.props.disabled), false, `关闭 ${item.label} 后开关不应被禁用，必须能重新打开`);
-      // 重新打开
-      (sw.props.onValueChange as (v: boolean) => void)(true);
-      await new Promise(r => setTimeout(r, 20));
-      assert.equal(
-        daemon.machineSettings.modules.find(m => m.id === item.modId)?.enabled,
-        true,
-        `重新打开 ${item.label} 后模块 ${item.modId} 应恢复开启`,
-      );
-    }
   } finally {
     store.dispose();
     control.dispose();

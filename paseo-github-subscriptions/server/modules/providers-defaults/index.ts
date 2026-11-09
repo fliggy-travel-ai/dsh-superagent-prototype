@@ -14,7 +14,7 @@ export const defaultsModule: Module<AgentDefaultRule[]> = {
   defaultEnabled: false,
   appliesTo: isMainInstance,
   config: { section: 'agentDefaults', spec: { schema: AgentDefaultsSchema, fallback: [] } },
-  register({ server, config, machine, services }) {
+  register({ server, config, machine }) {
     let currentEnabled = true;
     let currentRules = [...config];
     server.handle(defaultsSnapshot, async () => ({
@@ -30,9 +30,6 @@ export const defaultsModule: Module<AgentDefaultRule[]> = {
         modules: { ...(raw.modules && typeof raw.modules === 'object' ? (raw.modules as Record<string, unknown>) : {}), 'providers.defaults': currentEnabled },
         agentDefaults: currentRules,
       }));
-      if (input.enabled === false) {
-        await services.main?.host?.setEnabled?.('providers.defaults', false);
-      }
       return { enabled: currentEnabled, rules: currentRules, error: null };
     });
     const remove = server.addHook('agent.create.before', async ({ request }) => currentEnabled ? applyAgentDefaults(request, currentRules) : request);

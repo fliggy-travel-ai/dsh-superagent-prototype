@@ -1438,7 +1438,7 @@ function EscalationDrawer() {
     <View style={{ gap: 12 }}>
       {escModOff ? (
         <Notice tone="neutral">
-          <Text style={s.text}>升级通知模块未启用。可直接在“升级通知”卡片上开启模块。</Text>
+          <Text style={s.text}>升级通知模块未启用，请在本机配置中开启，重载后生效。</Text>
         </Notice>
       ) : escalationStatus === 'error' || escalationError ? (
         <Notice tone="danger">
@@ -1546,7 +1546,7 @@ function EscalationDrawer() {
       >
         {escModOff ? (
           <Text style={s.muted}>
-            升级通知模块未启用。请先在“升级通知”卡片上开启模块，再配置或更换 Webhook 凭据。
+            升级通知模块未启用，请先在本机配置中开启并重载插件，再配置或更换 Webhook 凭据。
           </Text>
         ) : (
           <>
@@ -2121,18 +2121,6 @@ function GithubConfigDrawer() {
   );
 }
 
-const CARD_CONTROLLED_MODULES = new Set([
-  'providers.defaults',
-  'providers.antigravity',
-  'usage.claudeAccounts',
-  'answer.browser',
-  'answer.presence',
-  'answer.escalation',
-  'answer.quietChildren',
-  'answer.automation',
-  'github',
-]);
-
 function MachineConfigDrawer() {
   const { s, control, theme } = useUi();
   const { machineSettings, modules } = useControlState();
@@ -2144,7 +2132,7 @@ function MachineConfigDrawer() {
   const configPath = machineSettings?.configPath ?? modules?.config.path ?? '~/.paseo/github-subscriptions/machine.json';
   const hostLabel = machineSettings?.machine ?? (modules?.instance.role === 'provider' ? 'Provider 实例' : '本机');
   const configErrors = machineSettings?.errors ?? modules?.config.errors ?? [];
-  const allModules =
+  const moduleItems =
     machineSettings?.modules ??
     (modules?.modules.map(m => ({
       id: m.id,
@@ -2152,9 +2140,8 @@ function MachineConfigDrawer() {
       enabled: m.state === 'running',
       state: m.state,
       reason: m.reason,
-      reloadRequired: false,
+      reloadRequired: true,
     })) ?? []);
-  const extraModules = allModules.filter(item => !CARD_CONTROLLED_MODULES.has(item.id));
 
   const toggle = async (id: string, enabled: boolean) => {
     setBusyId(id);
@@ -2204,12 +2191,12 @@ function MachineConfigDrawer() {
       )}
       {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
 
-      <SectionTitle>无独立卡片的模块开关</SectionTitle>
-      {extraModules.length === 0 ? (
+      <SectionTitle>启用模块</SectionTitle>
+      {moduleItems.length === 0 ? (
         <Text style={s.muted}>正在读取模块列表…</Text>
       ) : (
         <View style={{ gap: 4 }}>
-          {extraModules.map((item, idx) => (
+          {moduleItems.map((item, idx) => (
             <View
               key={item.id}
               style={[
@@ -2258,7 +2245,7 @@ function MachineConfigDrawer() {
         ) : null}
       </View>
       <RuleNote>
-        已有专属功能卡片的模块直接在对应卡片开启或关闭，此处只集中管理没有独立卡片的后台模块（如停滞会话检查、其他 Provider 额度）。
+        本机模块开关保存在 machine.json 的 modules 字段中，修改后在下次插件启动（或重载插件）时生效。
       </RuleNote>
     </View>
   );

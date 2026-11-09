@@ -168,17 +168,17 @@ export class FakeDaemon {
     errors: [],
     pausedAll: false,
     modules: [
-      { id: 'providers.defaults', label: '新建会话默认设置', enabled: false, state: 'off', reloadRequired: false },
-      { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.automation', label: '精确授权', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.browser', label: '网页版 claude.ai', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'answer.escalation', label: '升级通知', enabled: false, state: 'off', reloadRequired: false },
-      { id: 'answer.quietChildren', label: '子会话免提醒', enabled: false, state: 'off', reloadRequired: false },
+      { id: 'providers.defaults', label: '新建会话默认设置', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'answer.presence', label: '问答模式与蓝牙', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'answer.automation', label: '精确授权', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'answer.browser', label: '网页版 claude.ai', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'answer.escalation', label: '升级通知', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'answer.quietChildren', label: '子会话免提醒', enabled: false, state: 'off', reloadRequired: true },
       { id: 'usage.claudeAccounts', label: 'Claude 账号与额度', enabled: true, state: 'running', reloadRequired: true },
       { id: 'usage.providerQuotas', label: '其他 Provider 额度', enabled: false, state: 'off', reloadRequired: true },
       { id: 'providers.antigravity', label: 'Antigravity 多账号', enabled: false, state: 'off', reloadRequired: true },
-      { id: 'github', label: 'GitHub 订阅', enabled: true, state: 'running', reloadRequired: false },
-      { id: 'todo.stalled', label: '停滞会话检查', enabled: true, state: 'running', reloadRequired: false },
+      { id: 'github', label: 'GitHub 订阅', enabled: true, state: 'running', reloadRequired: true },
+      { id: 'todo.stalled', label: '停滞会话检查', enabled: true, state: 'running', reloadRequired: true },
     ],
   };
   todo: TodoMergedSnapshot = {
@@ -303,13 +303,6 @@ export class FakeDaemon {
     return contract.output.parse(this.handle(contract.name, parsed)) as O;
   }
 
-  private requireModule(id: string, name: string): void {
-    const mod = this.machineSettings.modules.find(m => m.id === id);
-    if (mod && (!mod.enabled || mod.state === 'off')) {
-      throw new Error(`未知调用 ${name}（模块 ${id} 未启用）`);
-    }
-  }
-
   private setModuleState(id: string, enabled: boolean): void {
     this.machineSettings = {
       ...this.machineSettings,
@@ -333,11 +326,6 @@ export class FakeDaemon {
         const id = String(input.id);
         const enabled = Boolean(input.enabled);
         this.setModuleState(id, enabled);
-        if (id === 'providers.defaults') this.defaults = { ...this.defaults, enabled };
-        if (id === 'providers.antigravity') this.antigravity = { ...this.antigravity, enabled };
-        if (id === 'usage.claudeAccounts') this.claudeAccounts = { ...this.claudeAccounts, enabled };
-        if (id === 'answer.escalation') this.escalation = { ...this.escalation, enabled, status: enabled ? 'running' : 'stopped' };
-        if (id === 'answer.quietChildren') this.quiet = { ...this.quiet, enabled };
         return this.machineSettings;
       }
       case 'machine.settings.pause-all':
@@ -371,11 +359,7 @@ export class FakeDaemon {
       case 'defaults.snapshot':
         return this.defaults;
       case 'defaults.save':
-        if (input.enabled !== undefined) {
-          const enabled = Boolean(input.enabled);
-          this.defaults = { ...this.defaults, enabled };
-          this.setModuleState('providers.defaults', enabled);
-        }
+        if (input.enabled !== undefined) this.defaults = { ...this.defaults, enabled: Boolean(input.enabled) };
         if (Array.isArray(input.rules)) this.defaults = { ...this.defaults, rules: input.rules as AgentDefaultRule[] };
         return this.defaults;
       case 'providers.instance.status':
@@ -400,10 +384,8 @@ export class FakeDaemon {
           unackedMessages: 0,
         };
       case 'claude-accounts.snapshot':
-        this.requireModule('usage.claudeAccounts', name);
         return this.claudeAccounts;
       case 'claude-accounts.configure':
-        this.requireModule('usage.claudeAccounts', name);
         this.claudeAccounts = {
           ...this.claudeAccounts,
           quotaName: {
@@ -414,7 +396,6 @@ export class FakeDaemon {
         };
         return this.claudeAccounts;
       case 'claude-accounts.rename':
-        this.requireModule('usage.claudeAccounts', name);
         this.claudeAccounts = {
           ...this.claudeAccounts,
           accounts: this.claudeAccounts.accounts.map(acc =>
@@ -430,7 +411,6 @@ export class FakeDaemon {
         return this.claudeAccounts;
       case 'claude-accounts.login.start':
       case 'claude-accounts.login.retry':
-        this.requireModule('usage.claudeAccounts', name);
         this.claudeAccounts = {
           ...this.claudeAccounts,
           activeFlow: {
@@ -447,7 +427,6 @@ export class FakeDaemon {
         };
         return this.claudeAccounts;
       case 'claude-accounts.login.submit-code': {
-        this.requireModule('usage.claudeAccounts', name);
         const providerId = String(input.providerId || `claude-${this.claudeAccounts.accounts.length + 1}`);
         const added = {
           providerId,
@@ -511,10 +490,8 @@ export class FakeDaemon {
           error: null,
         };
       case 'escalation.snapshot':
-        this.requireModule('answer.escalation', name);
         return this.escalation;
       case 'escalation.configure':
-        this.requireModule('answer.escalation', name);
         this.escalation = {
           ...this.escalation,
           ...(input.enabled !== undefined ? { enabled: Boolean(input.enabled), status: input.enabled ? 'running' : 'stopped' } : {}),
@@ -525,10 +502,8 @@ export class FakeDaemon {
         };
         return this.escalation;
       case 'escalation.test-webhook':
-        this.requireModule('answer.escalation', name);
         return { sent: true, message: 'Grok 端点已确认收到测试消息' };
       case 'escalation.webhook.configure':
-        this.requireModule('answer.escalation', name);
         this.escalation = {
           ...this.escalation,
           webhook: {
@@ -539,17 +514,14 @@ export class FakeDaemon {
         };
         return this.escalation.webhook;
       case 'escalation.acknowledge':
-        this.requireModule('answer.escalation', name);
         this.escalation = {
           ...this.escalation,
           pendingEvents: this.escalation.pendingEvents.filter(ev => ev.id !== input.id),
         };
         return { ok: true };
       case 'quiet.snapshot':
-        this.requireModule('answer.quietChildren', name);
         return this.quiet;
       case 'quiet.configure':
-        this.requireModule('answer.quietChildren', name);
         this.quiet = {
           ...this.quiet,
           ...(input.enabled !== undefined ? { enabled: Boolean(input.enabled) } : {}),
@@ -557,18 +529,14 @@ export class FakeDaemon {
         };
         return this.quiet;
       case 'presence.snapshot':
-        this.requireModule('answer.presence', name);
         return this.presence;
       case 'presence.configure':
-        this.requireModule('answer.presence', name);
         this.presence = { ...this.presence, settings: input as unknown as PresenceSettings };
         return this.presence;
       case 'presence.answer':
       case 'presence.read':
-        this.requireModule('answer.presence', name);
         return this.presence;
       case 'bluetooth.list':
-        this.requireModule('answer.presence', name);
         return {
           target: { name: '随身手机', address: 'AA:BB:CC:DD:EE:01', revision: 'rev-1' },
           devices: [
@@ -578,47 +546,35 @@ export class FakeDaemon {
           error: null,
         };
       case 'bluetooth.select':
-        this.requireModule('answer.presence', name);
         return { name: String((input.target as { name?: string })?.name ?? '随身手机'), address: null, revision: 'rev-2' };
       case 'todos.stalled':
-        this.requireModule('todo.stalled', name);
         return { sessions: [], error: null };
       case 'automation.snapshot':
-        this.requireModule('answer.automation', name);
         return this.automation;
       case 'automation.pause':
-        this.requireModule('answer.automation', name);
         this.automation = { ...this.automation, paused: Boolean(input.paused) };
         return this.automation;
       case 'automation.policy': {
-        this.requireModule('answer.automation', name);
         const policy = input as unknown as SessionPolicy;
         this.automation = { ...this.automation, policies: [...this.automation.policies.filter(item => item.agentId !== policy.agentId), policy] };
         return this.automation;
       }
       case 'browser.snapshot':
-        this.requireModule('answer.browser', name);
         return this.browser;
       case 'browser.configure':
-        this.requireModule('answer.browser', name);
         this.browser = { ...this.browser, settings: input as unknown as BrowserSettings, connected: Boolean(input.enabled) };
         return this.browser;
       case 'browser.pairing':
-        this.requireModule('answer.browser', name);
         return { url: `http://127.0.0.1:${this.browser.settings.port}/sync`, token: '演示配对令牌，无实际权限' };
       case 'browser.usage.snapshot':
-        this.requireModule('answer.browser', name);
         return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
       case 'browser.usage.save_api_key':
-        this.requireModule('answer.browser', name);
         this.adspowerApiKeyConfigured = Boolean(String(input.apiKey ?? '').trim());
         return { adspowerApiKeyConfigured: this.adspowerApiKeyConfigured, adspowerApiKeySource: this.adspowerApiKeyConfigured ? 'plugin' : 'none' };
       case 'browser.usage.remove_api_key':
-        this.requireModule('answer.browser', name);
         this.adspowerApiKeyConfigured = false;
         return { adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' };
       case 'browser.bind': {
-        this.requireModule('answer.browser', name);
         const binding = input as unknown as BrowserBindingInput;
         this.browser = { ...this.browser, bindings: this.browser.bindings.filter(item => item.instanceId !== binding.instanceId || item.sessionId !== binding.sessionId),
           sessions: this.browser.sessions.map(session => session.instanceId === binding.instanceId && session.sessionId === binding.sessionId
@@ -628,27 +584,22 @@ export class FakeDaemon {
       }
       case snapshot.name:
       case pollNow.name:
-        this.requireModule('github', name);
         return this.state;
       case unsubscribe.name: {
-        this.requireModule('github', name);
         const before = this.state.subscriptions.length;
         this.state = { ...this.state, subscriptions: this.state.subscriptions.filter((item) => item.id !== input.id) };
         return { removed: this.state.subscriptions.length < before };
       }
       case savePreferences.name:
-        this.requireModule('github', name);
         this.state = { ...this.state, preferences: input as Snapshot['preferences'] };
         return this.state.preferences;
       case saveToken.name: {
-        this.requireModule('github', name);
         const token = String(input.token);
         if (token.startsWith('bad')) throw new Error(`GitHub 拒绝了令牌 ${token}（401）`);
         this.state = { ...this.state, token: { ...this.state.token, configured: true, prefix: `${token.slice(0, 5)}…`, login: 'demo-user', error: null } };
         return this.state.token;
       }
       case removeToken.name:
-        this.requireModule('github', name);
         this.state = { ...this.state, token: { configured: false, prefix: null, login: null, remaining: null, resetAt: null, error: null } };
         return this.state.token;
       default:
