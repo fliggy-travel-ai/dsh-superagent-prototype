@@ -39,6 +39,7 @@ const MODULE_DEFS = [
 
 interface PauseAllState {
   paused: boolean;
+  inProgress?: boolean;
   saved?: {
     automationPaused?: boolean;
     presencePaused?: boolean;
@@ -55,6 +56,7 @@ async function readPauseAllState(stateDirectory: string): Promise<PauseAllState>
     if (raw && typeof raw === 'object' && typeof raw.paused === 'boolean') {
       return {
         paused: raw.paused,
+        ...(raw.inProgress === true ? { inProgress: true } : {}),
         ...(raw.saved && typeof raw.saved === 'object' ? { saved: raw.saved } : {}),
       };
     }
@@ -101,6 +103,9 @@ export function registerMachineSettingsRpcs(options: {
       error: section.ok ? null : section.error,
     }));
     server.handle(defaultsSave, async input => {
+      if (!section.ok) {
+        throw new Error(`默认规则配置段读取失败，拒绝覆盖保存：${section.error}`);
+      }
       if (input.enabled !== undefined) enabled = input.enabled;
       if (input.rules !== undefined) rules = AgentDefaultsSchema.parse(input.rules);
       await patchMachineConfig(machine.path, raw => ({
@@ -160,136 +165,157 @@ export function registerMachineSettingsRpcs(options: {
     return buildSettingsSnapshot();
   });
 
-  server.handle(machineSettingsPauseAll, async ({ paused }) => {
-    const main = services.main;
-    if (!main) throw new Error('主实例服务不可用');
+  let pauseQueue: Promise<unknown> = Promise.resolve();
 
-    const prev = await readPauseAllState(stateDirectory);
-    const saved: NonNullable<PauseAllState['saved']> = { ...(prev.saved ?? {}) };
-    const rollbacks: Array<() => Promise<void>> = [];
-    const persistProgress = () =>
-      writePauseAllState(stateDirectory, { paused: prev.paused, saved });
+  server.handle(machineSettingsPauseAll, ({ paused }) => {
+    const run = pauseQueue.then(async () => {
+      const main = services.main;
+      if (!main) throw new Error('主实例服务不可用');
 
-    const isRunning = (id: string, defaultEnabled: boolean) =>
-      typeof main.isModuleRunning === 'function'
-        ? main.isModuleRunning(id, machine, defaultEnabled)
-        : isModuleEnabled(machine, id, defaultEnabled);
+      const prev = await readPauseAllState(stateDirectory);
+      const reuseSaved = Boolean(prev.paused || prev.inProgress);
+      const saved: NonNullable<PauseAllState['saved']> = paused
+        ? reuseSaved
+          ? { ...(prev.saved ?? {}) }
+          : {}
+        : { ...(prev.saved ?? {}) };
+      const rollbacks: Array<() => Promise<void>> = [];
+      const persistProgress = () =>
+        writePauseAllState(stateDirectory, { paused: prev.paused, inProgress: true, saved });
 
-    try {
-      if (isRunning('todo.stalled', true)) {
-        const before = Boolean(main.stalledPaused);
-        if (paused) {
-          if (saved.stalledPaused === undefined) saved.stalledPaused = before;
-          await persistProgress();
-          main.stalledPaused = true;
-          main.invalidateStalledCache?.();
-          rollbacks.push(async () => {
-            main.stalledPaused = saved.stalledPaused ?? before;
+      const isRunning = (id: string, defaultEnabled: boolean) =>
+        typeof main.isModuleRunning === 'function'
+          ? main.isModuleRunning(id, machine, defaultEnabled)
+          : isModuleEnabled(machine, id, defaultEnabled);
+
+      try {
+        if (isRunning('todo.stalled', true)) {
+          const before = Boolean(main.stalledPaused);
+          if (paused) {
+            if (saved.stalledPaused === undefined) saved.stalledPaused = before;
+            await persistProgress();
+            main.stalledPaused = true;
             main.invalidateStalledCache?.();
-          });
-        } else if (saved.stalledPaused !== undefined) {
-          main.stalledPaused = saved.stalledPaused;
-          main.invalidateStalledCache?.();
-        } else {
-          main.stalledPaused = false;
-          main.invalidateStalledCache?.();
-        }
-      }
-
-      if (isRunning('answer.presence', true)) {
-        const pres = await main.readyPresence();
-        const current = pres.snapshot().settings;
-        if (paused) {
-          if (saved.presencePaused === undefined) saved.presencePaused = current.paused;
-          await persistProgress();
-          await pres.configure({ ...current, paused: true });
-          const restorePaused = saved.presencePaused;
-          rollbacks.push(async () => {
-            await pres.configure({ ...pres.snapshot().settings, paused: restorePaused });
-          });
-        } else if (saved.presencePaused !== undefined) {
-          await pres.configure({ ...current, paused: saved.presencePaused });
-        }
-      }
-
-      if (main.escalation) {
-        const esc = main.escalation;
-        const snap = await esc.snapshot();
-        if (paused) {
-          if (saved.escalationEnabled === undefined) saved.escalationEnabled = snap.enabled;
-          await persistProgress();
-          await esc.configure({ enabled: false });
-          const restoreEnabled = saved.escalationEnabled;
-          rollbacks.push(async () => {
-            await esc.configure({ enabled: restoreEnabled });
-          });
-        } else if (saved.escalationEnabled !== undefined) {
-          await esc.configure({ enabled: saved.escalationEnabled });
-        }
-      }
-
-      if (main.quiet) {
-        const quiet = main.quiet;
-        const snap = await quiet.snapshot();
-        if (paused) {
-          if (saved.quietEnabled === undefined) saved.quietEnabled = snap.enabled;
-          await persistProgress();
-          await quiet.configure({ enabled: false });
-          const restoreEnabled = saved.quietEnabled;
-          rollbacks.push(async () => {
-            await quiet.configure({ enabled: restoreEnabled });
-          });
-        } else if (saved.quietEnabled !== undefined) {
-          await quiet.configure({ enabled: saved.quietEnabled });
-        }
-      }
-
-      if (isRunning('github', true)) {
-        const gh = await main.github();
-        const prefs = gh.storage.state.preferences;
-        if (paused) {
-          if (saved.githubEnabled === undefined) saved.githubEnabled = prefs.enabled;
-          await persistProgress();
-          if (prefs.enabled) {
-            await gh.preferences({ ...prefs, enabled: false });
             rollbacks.push(async () => {
-              const cur = gh.storage.state.preferences;
-              await gh.preferences({ ...cur, enabled: true });
+              main.stalledPaused = saved.stalledPaused ?? before;
+              main.invalidateStalledCache?.();
             });
-          }
-        } else if (saved.githubEnabled !== undefined) {
-          if (prefs.enabled !== saved.githubEnabled) {
-            await gh.preferences({ ...prefs, enabled: saved.githubEnabled });
+          } else if (saved.stalledPaused !== undefined) {
+            main.stalledPaused = saved.stalledPaused;
+            main.invalidateStalledCache?.();
+          } else {
+            main.stalledPaused = false;
+            main.invalidateStalledCache?.();
           }
         }
-      }
 
-      if (isRunning('answer.automation', true)) {
-        const auto = await main.readyAutomation();
-        if (paused) {
-          const before = auto.snapshot().paused;
-          if (saved.automationPaused === undefined) saved.automationPaused = before;
-          await persistProgress();
-          await auto.pause(true);
-          const restorePaused = saved.automationPaused;
-          rollbacks.push(async () => {
-            await auto.pause(restorePaused);
+        if (isRunning('answer.presence', true)) {
+          const pres = await main.readyPresence();
+          const current = pres.snapshot().settings;
+          if (paused) {
+            if (saved.presencePaused === undefined) saved.presencePaused = current.paused;
+            await persistProgress();
+            await pres.configure({ ...current, paused: true });
+            const restorePaused = saved.presencePaused;
+            rollbacks.push(async () => {
+              await pres.configure({ ...pres.snapshot().settings, paused: restorePaused });
+            });
+          } else if (saved.presencePaused !== undefined) {
+            await pres.configure({ ...current, paused: saved.presencePaused });
+          }
+        }
+
+        if (main.escalation) {
+          const esc = main.escalation;
+          const snap = await esc.snapshot();
+          if (paused) {
+            if (saved.escalationEnabled === undefined) saved.escalationEnabled = snap.enabled;
+            await persistProgress();
+            await esc.configure({ enabled: false });
+            const restoreEnabled = saved.escalationEnabled;
+            rollbacks.push(async () => {
+              await esc.configure({ enabled: restoreEnabled });
+            });
+          } else if (saved.escalationEnabled !== undefined) {
+            await esc.configure({ enabled: saved.escalationEnabled });
+          }
+        }
+
+        if (main.quiet) {
+          const quiet = main.quiet;
+          const snap = await quiet.snapshot();
+          if (paused) {
+            if (saved.quietEnabled === undefined) saved.quietEnabled = snap.enabled;
+            await persistProgress();
+            await quiet.configure({ enabled: false });
+            const restoreEnabled = saved.quietEnabled;
+            rollbacks.push(async () => {
+              await quiet.configure({ enabled: restoreEnabled });
+            });
+          } else if (saved.quietEnabled !== undefined) {
+            await quiet.configure({ enabled: saved.quietEnabled });
+          }
+        }
+
+        if (isRunning('github', true)) {
+          const gh = await main.github();
+          const prefs = gh.storage.state.preferences;
+          if (paused) {
+            if (saved.githubEnabled === undefined) saved.githubEnabled = prefs.enabled;
+            await persistProgress();
+            if (prefs.enabled) {
+              await gh.preferences({ ...prefs, enabled: false });
+              rollbacks.push(async () => {
+                const cur = gh.storage.state.preferences;
+                await gh.preferences({ ...cur, enabled: true });
+              });
+            }
+          } else if (saved.githubEnabled !== undefined) {
+            if (prefs.enabled !== saved.githubEnabled) {
+              await gh.preferences({ ...prefs, enabled: saved.githubEnabled });
+            }
+          }
+        }
+
+        if (isRunning('answer.automation', true)) {
+          const auto = await main.readyAutomation();
+          if (paused) {
+            const before = auto.snapshot().paused;
+            if (saved.automationPaused === undefined) saved.automationPaused = before;
+            await persistProgress();
+            await auto.pause(true);
+            const restorePaused = saved.automationPaused;
+            rollbacks.push(async () => {
+              await auto.pause(restorePaused);
+            });
+          } else if (saved.automationPaused !== undefined) {
+            await auto.pause(saved.automationPaused);
+          }
+        }
+      } catch (error) {
+        let rollbackFailed = false;
+        if (paused && rollbacks.length > 0) {
+          const results = await Promise.allSettled([...rollbacks].reverse().map(fn => fn()));
+          rollbackFailed = results.some(r => r.status === 'rejected');
+        }
+        if (paused && !prev.paused && !rollbackFailed) {
+          await writePauseAllState(stateDirectory, { paused: false });
+        } else {
+          await writePauseAllState(stateDirectory, {
+            paused: prev.paused,
+            ...(rollbackFailed ? { inProgress: true } : {}),
+            ...(Object.keys(saved).length > 0 ? { saved } : {}),
           });
-        } else if (saved.automationPaused !== undefined) {
-          await auto.pause(saved.automationPaused);
         }
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new Error(`暂停或恢复自动化失败：${msg}`);
       }
-    } catch (error) {
-      if (paused && rollbacks.length > 0) {
-        await Promise.allSettled([...rollbacks].reverse().map(fn => fn()));
-      }
-      await writePauseAllState(stateDirectory, { paused: prev.paused, saved });
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`暂停或恢复自动化失败：${msg}`);
-    }
 
-    await writePauseAllState(stateDirectory, paused ? { paused: true, saved } : { paused: false });
-    return { paused };
+      await writePauseAllState(stateDirectory, paused ? { paused: true, saved } : { paused: false });
+      return { paused };
+    });
+    pauseQueue = run.catch(() => {});
+    return run;
   });
 
   server.handle(machineSettingsExportBackup, () => exportMachineBackup(baseDirectory));

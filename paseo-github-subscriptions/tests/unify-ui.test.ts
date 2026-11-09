@@ -958,3 +958,139 @@ test('第二轮审阅 UI 修复（G–K、第 3/5/6/8 项）验证', async () =>
   const sessionTitleNodes = findNodes(tree, (el) => el.type === 'Text' && el.props.numberOfLines === 2);
   assert.ok(sessionTitleNodes.length > 0, 'GitHub 订阅页会话名应允许 2 行显示');
 });
+
+test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/disabled、默认规则段损坏禁用保存、GitHub 草稿不被轮询覆盖、暂停全部自动化状态与错误展示', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const { bind } = await import('../client/ui.tsx');
+
+  const emptyAgentsList = async () => ({ entries: [], pageInfo: { hasMore: false, nextCursor: null } });
+  const mockTheme = {
+    colors: {
+      surface0: '#151517',
+      surface1: '#1c1c1f',
+      surface2: '#2b2b2f',
+      border: '#303035',
+      foreground: '#ececef',
+      foregroundMuted: '#8e8e95',
+      accent: '#5b8cff',
+      accentForeground: '#ffffff',
+      statusSuccess: '#4cc274',
+      statusWarning: '#e3a33b',
+      statusDanger: '#ff6b66',
+    },
+  };
+
+  // 第 2 & 3 & 5 项：
+  // - claudeAccounts 返回 { enabled: false, accounts: [], error: '旧插件 claude-quota-resume 仍启用', quotaName: { enabled: false, ... } }
+  // - defaults 返回 { enabled: false, rules: [], error: 'agentDefaults 格式错误' }
+  // - machineSettings 为 null 且 machineSettingsError 有值，automation.paused 为 true（验证不回退到 automation.paused）
+  const daemon = new FakeDaemon('shadow');
+  daemon.latencyMs = 0;
+  daemon.claudeAccounts = {
+    enabled: false,
+    accounts: [],
+    quotaName: { enabled: false, lowestRemainingPct: null, autoResumeDefault: false, hiddenBuiltinSources: [] },
+    activeFlow: null,
+    error: '旧插件 claude-quota-resume 仍启用',
+  };
+  daemon.defaults = {
+    enabled: false,
+    rules: [],
+    error: 'agentDefaults 格式错误',
+  };
+  daemon.automation = { ...daemon.automation, paused: true };
+  const origRpc = daemon.rpc.bind(daemon);
+  daemon.rpc = async <I, O>(contract: { name: string }, input: I): Promise<O> => {
+    if (contract.name === 'machine.settings.snapshot') {
+      throw new Error('machine.json 读取失败');
+    }
+    return origRpc(contract as never, input);
+  };
+
+  const control = createControlStore(daemon as never, emptyAgentsList as never);
+  await Promise.all([control.refresh(), control.refreshUnify()]);
+
+  let currentSnapshot = structuredClone(daemon.state);
+  const BoundMain = bind(
+    {
+      store: {
+        subscribe: () => () => {},
+        getState: () => ({ snapshot: currentSnapshot, error: null, loaded: true }),
+      } as never,
+      control,
+      openScreen: () => {},
+      openSettings: () => {},
+    },
+    MainScreen,
+  );
+
+  const renderer = createTestRenderer();
+  let tree = renderer.render(() =>
+    React.createElement(BoundMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'claude-quota' },
+    } as never),
+  );
+  const text = collectText(tree);
+  // 第 2 项：Claude 账号与名称带额度卡片及抽屉均显示读取失败原因，不显示“0 个账号 正常”或“已开启”
+  assert.match(text, /旧插件 claude-quota-resume 仍启用/);
+  assert.doesNotMatch(text, /0 个账号/);
+  assert.doesNotMatch(text, /已开启/);
+
+  // 第 5 项：machineSettings 未读到时显示 machineSettingsError，按钮文字不回退到 automation.paused（仍为“暂停全部自动化”而非“恢复自动化”）且禁用
+  assert.match(text, /machine\.json 读取失败/);
+  assert.doesNotMatch(text, /恢复自动化/);
+  const pauseBtn = findNodes(tree, el => el.type === 'Pressable' && el.props.accessibilityLabel === '暂停全部自动化')[0];
+  assert.ok(pauseBtn);
+  assert.equal(pauseBtn.props.disabled, true, 'machineSettings 未读到时暂停全部自动化按钮应禁用');
+
+  // 第 3 项：defaults.error 非空时，首页默认设置开关、抽屉总开关与“添加规则”按钮全部禁用
+  const cardDefaultSwitch = findNodes(tree, el => el.type === 'Switch' && el.props.accessibilityLabel === '新建会话默认设置')[0];
+  assert.equal(cardDefaultSwitch?.props.disabled, true, 'defaults.error 非空时卡片开关应禁用');
+
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'providers', drawer: 'session-defaults' },
+    } as never),
+  );
+  const drawerDefaultSwitch = findNodes(tree, el => el.type === 'Switch' && el.props.accessibilityLabel === '启用新建会话默认设置')[0];
+  assert.equal(drawerDefaultSwitch?.props.disabled, true, 'defaults.error 非空时抽屉开关应禁用');
+  const addRuleBtn = findNodes(tree, el => el.type === 'Pressable' && el.props.accessibilityLabel === '添加规则')[0];
+  assert.equal(addRuleBtn?.props.disabled, true, 'defaults.error 非空时添加规则按钮应禁用');
+
+  // 第 4 项：GitHub 配置抽屉在用户输入草稿后，轮询产生新 snapshot.preferences 引用时不覆盖用户正在输入的内容
+  renderer.reset();
+  tree = renderer.render(() =>
+    React.createElement(BoundMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'github', drawer: 'github-config' },
+    } as never),
+  );
+  const orgInput = findNodes(tree, el => el.props.accessibilityLabel === 'GitHub 组织')[0];
+  assert.ok(orgInput);
+  (orgInput.props.onChangeText as (v: string) => void)('my-editing-org');
+  // 模拟轮询返回了新的 snapshot 和 preferences 对象引用
+  currentSnapshot = structuredClone(daemon.state);
+  tree = renderer.render(() =>
+    React.createElement(BoundMain, {
+      theme: mockTheme,
+      host: { id: 'h1', label: 'Host' },
+      layout: { compact: false, platform: 'web' },
+      params: { page: 'github', drawer: 'github-config' },
+    } as never),
+  );
+  const orgInputAfterPoll = findNodes(tree, el => el.props.accessibilityLabel === 'GitHub 组织')[0];
+  assert.equal(orgInputAfterPoll?.props.value, 'my-editing-org', '轮询更新 snapshot 引用不应重置正在编辑的 GitHub 配置草稿');
+});

@@ -768,6 +768,31 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   assert.equal(escalationEnabled, true, '部分失败时已关闭的升级通知应回滚到暂停前的开启状态');
   assert.equal(quietEnabled, true, '部分失败时已关闭的子会话免提醒应回滚到暂停前的开启状态');
 
+  // 第三轮审阅项 1：失败回滚后 → 用户手动关闭升级通知 → 再次暂停成功 → 恢复，升级通知保持关闭（不被旧 saved 重新打开）
+  shouldFailAutomation = false;
+  escalationEnabled = false;
+  await handlers.get('machine.settings.pause-all')!({ paused: true });
+  assert.equal(escalationEnabled, false);
+  await handlers.get('machine.settings.pause-all')!({ paused: false });
+  assert.equal(escalationEnabled, false, '回滚后手动关闭的升级通知在下次暂停并恢复后仍应保持关闭');
+
+  // 第三轮审阅项 5（服务端）：并发调用 pause-all 串行执行
+  const callOrder: string[] = [];
+  const origConfigure = main.escalation.configure;
+  main.escalation.configure = async (patch: { enabled?: boolean }) => {
+    callOrder.push(`esc:${String(patch.enabled)}:start`);
+    await new Promise(r => setTimeout(r, 15));
+    if (patch.enabled !== undefined) escalationEnabled = patch.enabled;
+    callOrder.push(`esc:${String(patch.enabled)}:end`);
+  };
+  escalationEnabled = true;
+  await Promise.all([
+    handlers.get('machine.settings.pause-all')!({ paused: true }),
+    handlers.get('machine.settings.pause-all')!({ paused: false }),
+  ]);
+  main.escalation.configure = origConfigure;
+  assert.deepEqual(callOrder, ['esc:false:start', 'esc:false:end', 'esc:true:start', 'esc:true:end']);
+
   // 恢复时：若 pause-all.json 中没有保存 escalationEnabled / quietEnabled（例如从旧文件或未保存项恢复），不应把原本关闭的模块打开
   shouldFailAutomation = false;
   escalationEnabled = false;
@@ -779,6 +804,49 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   await handlers.get('machine.settings.pause-all')!({ paused: false });
   assert.equal(escalationEnabled, false, '未保存过的 escalationEnabled 在恢复时不应被默认设为 true');
   assert.equal(quietEnabled, false, '未保存过的 quietEnabled 在恢复时不应被默认设为 true');
+
+  // 第三轮审阅项 3（服务端）：agentDefaults 配置段损坏时，defaults.save 拒绝覆盖保存
+  const badDir = mkdtempSync(join(tmpdir(), 'bad-defaults-test-'));
+  const badMachinePath = join(badDir, 'machine.json');
+  writeFileSync(
+    badMachinePath,
+    JSON.stringify({
+      version: 1,
+      modules: { 'providers.defaults': false },
+      agentDefaults: [{ provider: '' }],
+    }),
+  );
+  const badHandlers = new Map<string, (input: any) => Promise<any>>();
+  const badServer = {
+    handle(contract: { name: string }, handler: (input: any) => Promise<any>) {
+      badHandlers.set(contract.name, handler);
+    },
+    addHook() {
+      return () => {};
+    },
+  } as unknown as PluginServerContext;
+  const badMachine = loadMachineConfig(badMachinePath, {
+    agentDefaults: { schema: (await import('../shared/defaults.ts')).AgentDefaultsSchema, fallback: [] },
+  });
+  const badHost = startModules([], {
+    server: badServer,
+    instance: resolveInstance('main'),
+    machine: badMachine,
+    services: { home: badDir, daemon: {} as never, main: main as never },
+    stateDirectory: badDir,
+    baseDirectory: badDir,
+  });
+  registerMachineSettingsRpcs({
+    server: badServer,
+    machine: badMachine,
+    host: badHost,
+    services: { home: badDir, daemon: {} as never, main: main as never },
+    stateDirectory: badDir,
+    baseDirectory: badDir,
+  });
+  const badSnap = await badHandlers.get('defaults.snapshot')!({});
+  assert.ok(badSnap.error, '损坏的 agentDefaults 应在 snapshot.error 中反映');
+  await assert.rejects(() => badHandlers.get('defaults.save')!({ enabled: true }), /拒绝/);
 });
 
 test('审阅项 4/7/8c：todo.stalled 与 todo 模块共用同一个 StalledRuntime 实例与缓存，pause-all 覆盖停滞检查，todo 轮询看 host.status running', async () => {

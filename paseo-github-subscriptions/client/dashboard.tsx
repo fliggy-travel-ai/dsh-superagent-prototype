@@ -94,12 +94,18 @@ function ProvidersPage({
     antigravityStatus,
     antigravityError,
     machineSettings,
-    automation,
+    machineSettingsError,
     todo,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [pauseBusy, setPauseBusy] = useState(false);
 
-  const pausedAll = machineSettings?.pausedAll ?? automation?.paused ?? false;
+  const pausedAll = machineSettings?.pausedAll ?? false;
+  const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
+  const claudeAccountsDisabled =
+    claudeAccountsStatus === 'disabled' || Boolean(claudeAccounts && !claudeAccounts.enabled);
+  const claudeQuotaDisabled =
+    claudeAccountsDisabled || Boolean(claudeAccounts && !claudeAccounts.quotaName.enabled);
   const accounts = claudeAccounts?.accounts ?? [];
   const reloginAccounts = accounts.filter(acc => acc.needsRelogin);
   const lowestClaudePct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
@@ -126,12 +132,26 @@ function ProvidersPage({
         <Btn
           danger={!pausedAll}
           primary={pausedAll}
+          disabled={!machineSettings || Boolean(machineSettingsError)}
+          busy={pauseBusy}
           label={pausedAll ? '恢复自动化' : '暂停全部自动化'}
-          onPress={() =>
-            void control.pauseAll(!pausedAll).catch(e => setActionError(errorMessage(e)))
-          }
+          onPress={() => {
+            if (!machineSettings || machineSettingsError || pauseBusy) return;
+            setActionError(null);
+            setPauseBusy(true);
+            void control
+              .pauseAll(!pausedAll)
+              .catch(e => setActionError(errorMessage(e)))
+              .finally(() => setPauseBusy(false));
+          }}
         />
       </View>
+
+      {machineSettingsError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取本机设置失败：{machineSettingsError}</Text>
+        </Notice>
+      ) : null}
 
       {actionError ? (
         <Notice tone="danger">
@@ -178,15 +198,15 @@ function ProvidersPage({
           trailing={<Btn small primary label="添加账号" onPress={() => onOpenDrawer('add-claude')} />}
           description="添加本机 Claude 账号，查看登录状态并改名。"
           kv={
-            claudeAccountsStatus === 'disabled' ? (
+            claudeAccountsStatus === 'error' || Boolean(claudeError) ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{claudeError ?? '无法读取账号状态'}</Text>
+              </>
+            ) : claudeAccountsDisabled ? (
               <>
                 <Chip label="未启用" tone="neutral" />
                 <Text style={s.small}>等待模块启用</Text>
-              </>
-            ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
-              <>
-                <Chip label="读取失败" tone="danger" />
-                <Text style={s.small}>读取失败：{claudeAccountsError ?? '无法读取账号状态'}</Text>
               </>
             ) : !claudeAccounts ? (
               <Text style={s.small}>正在读取…</Text>
@@ -252,15 +272,15 @@ function ProvidersPage({
           title="Claude 名称带额度"
           description="在会话的 Claude 名称后显示 5 小时与 7 天剩余百分比。"
           kv={
-            claudeAccountsStatus === 'disabled' ? (
+            claudeAccountsStatus === 'error' || Boolean(claudeError) ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{claudeError ?? '无法读取额度状态'}</Text>
+              </>
+            ) : claudeQuotaDisabled ? (
               <>
                 <Chip label="未启用" tone="neutral" />
                 <Text style={s.small}>等待模块启用</Text>
-              </>
-            ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
-              <>
-                <Chip label="读取失败" tone="danger" />
-                <Text style={s.small}>读取失败：{claudeAccountsError ?? '无法读取额度状态'}</Text>
               </>
             ) : !claudeAccounts ? (
               <Text style={s.small}>正在读取…</Text>
@@ -269,8 +289,7 @@ function ProvidersPage({
                 label={lowestClaudePct !== null ? `当前最低 ${lowestClaudePct}%` : '按账号显示 5h / 7d 额度'}
                 tone={lowestClaudePct !== null && lowestClaudePct < 20 ? 'warning' : 'success'}
               />
-            )
-          }
+            )}
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('claude-quota')} />}
         />
 
@@ -279,7 +298,7 @@ function ProvidersPage({
           trailing={
             <Switch
               accessibilityLabel="新建会话默认设置"
-              disabled={!defaults}
+              disabled={!defaults || Boolean(defaultsError || defaults.error)}
               value={defaults?.enabled ?? false}
               onValueChange={enabled =>
                 void control.saveDefaults({ enabled }).catch(e => setActionError(errorMessage(e)))

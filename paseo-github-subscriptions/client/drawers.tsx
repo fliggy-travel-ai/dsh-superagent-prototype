@@ -149,7 +149,8 @@ function ClaudeAccountsDrawer({
 
   return (
     <View style={{ gap: 12 }}>
-      {claudeAccountsStatus === 'disabled' ? (
+      {claudeAccountsStatus === 'disabled' ||
+      (claudeAccounts && !claudeAccounts.enabled && !claudeAccounts.error) ? (
         <Notice tone="neutral">
           <Text style={s.text}>Claude 账号与额度模块未启用（等待对应服务端模块合并或开启）。</Text>
         </Notice>
@@ -596,6 +597,12 @@ function ClaudeQuotaDrawer() {
     useControlState();
   const autoCont = claudeAccounts?.quotaName.autoResumeDefault ?? false;
   const lowestPct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
+  const quotaError = claudeAccountsError ?? claudeAccounts?.error ?? null;
+  const hasQuotaError = claudeAccountsStatus === 'error' || Boolean(quotaError);
+  const quotaDisabled =
+    !hasQuotaError &&
+    (claudeAccountsStatus === 'disabled' ||
+      Boolean(claudeAccounts && (!claudeAccounts.enabled || !claudeAccounts.quotaName.enabled)));
   const [err, setErr] = useState<string | null>(null);
 
   const update = async (patch: { autoResumeDefault?: boolean }) => {
@@ -609,23 +616,23 @@ function ClaudeQuotaDrawer() {
 
   return (
     <View style={{ gap: 14 }}>
-      {claudeAccountsStatus === 'disabled' ? (
+      {hasQuotaError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>读取失败：{quotaError ?? '无法读取 Claude 额度状态'}</Text>
+        </Notice>
+      ) : quotaDisabled ? (
         <Notice tone="neutral">
           <Text style={s.text}>Claude 额度模块未启用（等待对应服务端模块合并或开启）。</Text>
-        </Notice>
-      ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取失败：{claudeAccountsError ?? '无法读取 Claude 额度状态'}</Text>
         </Notice>
       ) : null}
       <TableRow
         first
         cells={[
           '名称显示额度',
-          claudeAccountsStatus === 'disabled' ? (
-            <Chip key="st" label="未启用" tone="neutral" />
-          ) : claudeAccountsStatus === 'error' || claudeAccountsError ? (
+          hasQuotaError ? (
             <Chip key="st" label="读取失败" tone="danger" />
+          ) : quotaDisabled ? (
+            <Chip key="st" label="未启用" tone="neutral" />
           ) : !claudeAccounts ? (
             <Chip key="st" label="正在读取" tone="neutral" />
           ) : (
@@ -641,7 +648,7 @@ function ClaudeQuotaDrawer() {
         <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
         <Switch
           accessibilityLabel="新建 Claude 会话默认开启自动继续"
-          disabled={!claudeAccounts || claudeAccountsStatus !== 'ready'}
+          disabled={!claudeAccounts || claudeAccountsStatus !== 'ready' || hasQuotaError || quotaDisabled}
           value={autoCont}
           onValueChange={val => void update({ autoResumeDefault: val })}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
@@ -692,6 +699,7 @@ function SessionDefaultsDrawer() {
 
   const rules = defaults?.rules ?? [];
   const enabled = defaults?.enabled ?? false;
+  const hasDefaultsError = Boolean(defaultsError || defaults?.error);
 
   const saveRules = async (next: AgentDefaultRule[], nextEnabled?: boolean) => {
     setBusy(true);
@@ -710,7 +718,7 @@ function SessionDefaultsDrawer() {
 
   const addRule = async () => {
     const p = newProvider.trim();
-    if (!p) return;
+    if (!p || hasDefaultsError) return;
     const rule: AgentDefaultRule = {
       provider: p,
       apply: 'missing',
@@ -734,7 +742,7 @@ function SessionDefaultsDrawer() {
         <Switch
           accessibilityLabel="启用新建会话默认设置"
           value={enabled}
-          disabled={!defaults || busy}
+          disabled={!defaults || hasDefaultsError || busy}
           onValueChange={val => void saveRules(rules, val)}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
           thumbColor={theme.colors.accentForeground}
@@ -772,7 +780,7 @@ function SessionDefaultsDrawer() {
                     key="sw"
                     accessibilityLabel={`规则 ${providerText}`}
                     value={rule.enabled !== false}
-                    disabled={busy}
+                    disabled={hasDefaultsError || busy}
                     onValueChange={val => {
                       const next = rules.map((item, i) => (i === idx ? { ...item, enabled: val } : item));
                       void saveRules(next);
@@ -823,7 +831,12 @@ function SessionDefaultsDrawer() {
           label={newAutoApprove ? '自动授权：开启' : '自动授权：不改'}
           onPress={() => setNewAutoApprove(v => !v)}
         />
-        <Btn primary label="添加规则" disabled={!defaults || !newProvider.trim() || busy} onPress={() => void addRule()} />
+        <Btn
+          primary
+          label="添加规则"
+          disabled={!defaults || hasDefaultsError || !newProvider.trim() || busy}
+          onPress={() => void addRule()}
+        />
       </View>
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
@@ -1626,19 +1639,31 @@ function GithubConfigDrawer() {
   const { s, store, openSettings, theme } = useUi();
   const { snapshot, error } = useStoreState();
   const prefs = snapshot?.preferences ?? null;
+  const serializedPrefs = prefs ? JSON.stringify(prefs) : '';
+  const [prevSerialized, setPrevSerialized] = useState(serializedPrefs);
+  const [dirty, setDirty] = useState(false);
   const [draft, setDraft] = useState<Preferences | null>(prefs);
   const [excludedText, setExcludedText] = useState(prefs ? prefs.excludedRepos.join(', ') : '');
   const [extraText, setExtraText] = useState(prefs ? prefs.extraRepos.join(', ') : '');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (snapshot?.preferences) {
-      setDraft(snapshot.preferences);
-      setExcludedText(snapshot.preferences.excludedRepos.join(', '));
-      setExtraText(snapshot.preferences.extraRepos.join(', '));
+  if (serializedPrefs && serializedPrefs !== prevSerialized) {
+    setPrevSerialized(serializedPrefs);
+    if (!dirty && prefs) {
+      setDraft(prefs);
+      setExcludedText(prefs.excludedRepos.join(', '));
+      setExtraText(prefs.extraRepos.join(', '));
     }
-  }, [snapshot?.preferences]);
+  }
+
+  useEffect(() => {
+    if (prefs && !dirty) {
+      setDraft(prefs);
+      setExcludedText(prefs.excludedRepos.join(', '));
+      setExtraText(prefs.extraRepos.join(', '));
+    }
+  }, [serializedPrefs, dirty]);
 
   const save = async () => {
     if (!draft) return;
@@ -1657,6 +1682,7 @@ function GithubConfigDrawer() {
           .filter(Boolean),
       };
       await store.savePreferences(next);
+      setDirty(false);
       setMsg('GitHub 订阅设置已保存');
     } catch (failure) {
       setMsg(errorMessage(failure));
@@ -1685,7 +1711,10 @@ function GithubConfigDrawer() {
             { value: 'shadow', label: '影子（只记日志）' },
           ]}
           value={draft.shadow ? 'shadow' : 'live'}
-          onChange={val => setDraft(prev => (prev ? { ...prev, shadow: val === 'shadow' } : prev))}
+          onChange={val => {
+            setDirty(true);
+            setDraft(prev => (prev ? { ...prev, shadow: val === 'shadow' } : prev));
+          }}
         />
       </View>
       <View style={s.stack}>
@@ -1694,7 +1723,10 @@ function GithubConfigDrawer() {
           accessibilityLabel="GitHub 组织"
           style={s.input}
           value={draft.organization}
-          onChangeText={organization => setDraft(prev => (prev ? { ...prev, organization } : prev))}
+          onChangeText={organization => {
+            setDirty(true);
+            setDraft(prev => (prev ? { ...prev, organization } : prev));
+          }}
           autoCapitalize="none"
         />
       </View>
@@ -1704,7 +1736,10 @@ function GithubConfigDrawer() {
           accessibilityLabel="排除仓库"
           style={s.input}
           value={excludedText}
-          onChangeText={setExcludedText}
+          onChangeText={text => {
+            setDirty(true);
+            setExcludedText(text);
+          }}
           placeholder="例如 archive-repo"
           placeholderTextColor={theme.colors.foregroundMuted}
           autoCapitalize="none"
@@ -1716,7 +1751,10 @@ function GithubConfigDrawer() {
           accessibilityLabel="额外仓库"
           style={s.input}
           value={extraText}
-          onChangeText={setExtraText}
+          onChangeText={text => {
+            setDirty(true);
+            setExtraText(text);
+          }}
           placeholder="例如 org/repo"
           placeholderTextColor={theme.colors.foregroundMuted}
           autoCapitalize="none"
@@ -1735,7 +1773,8 @@ function GithubConfigDrawer() {
                 { value: 'skip', label: '跳过本轮' },
               ]}
               value={current}
-              onChange={policy =>
+              onChange={policy => {
+                setDirty(true);
                 setDraft(prev =>
                   prev
                     ? {
@@ -1743,8 +1782,8 @@ function GithubConfigDrawer() {
                         providerPolicies: { ...prev.providerPolicies, [provider]: policy },
                       }
                     : prev,
-                )
-              }
+                );
+              }}
             />
           </View>
         );
