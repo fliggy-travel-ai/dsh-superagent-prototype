@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const run = promisify(execFile);
 const fixture = fileURLToPath(new URL('./fixtures/isolation/run.mjs', import.meta.url));
-for (const scenario of ['cloud-fails', 'github-fails', 'github-runtime-fails', 'automation-fails', 'presence-fails', 'browser-fails']) {
+for (const scenario of ['cloud-fails', 'github-fails', 'github-runtime-fails', 'presence-fails', 'browser-fails']) {
   test(`plugin module isolation: ${scenario}`, async () => {
     const result = await run(process.execPath, ['--experimental-test-module-mocks', '--experimental-strip-types', fixture, scenario], { timeout: 30_000 });
     assert.equal(result.stdout, '');

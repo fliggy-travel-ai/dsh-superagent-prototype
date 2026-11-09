@@ -50,9 +50,12 @@ test('关闭自动点击时立即停止，重新开启后处理当前权限窗�
   await fixture.toggle(false); fixture.scope.innerText = 'Claude needs permission for a new command'; await fixture.scan(); assert.equal(fixture.count(), 1);
 });
 
-test('永久授权开关、计划正文和选择控件不触发权限点击', async () => {
-  for (const options of [{ checked: true }, { outerChecked: true }, { outerPlan: true }, { title: 'Allow', text: 'Permission required. Remember this choice. Allow Deny' }, { title: 'Approve', text: 'Implement permission checks. Approve Reject' }, { text: 'Plan: update permissions. Allow once Deny' }, { radio: true }, { storageFailure: true }]) {
+test('永久授权按钮、禁用按钮、代码正文或单选框不触发权限点击；计划/推荐/记住选择文案不误拦普通授权', async () => {
+  for (const options of [{ checked: true }, { outerChecked: true }, { title: 'Approve', text: 'Implement permission checks. Approve Reject' }, { radio: true }, { storageFailure: true }]) {
     assert.equal((await page(options)).count(), 0, JSON.stringify(options));
+  }
+  for (const options of [{ outerPlan: true }, { title: 'Allow', text: 'Permission required. Remember this choice. Allow Deny' }, { text: 'Plan: update permissions. Allow once Deny' }, { text: 'AskUserQuestion: Allow once (Recommended) Deny' }]) {
+    assert.equal((await page(options)).count(), 1, JSON.stringify(options));
   }
   const fixture = await page({ dismissed: true });
   assert.equal(fixture.count(), 1);
@@ -65,8 +68,8 @@ test('权限按钮带快捷键符号时仍可识别', async () => {
   }
 });
 
-test('只点权限窗口，不点永久授权、禁用按钮、代码正文或选择题', async () => {
-  for (const options of [{ title: 'Always allow' }, { title: 'Allow this session' }, { disabled: true }, { excluded: true }, { withDeny: false }, { title: 'Allow', text: 'Which option do you prefer? Allow Deny' }, { text: 'AskUserQuestion: Allow once (Recommended) Deny' }, { origin: 'https://other.example' }, { title: 'Approve', text: 'Choose an answer: Approve Deny' }]) {
+test('只点权限窗口，不点永久授权、禁用按钮、代码正文或非权限按钮', async () => {
+  for (const options of [{ title: 'Always allow' }, { title: 'Allow this session' }, { disabled: true }, { excluded: true }, { withDeny: false }, { origin: 'https://other.example' }, { title: 'Approve', text: 'Choose an answer: Approve Deny' }]) {
     const fixture = await page(options); assert.equal(fixture.count(), 0, JSON.stringify(options));
   }
   const generic = await page({ title: 'Allow', text: 'Allow Claude to run this command? Allow Deny' }); assert.equal(generic.count(), 1);
@@ -2160,12 +2163,12 @@ test('阅读门槛：滚动后提示仍在时不点 Allow once，记 skipped / r
   assert.ok(run.results.length <= 36, `重试次数 ${run.results.length} 超过单卡上限`);
 });
 
-test('阅读门槛：不符合自动批准条件的卡片不滚动也不点击', async () => {
+test('阅读门槛：卡片带默认勾选的记住选择框时先取消勾选再滚到底并点 Allow once', async () => {
   const run = await runReadGateScenario({ clearsOnScroll: true, persistentChecked: true });
-  assert.equal(run.rows.scrollTop, 0);
-  assert.equal(run.scrollEvents.length, 0);
-  assert.equal(run.allowOnce.clicks, 0);
-  assert.deepEqual(run.results, []);
+  assert.ok(run.rows.scrollTop + run.rows.clientHeight >= run.rows.scrollHeight, '参数区没有滚到底');
+  assert.equal(run.allowOnce.clicks, 1);
+  assert.equal(run.deny.clicks, 0);
+  assert.deepEqual(run.results, [{ status: 'dismissed', readGate: 'read_gate_scrolled' }]);
 });
 
 test('后台把阅读门槛结果 readGate 写进点同意记录并随同步上报', async () => {
@@ -2210,15 +2213,224 @@ test('后台把阅读门槛结果 readGate 写进点同意记录并随同步上�
   assert.equal(BrowserApprovalSchema.safeParse({ sessionId: 'abc', reservationId: 'r', digest, button: 'Allow once', at: new Date().toISOString(), status: 'dismissed', readGate: 'other' }).success, false);
 });
 
-test('阅读门槛：滚动后卡片内容变化，完整复核不通过（出现已勾选的永久授权或敏感内容）时不点击，记 skipped', async () => {
-  for (const change of [
-    (card: DomNode) => { card.appendChild(new DomNode('input', { type: 'checkbox', role: 'checkbox', 'aria-checked': 'true' }, [])); },
-    (card: DomNode) => { card.appendChild(new DomNode('p', {}, ['Plan: proceed with ExitPlanMode'])); },
-  ]) {
-    const run = await runReadGateScenario({ clearsOnScroll: true, changeOnScroll: change });
-    assert.equal(run.allowOnce.clicks, 0);
-    assert.equal(run.deny.clicks, 0);
-    assert.ok(run.results.length >= 1);
-    assert.ok(run.results.every(result => result.status === 'skipped' && !result.readGate), JSON.stringify(run.results));
+test('阅读门槛：滚动后出现 Plan/remember 或默认勾选框时仍自动取消勾选并批准；若变成提问卡则不点击且记 skipped', async () => {
+  let checkbox: DomNode | null = null;
+  const planAndCheckboxRun = await runReadGateScenario({
+    clearsOnScroll: true,
+    changeOnScroll: (card: DomNode) => {
+      checkbox = new DomNode('input', { type: 'checkbox', role: 'checkbox', 'aria-checked': 'true' }, []);
+      card.appendChild(checkbox);
+      card.appendChild(new DomNode('p', {}, ['Plan: proceed with ExitPlanMode, AskUserQuestion (Recommended) 请选择 Always allow remember this choice']));
+    },
+  });
+  assert.equal(checkbox!.clicks, 1);
+  assert.equal(checkbox!.getAttribute('aria-checked'), 'false');
+  assert.equal(planAndCheckboxRun.allowOnce.clicks, 1);
+  assert.equal(planAndCheckboxRun.deny.clicks, 0);
+  assert.deepEqual(planAndCheckboxRun.results, [{ status: 'dismissed', readGate: 'read_gate_scrolled' }]);
+
+  const morphedToQuestionRun = await runReadGateScenario({
+    clearsOnScroll: true,
+    changeOnScroll: (card: DomNode) => {
+      card.appendChild(new DomNode('button', { 'data-question-answer': '0' }, ['Option A']));
+    },
+  });
+  assert.equal(morphedToQuestionRun.allowOnce.clicks, 0);
+  assert.equal(morphedToQuestionRun.deny.clicks, 0);
+  assert.ok(morphedToQuestionRun.results.every(result => result.status === 'skipped' && !result.readGate));
+});
+
+test('1737-remove-automation：结构识别权限卡不受 plan/AskUserQuestion/always/16000 字符限制且先取消勾选框；提问卡永不自动点；总开关同步到扩展', async () => {
+  const directFixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-mcp-direct.json', import.meta.url), 'utf8'));
+  const singleQ = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-single.json', import.meta.url), 'utf8'));
+  const multiQ = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-multi.json', import.meta.url), 'utf8'));
+  const pagedQ = JSON.parse(await readFile(new URL('./fixtures/claude-web/question-paged-1.json', import.meta.url), 'utf8'));
+
+  // 1. 权限卡含 plan、AskUserQuestion、请选择、always、remember、超 16000 字符参数，且按钮为普通 Allow，带已勾选 checkbox：先取消勾选再点 Allow
+  const card = DomNode.fromTuple(directFixture.tree);
+  const titleRegion = card.querySelector('[data-testid="approval-title-region"]')!;
+  titleRegion.setText('Plan: proceed with ExitPlanMode & AskUserQuestion (Recommended) 请选择 Which option Remember this choice Always allow ' + 'x'.repeat(18000));
+  const allowBtn = card.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+  allowBtn.setText('Allow ⌘⏎');
+  const cardRoot = card.querySelector('[data-approval-card-root]')!;
+  const rememberBox = new DomNode('div', { role: 'checkbox', 'aria-checked': 'true' }, ['Remember this choice']);
+  cardRoot.appendChild(rememberBox);
+
+  // 同时页面存在真实提问卡（甚至其中一个选项文字带 Allow once / Deny）
+  const q1 = DomNode.fromTuple(singleQ.tree);
+  const q2 = DomNode.fromTuple(multiQ.tree);
+  const q3 = DomNode.fromTuple(pagedQ.tree);
+  const trickyQ = DomNode.fromTuple(singleQ.tree);
+  const trickyButtons = trickyQ.querySelectorAll('button');
+  trickyButtons[0]!.setText('Allow once');
+  trickyButtons[1]!.setText('Deny');
+
+  const body = new DomNode('body', {}, []);
+  body.appendChild(q1);
+  body.appendChild(q2);
+  body.appendChild(q3);
+  body.appendChild(trickyQ);
+  body.appendChild(card);
+  const html = new DomNode('html', {}, []);
+  html.appendChild(body);
+
+  let enabledFlag = true;
+  let onStorageChanged: (changes: any, area: string) => void = () => {};
+  const timers: Array<() => void> = [];
+  let uuid = 0;
+
+  const context = {
+    document: { documentElement: html, body, activeElement: body, querySelectorAll: (sel: string) => html.querySelectorAll(sel), querySelector: (sel: string) => html.querySelector(sel) },
+    location: { origin: 'https://claude.ai', pathname: '/code/session_struct123' },
+    chrome: {
+      storage: {
+        local: { get: async () => ({ approvalEnabled: enabledFlag }) },
+        onChanged: { addListener: (fn: typeof onStorageChanged) => { onStorageChanged = fn; } },
+      },
+      runtime: {
+        sendMessage: async (message: any) => {
+          if (message.type === 'approval-reserve') return { allowed: enabledFlag, reservationId: `res-${++uuid}` };
+          return { allowed: true };
+        },
+      },
+    },
+    crypto: { randomUUID: () => `struct-uuid-${++uuid}`, subtle: { digest: async (_alg: string, data: Uint8Array) => createHash('sha256').update(data).digest() } },
+    TextEncoder, Uint8Array,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    MutationObserver: class { observe() {} },
+    setTimeout: (fn: () => void) => { timers.push(fn); }, setInterval: () => {}, Date, WeakMap,
+  };
+
+  const clickOrder: string[] = [];
+  rememberBox.onClick = () => {
+    clickOrder.push('uncheck-remember');
+    rememberBox.setAttribute('aria-checked', 'false');
+  };
+  allowBtn.onClick = () => {
+    clickOrder.push('click-allow');
+    card.parentElement = null;
+  };
+
+  runInNewContext(source, context);
+  for (let step = 0; step < 25; step++) {
+    while (timers.length) timers.shift()!();
+    await Promise.resolve();
+  }
+
+  // 提问卡里的任何按钮都不能被点击
+  for (const qCard of [q1, q2, q3, trickyQ]) {
+    for (const btn of qCard.querySelectorAll('button')) {
+      assert.equal(btn.clicks, 0, `提问卡按钮不应被点击：${btn.innerText}`);
+    }
+  }
+  // 权限卡先取消勾选框，再点 Allow
+  assert.deepEqual(clickOrder, ['uncheck-remember', 'click-allow']);
+  assert.equal(rememberBox.clicks, 1);
+  assert.equal(allowBtn.clicks, 1);
+
+  // 2. 验证 BrowserBridge 总开关（enabled: false/true）通过 /sync 同步到 background.js 的 approvalEnabled，关闭时不点
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createServer } = await import('node:net');
+  const { BrowserBridge } = await import('../server/browser-bridge.ts');
+  const backgroundSource = await readFile(new URL('../browser-extension/background.js', import.meta.url), 'utf8');
+
+  const getPort = async () => {
+    const srv = createServer();
+    await new Promise<void>(r => srv.listen(0, '127.0.0.1', r));
+    const p = (srv.address() as { port: number }).port;
+    await new Promise<void>(r => srv.close(() => r()));
+    return p;
+  };
+
+  const dir = await mkdtemp(join(tmpdir(), 'browser-switch-sync-'));
+  const bridge = new BrowserBridge(dir, async () => null);
+  try {
+    await bridge.start();
+    const p = await getPort();
+    await bridge.configure({ enabled: true, port: p });
+    const pairing = await bridge.pairing();
+
+    const bgState: Record<string, any> = {
+      instanceId: 'inst-sync',
+      instanceName: '测试浏览器',
+      pairing,
+      approvalAudit: [],
+    };
+    let startupFn: () => void = () => {};
+    let bgMsgFn: any = null;
+    const extOrigin = `chrome-extension://${'a'.repeat(32)}`;
+    const bgChrome = {
+      storage: {
+        local: {
+          get: async (keys: any) => typeof keys === 'string' ? { [keys]: bgState[keys] } : Array.isArray(keys) ? Object.fromEntries(keys.map(k => [k, bgState[k]])) : { ...bgState },
+          set: async (vals: Record<string, any>) => {
+            Object.assign(bgState, vals);
+            if ('approvalEnabled' in vals) {
+              enabledFlag = vals.approvalEnabled !== false;
+              onStorageChanged({ approvalEnabled: { newValue: vals.approvalEnabled } }, 'local');
+            }
+          },
+        },
+        onChanged: { addListener: () => {} },
+      },
+      tabs: {
+        query: async () => [{ id: 1, windowId: 1, groupId: -1, url: 'https://claude.ai/code/session_struct123' }],
+        sendMessage: async () => ({ title: '测试会话' }),
+        group: async () => 1,
+        onUpdated: { addListener: () => {} },
+        onRemoved: { addListener: () => {} },
+      },
+      tabGroups: {
+        get: async () => ({ id: 1, windowId: 1, title: '测试会话' }),
+        update: async () => ({}),
+        onUpdated: { addListener: () => {} },
+        onRemoved: { addListener: () => {} },
+      },
+      runtime: {
+        onStartup: { addListener: (fn: () => void) => { startupFn = fn; } },
+        onInstalled: { addListener: () => {} },
+        onMessage: { addListener: (fn: any) => { bgMsgFn = fn; } },
+      },
+      alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+      scripting: {},
+    };
+
+    runInNewContext(backgroundSource, {
+      chrome: bgChrome,
+      fetch: (url: string, init: any) => fetch(url, { ...init, headers: { ...init.headers, origin: extOrigin } }),
+      crypto: { randomUUID: () => `sync-uuid-${++uuid}` },
+      AbortSignal, Map, Object, String, Number, Array, URL, Date, Promise, JSON, Set,
+      setTimeout: (fn: () => void, d: number) => (d >= 2000 ? 0 : setTimeout(fn, d)),
+      clearTimeout,
+    });
+
+    await new Promise(r => setTimeout(r, 80));
+    assert.equal(bgState.approvalEnabled, true);
+
+    // 关闭插件里的“网页版 claude.ai”总开关，触发扩展同步
+    await bridge.configure({ enabled: false, port: p });
+    startupFn();
+    await new Promise(r => setTimeout(r, 80));
+    assert.equal(bgState.approvalEnabled, false, '插件关闭总开关后应同步 approvalEnabled=false 到扩展');
+
+    // 总开关关闭时，后台拒绝 approval-reserve，内容脚本也不点击新权限卡
+    const reserveWhenOff = await new Promise<any>(resolve => {
+      bgMsgFn({ type: 'approval-reserve', digest: 'c'.repeat(64), button: 'Allow once' }, { tab: { id: 1, url: 'https://claude.ai/code/session_struct123' } }, resolve);
+    });
+    assert.equal(reserveWhenOff.allowed, false);
+
+    const cardWhenOff = DomNode.fromTuple(directFixture.tree);
+    body.appendChild(cardWhenOff);
+    const allowWhenOff = cardWhenOff.querySelectorAll('button').find(b => b.innerText.includes('Allow once'))!;
+    for (let step = 0; step < 20; step++) {
+      while (timers.length) timers.shift()!();
+      await Promise.resolve();
+    }
+    assert.equal(allowWhenOff.clicks, 0, '总开关关闭时不应点击权限卡');
+  } finally {
+    await bridge.stop();
+    await rm(dir, { recursive: true, force: true });
   }
 });

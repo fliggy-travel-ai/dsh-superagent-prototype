@@ -3,7 +3,6 @@ import { cloudSessionModule } from './providers-cloud-session/index.ts';
 import { antigravityModule } from './providers-antigravity/index.ts';
 import { cloudGatewayModule } from './providers-cloud-gateway/index.ts';
 import { githubModule } from './github/index.ts';
-import { automationModule } from './answer-automation/index.ts';
 import { presenceModule } from './answer-presence/index.ts';
 import { browserModule } from './answer-browser/index.ts';
 import { stalledModule } from './todo-stalled/index.ts';
@@ -23,7 +22,6 @@ export const MODULES: readonly Module<any>[] = [
   antigravityModule,
   cloudGatewayModule,
   githubModule,
-  automationModule,
   presenceModule,
   browserModule,
   stalledModule,

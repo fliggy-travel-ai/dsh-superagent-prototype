@@ -21,7 +21,6 @@ export type DrawerId =
   | 'escalation'
   | 'quiet-children'
   | 'speech'
-  | 'approval'
   | 'github-config';
 
 const DRAWER_TITLES: Record<DrawerId, string> = {
@@ -33,7 +32,6 @@ const DRAWER_TITLES: Record<DrawerId, string> = {
   escalation: '升级通知',
   'quiet-children': '子会话免提醒',
   speech: '语音提醒',
-  approval: '精确授权',
   'github-config': 'GitHub 订阅设置',
 };
 
@@ -110,11 +108,12 @@ function StepRow(props: { num: number; title: string; children?: ReactNode }) {
 
 function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const { s, control, theme } = useUi();
-  const { browser, browserError, automation, claudeAccounts, claudeAccountsStatus, claudeAccountsError, moduleReloading } = useControlState();
+  const { browser, browserError, paseoSessions, claudeAccounts, claudeAccountsStatus, claudeAccountsError, moduleReloading } = useControlState();
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [pairingText, setPairingText] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
+  const bindTargets = paseoSessions.length > 0 ? paseoSessions : (browser?.paseoSessions ?? []);
 
   const instances =
     browser?.instances && browser.instances.length > 0
@@ -194,7 +193,12 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
       </View>
       {pairingText ? <Text style={s.mono}>{pairingText}</Text> : null}
 
-      <Pressable onPress={() => setShowAdvanced(prev => !prev)} style={{ paddingVertical: 6 }}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="高级：网页会话与 Paseo 会话绑定"
+        onPress={() => setShowAdvanced(prev => !prev)}
+        style={{ paddingVertical: 6 }}
+      >
         <Text style={s.muted}>{showAdvanced ? '▾' : '▸'} 高级：网页会话与 Paseo 会话绑定</Text>
       </Pressable>
       {showAdvanced ? (
@@ -206,7 +210,7 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                 {sess.instanceName} · {sess.title}
               </Text>
               <View style={s.wrap}>
-                {(automation?.sessions ?? []).slice(0, 2).map(target => (
+                {bindTargets.slice(0, 2).map(target => (
                   <Btn
                     key={target.id}
                     small
@@ -1064,95 +1068,6 @@ function SpeechDrawer() {
   );
 }
 
-function ApprovalDrawer() {
-  const { s, control } = useUi();
-  const { automation, automationError } = useControlState();
-  const policies = automation?.policies ?? [];
-  const sessions = automation?.sessions ?? [];
-
-  return (
-    <View style={{ gap: 12 }}>
-      {automationError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取失败：{automationError}</Text>
-        </Notice>
-      ) : null}
-      <SectionTitle>本机策略</SectionTitle>
-      {automationError ? (
-        <Text style={s.muted}>读取失败：{automationError}</Text>
-      ) : !automation ? (
-        <Text style={s.muted}>正在读取授权策略…</Text>
-      ) : policies.length === 0 ? (
-        <Text style={s.muted}>当前没有配置跨重启精确授权策略。</Text>
-      ) : (
-        <View>
-          <TableRow first header cells={['会话', '允许的工具', '状态', '操作']} />
-          {policies.map(pol => {
-            const sess = sessions.find(item => item.id === pol.agentId);
-            const tools = [
-              pol.tools.length ? pol.tools.join(', ') : null,
-              pol.commands.length ? `Bash (${pol.commands.join(', ')})` : null,
-            ]
-              .filter(Boolean)
-              .join(' · ');
-            return (
-              <TableRow
-                key={pol.agentId}
-                cells={[
-                  sess?.title ?? pol.agentId,
-                  <Text key="t" style={s.mono}>
-                    {tools || '未启用'}
-                  </Text>,
-                  <Chip key="st" label={pol.enabled ? '生效中' : '已停用'} tone={pol.enabled ? 'success' : 'neutral'} />,
-                  <Btn
-                    key="rm"
-                    small
-                    danger
-                    label="移除"
-                    onPress={() =>
-                      void control.policy({
-                        ...pol,
-                        enabled: false,
-                        tools: [],
-                        commands: [],
-                      })
-                    }
-                  />,
-                ]}
-              />
-            );
-          })}
-        </View>
-      )}
-      {sessions.length > 0 ? (
-        <View style={{ gap: 6 }}>
-          <SectionTitle>为运行中会话开启文件读取授权</SectionTitle>
-          <View style={s.wrap}>
-            {sessions.map(sess => (
-              <Btn
-                key={sess.id}
-                small
-                label={`授权 ${sess.title}`}
-                onPress={() =>
-                  void control.policy({
-                    agentId: sess.id,
-                    enabled: true,
-                    tools: ['Read', 'Glob', 'Grep'],
-                    commands: [],
-                  })
-                }
-              />
-            ))}
-          </View>
-        </View>
-      ) : null}
-      <RuleNote>
-        普通工具审批请在 Paseo 会话输入框顶部切换模式。此处只保留按命令名或工作区路径限制的跨重启策略。
-      </RuleNote>
-    </View>
-  );
-}
-
 export function TokenCard() {
   const { s, store, now, theme } = useUi();
   const toast = useToast();
@@ -1448,8 +1363,6 @@ export function DrawerOverlay(props: {
         return <QuietChildrenDrawer />;
       case 'speech':
         return <SpeechDrawer />;
-      case 'approval':
-        return <ApprovalDrawer />;
       case 'github-config':
         return <GithubConfigDrawer />;
     }

@@ -13,7 +13,7 @@ test('设备已保存后问答快照刷新失败，仍返回保存结果', async
 });
 import assert from 'node:assert/strict';
 import { createControlStore as createStore } from '../client/control-store.ts';
-import { makeAutomation, makeBrowser } from './ui/control-fixtures.ts';
+import { makeBrowser } from './ui/control-fixtures.ts';
 import type { PresenceSnapshot } from '../shared/presence.ts';
 import type { StalledSnapshot } from '../shared/stalled.ts';
 
@@ -34,32 +34,32 @@ function deferred<Value>() {
   return { promise, resolve };
 }
 
-test('旧快照不能覆盖新的暂停状态，写入期间不启动刷新', async () => {
-  const original = deferred<ReturnType<typeof makeAutomation>>();
-  const writing = deferred<ReturnType<typeof makeAutomation>>();
-  const initial = makeAutomation();
+test('旧快照不能覆盖新的配置状态，写入期间不启动刷新', async () => {
+  const original = deferred<ReturnType<typeof makeBrowser>>();
+  const writing = deferred<ReturnType<typeof makeBrowser>>();
+  const initial = makeBrowser();
   let snapshots = 0;
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
-    if (contract.name === 'automation.snapshot') { snapshots += 1; return original.promise; }
-    if (contract.name === 'automation.pause') return writing.promise;
-    return makeBrowser();
+    if (contract.name === 'browser.snapshot') { snapshots += 1; return original.promise; }
+    if (contract.name === 'browser.configure') return writing.promise;
+    return makePresence();
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
     const read = store.refresh();
-    const write = store.pause(true);
+    const write = store.configureBrowser({ enabled: true, port: 17373 });
     await store.refresh();
     assert.equal(snapshots, 1);
-    writing.resolve({ ...initial, paused: true });
+    writing.resolve({ ...initial, settings: { enabled: true, port: 17373 } });
     await write;
-    original.resolve({ ...initial, paused: false });
+    original.resolve({ ...initial, settings: { enabled: false, port: 17373 } });
     await read;
-    assert.equal(store.getState().automation?.paused, true);
+    assert.equal(store.getState().browser?.settings.enabled, true);
     assert.equal(store.getState().browserError, null);
   } finally { store.dispose(); }
 });
 
 test('单个模块错误不会清空其他模块，卸载后忽略在途结果', async () => {
-  const result = deferred<ReturnType<typeof makeAutomation>>();
+  const result = deferred<PresenceSnapshot>();
   let notifications = 0;
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
     if (contract.name === 'browser.snapshot') throw new Error('浏览器桥接不可用');
@@ -71,10 +71,10 @@ test('单个模块错误不会清空其他模块，卸载后忽略在途结果',
   assert.match(store.getState().browserError ?? '', /浏览器桥接不可用/);
   store.dispose();
   const count = notifications;
-  result.resolve(makeAutomation());
+  result.resolve(makePresence());
   await read;
   assert.equal(notifications, count);
-  assert.equal(store.getState().automation, null);
+  assert.equal(store.getState().presence, null);
 });
 
 test('回答提问后，较早发出的问答快照不能把提问改回待回答', async () => {
@@ -86,7 +86,7 @@ test('回答提问后，较早发出的问答快照不能把提问改回待回�
     if (contract.name === 'presence.snapshot') return original.promise;
     if (contract.name === 'presence.answer') { calls.push(input); return answered.promise; }
     if (contract.name === 'browser.snapshot') return makeBrowser();
-    return makeAutomation();
+    return { sessions: [], error: null };
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
     const read = store.refresh();
@@ -106,13 +106,12 @@ test('问答接口不可用时只记录问答错误，其他模块照常刷新',
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
     if (contract.name.startsWith('presence.')) throw new Error('未知接口 presence.snapshot');
     if (contract.name === 'browser.snapshot') return makeBrowser();
-    return makeAutomation();
+    return { sessions: [], error: null };
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
     await store.refresh();
     assert.match(store.getState().presenceError ?? '', /未知接口/);
     assert.equal(store.getState().presence, null);
-    assert.ok(store.getState().automation);
     assert.ok(store.getState().browser);
     await assert.rejects(store.configurePresence({ ...makePresence().settings, paused: true }), /未知接口/);
   } finally { store.dispose(); }

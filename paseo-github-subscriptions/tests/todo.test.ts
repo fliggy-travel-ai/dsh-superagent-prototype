@@ -641,12 +641,11 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
     },
   } as unknown as PluginServerContext;
 
-  let autoPaused = false;
   let presencePaused = false;
   let githubEnabled = false; // 原本就是关闭的！
   let escalationEnabled = true;
   let quietEnabled = true;
-  let shouldFailAutomation = false;
+  let shouldFailPresence = false;
 
   const main = {
     escalation: {
@@ -661,16 +660,10 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
         if (patch.enabled !== undefined) quietEnabled = patch.enabled;
       },
     },
-    readyAutomation: async () => ({
-      snapshot: () => ({ paused: autoPaused }),
-      pause: async (p: boolean) => {
-        if (shouldFailAutomation) throw new Error('授权模块连接失败');
-        autoPaused = p;
-      },
-    }),
     readyPresence: async () => ({
       snapshot: () => ({ settings: { mode: 'auto', paused: presencePaused, speechEnabled: true, sourceHostId: null } }),
       configure: async (s: { paused: boolean }) => {
+        if (shouldFailPresence) throw new Error('问答模块连接失败');
         presencePaused = s.paused;
       },
     }),
@@ -704,7 +697,6 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   const host = startModules(
     [
       failingMod as never,
-      noopMod('answer.automation') as never,
       noopMod('answer.presence') as never,
       noopMod('github') as never,
       noopMod('todo.stalled') as never,
@@ -741,7 +733,6 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   // 暂停全部自动化
   const pauseRes = await handlers.get('machine.settings.pause-all')!({ paused: true });
   assert.equal(pauseRes.paused, true);
-  assert.equal(autoPaused, true);
   assert.equal(presencePaused, true);
   assert.equal(githubEnabled, false);
   assert.equal(escalationEnabled, false);
@@ -756,21 +747,20 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   // 恢复全部自动化：原本 githubEnabled=false 不应被强行打开为 true！
   const resumeRes = await handlers.get('machine.settings.pause-all')!({ paused: false });
   assert.equal(resumeRes.paused, false);
-  assert.equal(autoPaused, false);
   assert.equal(presencePaused, false);
   assert.equal(githubEnabled, false, '原本关闭的 GitHub 监听恢复后仍应保持关闭');
   assert.equal(escalationEnabled, true);
   assert.equal(quietEnabled, true);
 
   // 当某个已启用模块暂停失败时，应抛错而不是返回成功，且已暂停的模块应回滚并保留暂停前的值
-  shouldFailAutomation = true;
-  await assert.rejects(() => handlers.get('machine.settings.pause-all')!({ paused: true }), /授权模块连接失败/);
-  assert.equal(presencePaused, false, '部分失败时已暂停的问答模式应回滚到暂停前的未暂停状态');
+  shouldFailPresence = true;
+  await assert.rejects(() => handlers.get('machine.settings.pause-all')!({ paused: true }), /问答模块连接失败/);
+  assert.equal(presencePaused, false, '部分失败时问答模式应保持暂停前的未暂停状态');
   assert.equal(escalationEnabled, true, '部分失败时已关闭的升级通知应回滚到暂停前的开启状态');
   assert.equal(quietEnabled, true, '部分失败时已关闭的子会话免提醒应回滚到暂停前的开启状态');
 
   // 第三轮审阅项 1：失败回滚后 → 用户手动关闭升级通知 → 再次暂停成功 → 恢复，升级通知保持关闭（不被旧 saved 重新打开）
-  shouldFailAutomation = false;
+  shouldFailPresence = false;
   escalationEnabled = false;
   await handlers.get('machine.settings.pause-all')!({ paused: true });
   assert.equal(escalationEnabled, false);
@@ -795,7 +785,7 @@ test('machine.settings.*：独立于 todo 模块注册，如实反映 modules.st
   assert.deepEqual(callOrder, ['esc:false:start', 'esc:false:end', 'esc:true:start', 'esc:true:end']);
 
   // 恢复时：若 pause-all.json 中没有保存 escalationEnabled / quietEnabled（例如从旧文件或未保存项恢复），不应把原本关闭的模块打开
-  shouldFailAutomation = false;
+  shouldFailPresence = false;
   escalationEnabled = false;
   quietEnabled = false;
   writeFileSync(
@@ -970,7 +960,6 @@ test('暂停中途崩溃后再次暂停又失败时保留 inProgress 与原值�
         'answer.escalation': true,
         'answer.quietChildren': true,
         github: true,
-        'answer.automation': true,
       },
     }),
   );
@@ -979,7 +968,6 @@ test('暂停中途崩溃后再次暂停又失败时保留 inProgress 与原值�
   let escalationEnabled = true;
   let quietEnabled = true;
   let githubEnabled = true;
-  let autoPaused = false;
   let failPresence = false;
 
   const noopMod = (id: string) => ({
@@ -1020,12 +1008,6 @@ test('暂停中途崩溃后再次暂停又失败时保留 inProgress 与原值�
         githubEnabled = next.enabled;
       },
     }),
-    readyAutomation: async () => ({
-      snapshot: () => ({ paused: autoPaused }),
-      pause: async (p: boolean) => {
-        autoPaused = p;
-      },
-    }),
   };
 
   const handlers = new Map<string, (input: any) => Promise<any>>();
@@ -1046,7 +1028,6 @@ test('暂停中途崩溃后再次暂停又失败时保留 inProgress 与原值�
       noopMod('answer.escalation') as never,
       noopMod('answer.quietChildren') as never,
       noopMod('github') as never,
-      noopMod('answer.automation') as never,
     ],
     {
       server,
@@ -1120,7 +1101,6 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
         'answer.escalation': true,
         'answer.quietChildren': true,
         github: true,
-        'answer.automation': true,
       },
     }),
   );
@@ -1129,8 +1109,7 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
   let escalationEnabled = true;
   let quietEnabled = true;
   let githubEnabled = true;
-  let autoPaused = false;
-  let shouldFailAutomation = false;
+  let shouldFailPresence = false;
 
   const noopMod = (id: string) => ({
     id,
@@ -1143,12 +1122,15 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
   const main = {
     stalledPaused: false,
     invalidateStalledCache() {},
-    readyPresence: async () => ({
-      snapshot: () => ({ settings: { mode: 'online', paused: presencePaused, speechEnabled: true, sourceHostId: null } }),
-      configure: async (next: { paused: boolean }) => {
-        presencePaused = next.paused;
-      },
-    }),
+    readyPresence: async () => {
+      if (shouldFailPresence) throw new Error('问答模块连接失败');
+      return {
+        snapshot: () => ({ settings: { mode: 'online', paused: presencePaused, speechEnabled: true, sourceHostId: null } }),
+        configure: async (next: { paused: boolean }) => {
+          presencePaused = next.paused;
+        },
+      };
+    },
     escalation: {
       snapshot: async () => ({ enabled: escalationEnabled }),
       configure: async (patch: { enabled?: boolean }) => {
@@ -1167,15 +1149,6 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
         githubEnabled = next.enabled;
       },
     }),
-    readyAutomation: async () => {
-      if (shouldFailAutomation) throw new Error('授权模块连接失败');
-      return {
-        snapshot: () => ({ paused: autoPaused }),
-        pause: async (p: boolean) => {
-          autoPaused = p;
-        },
-      };
-    },
   };
 
   const handlers = new Map<string, (input: any) => Promise<any>>();
@@ -1196,7 +1169,6 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
       noopMod('answer.escalation') as never,
       noopMod('answer.quietChildren') as never,
       noopMod('github') as never,
-      noopMod('answer.automation') as never,
     ],
     {
       server,
@@ -1222,18 +1194,16 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
   assert.equal(escalationEnabled, false);
   assert.equal(quietEnabled, false);
   assert.equal(githubEnabled, false);
-  assert.equal(autoPaused, true);
   const stateBefore = readFileSync(join(dir, 'pause-all.json'), 'utf8');
 
   // 已暂停时再次暂停且中途模块设置会失败：应直接返回，不重新执行、不回滚
-  shouldFailAutomation = true;
+  shouldFailPresence = true;
   const secondRes = await handlers.get('machine.settings.pause-all')!({ paused: true });
   assert.deepEqual(secondRes, { paused: true });
   assert.equal(presencePaused, true);
   assert.equal(escalationEnabled, false);
   assert.equal(quietEnabled, false);
   assert.equal(githubEnabled, false);
-  assert.equal(autoPaused, true);
   assert.equal(readFileSync(join(dir, 'pause-all.json'), 'utf8'), stateBefore);
 
   await host.dispose();

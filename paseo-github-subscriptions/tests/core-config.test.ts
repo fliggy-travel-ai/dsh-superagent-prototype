@@ -57,9 +57,21 @@ test('modules 不合法时报错并回到默认开关', () => {
   assert.deepEqual(loaded.section('agentDefaults'), { ok: true, value: [] });
 });
 
-test('未登记的区块不报错，留给后续模块扩展', () => {
-  const loaded = loadMachineConfig('/x/machine.json', sections, reader(JSON.stringify({ version: 1, future: { x: 1 } })));
+test('未登记的区块不报错，留给后续模块扩展；旧 machine.json 里的 answer.automation 兼容忽略', () => {
+  const loaded = loadMachineConfig(
+    '/x/machine.json',
+    sections,
+    reader(
+      JSON.stringify({
+        version: 1,
+        modules: { 'answer.automation': true, 'providers.defaults': true },
+        automation: { paused: false, policies: [] },
+        future: { x: 1 },
+      }),
+    ),
+  );
   assert.deepEqual(loaded.errors, []);
+  assert.equal(loaded.modules['providers.defaults'], true);
 });
 
 test('读取失败（非缺失）时报错且不泄露文件内容', () => {

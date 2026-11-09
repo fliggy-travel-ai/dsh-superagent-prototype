@@ -31,7 +31,6 @@ export function isModuleEnabled(
 const MODULE_DEFS = [
   { id: 'providers.defaults', label: '新建会话默认设置', defaultEnabled: false },
   { id: 'answer.presence', label: '问答模式与蓝牙', defaultEnabled: true },
-  { id: 'answer.automation', label: '精确授权', defaultEnabled: true },
   { id: 'answer.browser', label: '网页版 claude.ai', defaultEnabled: true },
   { id: 'answer.escalation', label: '升级通知', defaultEnabled: false },
   { id: 'answer.quietChildren', label: '子会话免提醒', defaultEnabled: false },
@@ -46,7 +45,6 @@ interface PauseAllState {
   paused: boolean;
   inProgress?: boolean;
   saved?: {
-    automationPaused?: boolean;
     presencePaused?: boolean;
     githubEnabled?: boolean;
     escalationEnabled?: boolean;
@@ -382,22 +380,6 @@ export function registerMachineSettingsRpcs(options: {
             if (prefs.enabled !== saved.githubEnabled) {
               await gh.preferences({ ...prefs, enabled: saved.githubEnabled });
             }
-          }
-        }
-
-        if (isRunning('answer.automation', true)) {
-          const auto = await main.readyAutomation();
-          if (paused) {
-            const before = auto.snapshot().paused;
-            if (saved.automationPaused === undefined) saved.automationPaused = before;
-            await persistProgress();
-            await auto.pause(true);
-            const restorePaused = saved.automationPaused;
-            rollbacks.push(async () => {
-              await auto.pause(restorePaused);
-            });
-          } else if (saved.automationPaused !== undefined) {
-            await auto.pause(saved.automationPaused);
           }
         }
       } catch (error) {

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { mock } from 'node:test';
 
 const mode = process.argv[2];
-assert.ok(['cloud-fails', 'github-fails', 'github-runtime-fails', 'automation-fails', 'presence-fails', 'browser-fails'].includes(mode));
+assert.ok(['cloud-fails', 'github-fails', 'github-runtime-fails', 'presence-fails', 'browser-fails'].includes(mode));
 const tempHome = mkdtempSync(join(tmpdir(), 'ghsub-isolation-'));
 process.env.PASEO_HOME = tempHome;
 process.env.PASEO_GHSUB_STATE_DIR = tempHome;
@@ -34,10 +34,8 @@ const fakeModule = (name, exportName, marker, failure) => {
   class Fake { async start() { if (mode === failure) throw new Error(`${marker} failed`); } async stop() {} snapshot() { return { marker }; } }
   mock.module(new URL(`../../../server/${name}.ts`, import.meta.url).href, { namedExports: { [exportName]: Fake } });
 };
-fakeModule('automation', 'AutomationRuntime', 'automation', 'automation-fails');
 fakeModule('presence', 'PresenceRuntime', 'presence', 'presence-fails');
 fakeModule('browser-bridge', 'BrowserBridge', 'browser', 'browser-fails');
-mock.module(new URL('../../../server/automation-port.ts', import.meta.url).href, { namedExports: { automationPort: () => ({}) } });
 class FakeHosts { async stop() {} }
 mock.module(new URL('../../../server/presence-port.ts', import.meta.url).href, { namedExports: { PresenceHosts: FakeHosts, presencePort: () => ({}) } });
 mock.module(new URL('../../../server/runtime.ts', import.meta.url).href, { namedExports: { Runtime: FakeRuntime } });
@@ -83,7 +81,6 @@ try {
   } else {
     for (const [name, marker, failure] of [
       ['subscriptions.snapshot', 'github snapshot', 'github-runtime-fails'],
-      ['automation.snapshot', 'automation', 'automation-fails'],
       ['presence.snapshot', 'presence', 'presence-fails'],
       ['browser.snapshot', 'browser', 'browser-fails'],
     ]) {

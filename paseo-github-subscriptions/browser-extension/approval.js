@@ -176,25 +176,70 @@
     prev.status = status;
     prev.lastObservedAt = now;
   }
-  function cardSafe(scope, text) {
-    if (scope.querySelector?.('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"],[role="switch"][aria-checked="true"],[aria-pressed="true"]')) return false;
-    if (scope.querySelector?.('input[type="radio"],[role="radio"],[role="radiogroup"],select,[role="listbox"]')) return false;
-    const heading = scope.querySelector?.('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
-    if (/\bplan\b|\bproceed\b|计划|方案确认/i.test(heading)) return false;
-    if (/AskUserQuestion|ExitPlanMode|\(Recommended\)|\(推荐\)|请选择|Which option|Choose an answer/i.test(text)) return false;
+  function hasCardRootAttr(node) {
+    return Boolean(
+      node &&
+        (node.matches?.('[data-approval-card-root]') ||
+          (typeof node.getAttribute === 'function' && node.getAttribute('data-approval-card-root') !== null)),
+    );
+  }
+  function isPermissionCard(scope) {
+    const root = getCardRoot(scope);
+    if (!hasCardRootAttr(root)) return false;
+    if (root.querySelector?.('button[data-question-answer]')) return false;
+    return /^Permission request:/i.test((root.getAttribute?.('aria-label') || '').trim());
+  }
+  function getCheckedControls(scope) {
+    const result = [];
+    const seen = new Set();
+    const add = node => {
+      if (node && typeof node === 'object' && !seen.has(node)) {
+        seen.add(node);
+        result.push(node);
+      }
+    };
+    const root = getCardRoot(scope);
+    for (const target of [scope, root, root?.parentElement, scope?.closest?.('[role="dialog"],dialog,form')]) {
+      if (!target) continue;
+      for (const node of target.querySelectorAll?.('input[type="checkbox"],[role="checkbox"],[role="switch"]') || []) {
+        if (node.checked === true || node.getAttribute?.('aria-checked') === 'true') add(node);
+      }
+      const single = target.querySelector?.('input[type="checkbox"]:checked,[role="checkbox"][aria-checked="true"],[role="switch"][aria-checked="true"]');
+      if (single) add(single);
+    }
+    return result;
+  }
+  function uncheckRememberControls(scope) {
+    for (const box of getCheckedControls(scope)) {
+      if (typeof box.click !== 'function') return false;
+      triggerApprovalClick(box);
+      if (box.checked === true) box.checked = false;
+      if (box.getAttribute?.('aria-checked') === 'true') box.setAttribute?.('aria-checked', 'false');
+    }
+    return getCheckedControls(scope).length === 0;
+  }
+  function cardSafe(scope) {
+    const root = getCardRoot(scope);
+    if (hasCardRootAttr(root) && !isPermissionCard(root)) return false;
+    if (scope.querySelector?.('button[data-question-answer],input[type="radio"],[role="radio"],[role="radiogroup"],select,[role="listbox"]')) return false;
+    if (getCheckedControls(scope).some(box => typeof box.click !== 'function')) return false;
     return true;
   }
   function eligible(button, scope, text) {
-    if (button.disabled || button.getAttribute('aria-disabled') === 'true' || !visible(button) || !cardSafe(scope, text)) return false;
+    const buttonLabel = label(button);
+    if (button.disabled || button.getAttribute('aria-disabled') === 'true' || !visible(button) || permanent.test(buttonLabel) || !cardSafe(scope, text)) return false;
     const peers = [...(scope.querySelectorAll?.('button,[role="button"]') || [])].filter(visible);
     if (!peers.some(peer => deny.test(label(peer)))) return false;
+    if (once.test(buttonLabel)) return true;
+    if (!allow.test(buttonLabel)) return false;
+    if (isPermissionCard(scope)) return true;
     const heading = scope.querySelector?.('h1,h2,h3,[role="heading"]')?.textContent || text.slice(0, 200);
-    return once.test(label(button)) || (allow.test(label(button)) && permission.test(heading) && !permanent.test(text));
+    return permission.test(heading);
   }
   function menuCardEligible(moreButton, card, text) {
     if (!card || !card.isConnected || !visible(card) || card.getAttribute?.('role') !== 'group') return false;
     if (!/^Permission request:/i.test((card.getAttribute?.('aria-label') || '').trim())) return false;
-    if (text.length > 16000 || !cardSafe(card, text)) return false;
+    if (!cardSafe(card, text)) return false;
     if (!moreButton || !moreButton.isConnected || moreButton.disabled || moreButton.getAttribute?.('aria-disabled') === 'true' || !visible(moreButton)) return false;
     if ((moreButton.getAttribute?.('aria-label') || '').trim() !== 'More allow options') return false;
     if (permanent.test(label(moreButton)) || deny.test(label(moreButton))) return false;
@@ -277,15 +322,21 @@
           if (pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) setTimeout(schedule, retryIntervalMs());
           return;
         }
-        // 滚动期间卡片可能继续流式更新：按新文字重做完整资格复核（含 cardSafe 敏感判断）。
+        // 滚动期间卡片可能继续流式更新：按新文字重做完整资格复核。
         const latest = scope.innerText || scope.textContent || '';
-        if (latest.length > 16000 || !eligible(button, scope, latest)) {
+        if ((!isPermissionCard(scope) && latest.length > 16000) || !eligible(button, scope, latest)) {
           recordCardAttempt(cardId);
           recordCardResult(cardId, 'skipped');
           await report('skipped');
           return;
         }
         readGate = 'read_gate_scrolled';
+      }
+      if (!uncheckRememberControls(scope)) {
+        recordCardAttempt(cardId);
+        recordCardResult(cardId, 'skipped');
+        await report('skipped');
+        return;
       }
       recordCardAttempt(cardId);
       triggerApprovalClick(button);
@@ -358,6 +409,12 @@
         }
         readGate = 'read_gate_scrolled';
       }
+      if (!uncheckRememberControls(card)) {
+        recordCardAttempt(cardId);
+        recordCardResult(cardId, 'skipped');
+        await report('skipped');
+        return;
+      }
       triggerApprovalClick(moreButton);
       let item = findAllowOnceMenuItem(moreButton);
       if (!item) {
@@ -395,14 +452,15 @@
     const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
     const candidates = buttons.filter(button => once.test(label(button)) || allow.test(label(button))).sort((left, right) => Number(once.test(label(right))) - Number(once.test(label(left))));
     for (const button of candidates) {
-      if (button.disabled || button.getAttribute('aria-disabled') === 'true' || button.closest('a,p,pre,code,blockquote,aside,[role="radiogroup"]')) continue;
+      if (button.disabled || button.getAttribute('aria-disabled') === 'true' || button.closest('a,p,pre,code,blockquote,aside,[role="radiogroup"],[data-question-answer]')) continue;
       const cardRoot = button.closest('[data-approval-card-root]');
+      if (cardRoot && !isPermissionCard(cardRoot)) continue;
       const dialog = cardRoot || button.closest('[role="dialog"],dialog,form');
       let scope = dialog || button.parentElement;
       for (let depth = 0; scope && depth < 8; depth++, scope = scope.parentElement) {
         if (scope === document.body) break;
         const text = scope.innerText || scope.textContent || '';
-        if (text.length > 16000 || /AskUserQuestion|ExitPlanMode|\(Recommended\)|\(推荐\)|请选择|Which option|Choose an answer/i.test(text)) break;
+        if (!isPermissionCard(scope) && text.length > 16000) break;
         const peers = [...scope.querySelectorAll('button,[role="button"]')].filter(visible);
         if (!peers.some(peer => deny.test(label(peer)))) { if (dialog) break; continue; }
         if (!eligible(button, scope, text)) break;
@@ -417,7 +475,7 @@
     );
     for (const card of cards) {
       const text = card.innerText || card.textContent || '';
-      if (text.length > 16000 || !cardSafe(card, text)) continue;
+      if (!cardSafe(card, text)) continue;
       const peers = [...card.querySelectorAll('button,[role="button"]')].filter(visible);
       if (peers.some(peer => once.test(label(peer))) || !peers.some(peer => deny.test(label(peer)))) continue;
       const moreButton = peers.find(peer => (peer.getAttribute?.('aria-label') || '').trim() === 'More allow options' && !peer.disabled && peer.getAttribute?.('aria-disabled') !== 'true');

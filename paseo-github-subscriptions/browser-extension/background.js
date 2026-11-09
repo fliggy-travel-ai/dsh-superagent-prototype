@@ -159,7 +159,7 @@ async function dispatchDecisions(decisions, instanceId, reported) {
 let questionPoll = null;
 
 async function reconcile() {
-  const data = await chrome.storage.local.get(['instanceId', 'instanceName', 'pairing', 'groups']);
+  const data = await chrome.storage.local.get(['instanceId', 'instanceName', 'pairing', 'groups', 'approvalEnabled']);
   let instanceId = data.instanceId;
   if (!instanceId) { instanceId = crypto.randomUUID(); await chrome.storage.local.set({ instanceId }); }
   const pairing = data.pairing;
@@ -189,6 +189,7 @@ async function reconcile() {
           const activity = await chrome.tabs.sendMessage(tab.id, { type: 'read-activity' });
           if (['working', 'waiting', 'limited', 'unknown'].includes(activity?.state) && typeof activity.reason === 'string' && typeof activity.lastMessage === 'string' && Number.isFinite(Date.parse(activity.observedAt))) activities.push({ state: activity.state, reason: activity.reason.slice(0,300), lastMessage: activity.lastMessage.slice(-2000), observedAt: new Date().toISOString() });
         } catch {}
+        if (data.approvalEnabled === false) continue;
         const questions = await readQuestions(tab.id, session.sessionId);
         if (!questions) { complete = false; continue; }
         for (const question of questions) {
@@ -207,6 +208,11 @@ async function reconcile() {
     response = await fetch(pairing.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${pairing.token}` }, body: JSON.stringify({ instanceId, instanceName, sessions: [...sessions.values()].map(({ tabs: _tabs, ...s }) => s), observedSessionIds, approvals, questions: [...reported.values()].map(item => item.question), results: sentResults }), signal: AbortSignal.timeout(5000), redirect: 'error', credentials: 'omit' });
     if (!response.ok) return;
     response = await response.json();
+    if (typeof response.approvalEnabled === 'boolean' && data.approvalEnabled !== response.approvalEnabled) {
+      await chrome.storage.local.set({ approvalEnabled: response.approvalEnabled });
+      data.approvalEnabled = response.approvalEnabled;
+      if (response.approvalEnabled) schedule();
+    }
     if (!Array.isArray(response.sessions) || response.sessions.length !== sessions.size || response.sessions.some(s => !sessions.has(s.sessionId) || typeof s.groupTitle !== 'string')) return;
   } catch { return; }
   if ((await chrome.storage.local.get('instanceId')).instanceId !== instanceId) return;

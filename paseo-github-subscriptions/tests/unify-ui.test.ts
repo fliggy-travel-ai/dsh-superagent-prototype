@@ -41,12 +41,11 @@ test('第二期客户端入口：只注册 1 个主屏幕、1 个开发自动化
 test('第二期侧栏状态计算：待办只计插件待办，异常存在时标记感叹号', async () => {
   const { computeHasAlert, computeTodoCount } = await import('../client/sidebar-state.ts');
   const baseControl = {
-    automation: null,
     browser: null,
     presence: null,
+    paseoSessions: [],
     stalled: null,
     stalledError: null,
-    automationError: null,
     browserError: null,
     presenceError: null,
     modules: null,
@@ -282,7 +281,6 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
     [
       { id: 'providers.defaults', enabled: false },
       { id: 'answer.presence', enabled: true },
-      { id: 'answer.automation', enabled: true },
       { id: 'answer.browser', enabled: true },
       { id: 'answer.escalation', enabled: false },
       { id: 'answer.quietChildren', enabled: false },
@@ -578,12 +576,11 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   };
 
   const baseControlState = {
-    automation: daemon.automation,
     browser: daemon.browser,
     presence: daemon.presence,
+    paseoSessions: daemon.browser.paseoSessions ?? [],
     stalled: null,
     stalledError: null,
-    automationError: null,
     browserError: null,
     presenceError: null,
     modules: null,
@@ -793,12 +790,11 @@ test('审阅项 5/7/14：待办“打开会话”传递 serverId，网页提问�
       control: {
         subscribe: () => () => {},
         getState: () => ({
-          automation: daemon.automation,
           browser: daemon.browser,
           presence: daemon.presence,
+          paseoSessions: daemon.browser.paseoSessions ?? [],
           stalled: null,
           stalledError: null,
-          automationError: null,
           browserError: null,
           presenceError: null,
           modules: null,
@@ -1181,7 +1177,7 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
   // 第 2 & 3 & 5 项：
   // - claudeAccounts 返回 { enabled: false, accounts: [], error: '旧插件 claude-quota-resume 仍启用', quotaName: { enabled: false, ... } }
   // - defaults 返回 { enabled: false, rules: [], error: 'agentDefaults 格式错误' }
-  // - machineSettings 为 null 且 machineSettingsError 有值，automation.paused 为 true（验证不回退到 automation.paused）
+  // - machineSettings 为 null 且 machineSettingsError 有值
   const daemon = new FakeDaemon('shadow');
   daemon.latencyMs = 0;
   daemon.claudeAccounts = {
@@ -1195,7 +1191,6 @@ test('第三轮审阅 UI 修复（第 2–5 项）：Claude 快照自带 error/d
     rules: [],
     error: 'agentDefaults 格式错误',
   };
-  daemon.automation = { ...daemon.automation, paused: true };
   const origRpc = daemon.rpc.bind(daemon);
   daemon.rpc = async <I, O>(contract: { name: string }, input: I): Promise<O> => {
     if (contract.name === 'machine.settings.snapshot') {
@@ -1434,4 +1429,70 @@ test('升级通知编辑面板：没有投递模式和最近投递列表；等�
   text = collectText(tree);
   assert.match(text, /旧插件仍启用，先停用/);
   assert.equal(text.includes('读取失败'), false);
+});
+
+test('1737-remove-automation：删除精确授权卡片与模块后，问答与无人值守页不含精确授权，网页版 claude.ai 面板仍能展示 Paseo 会话列表并完成绑定', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
+  const { bind } = await import('../client/ui.tsx');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+  const mockTheme = {
+    colors: {
+      surface0: '#151517', surface1: '#1c1c1f', surface2: '#2b2b2f', border: '#303035', foreground: '#ececef', foregroundMuted: '#8e8e95',
+      accent: '#5b8cff', accentForeground: '#ffffff', statusSuccess: '#4cc274', statusWarning: '#e3a33b', statusDanger: '#ff6b66',
+    },
+  };
+  const daemon = new FakeDaemon('shadow');
+  daemon.latencyMs = 0;
+  const control = createControlStore(
+    daemon as never,
+    (async () => ({
+      entries: [
+        { agent: { id: 'agent-refund', title: '【订单退款】联调', status: 'idle', archivedAt: null } },
+        { agent: { id: 'agent-search', title: '【搜索排序】实验', status: 'running', archivedAt: null } },
+      ],
+      pageInfo: { hasMore: false },
+    })) as never,
+  );
+  await Promise.all([control.refresh(), control.refreshUnify()]);
+  const Bound = bind(
+    { store: { subscribe: () => () => {}, getState: () => ({ snapshot: daemon.state, error: null, loaded: true }) } as never, control, openScreen: () => {} },
+    MainScreen,
+  );
+  const renderer = createTestRenderer();
+
+  // 1. 问答与无人值守页不含“精确授权”卡片，本机模块列表也不含 answer.automation
+  const answerTree = renderer.render(() =>
+    React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
+  );
+  const answerText = collectText(answerTree);
+  assert.equal(answerText.includes('精确授权'), false, 'AnswerPage 不应再渲染精确授权卡片');
+  assert.equal(
+    daemon.machineSettings.modules.some(m => m.id === 'answer.automation'),
+    false,
+    '本机模块不应包含 answer.automation',
+  );
+
+  // 2. 打开网页版 claude.ai 抽屉，展开高级区，验证 Paseo 会话列表存在且点击绑定有效
+  renderer.reset();
+  let browserTree = renderer.render(() =>
+    React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer', drawer: 'browser' } } as never),
+  );
+  const advBtn = findNodes(browserTree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '高级：网页会话与 Paseo 会话绑定')[0];
+  assert.ok(advBtn, '应能展开网页版 claude.ai 高级区');
+  (advBtn.props.onPress as () => void)();
+  browserTree = renderer.render(() =>
+    React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer', drawer: 'browser' } } as never),
+  );
+  const bindBtn = findNodes(browserTree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '绑定 【搜索排序】实验')[0];
+  assert.ok(bindBtn, 'BrowserDrawer 应展示 Paseo 会话绑定按钮');
+  (bindBtn.props.onPress as () => void)();
+  await tick();
+  assert.ok(
+    daemon.browser.bindings.some(b => b.agentId === 'agent-search'),
+    '点击绑定按钮后应更新 browser.bindings',
+  );
 });

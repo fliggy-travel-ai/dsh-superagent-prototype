@@ -275,8 +275,6 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const {
     presence,
     presenceError,
-    automation,
-    automationError,
     escalation,
     escalationStatus,
     escalationError,
@@ -290,7 +288,6 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const presenceModOff = isModuleOff('answer.presence', machineSettings, modules);
-  const autoModOff = isModuleOff('answer.automation', machineSettings, modules);
   const escModOff = isModuleOff('answer.escalation', machineSettings, modules) || escalationStatus === 'disabled';
   const quietModOff = isModuleOff('answer.quietChildren', machineSettings, modules) || quietStatus === 'disabled';
 
@@ -494,25 +491,6 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('speech')} />}
-        />
-
-        <ModuleFeatureCard
-          title="精确授权"
-          moduleId="answer.automation"
-          label="启用精确授权"
-          description="跨重启保留的单会话命令和工作区路径白名单。"
-          kv={
-            autoModOff ? (
-              <ModuleOffHint />
-            ) : automationError ? (
-              <Text style={s.small}>读取失败：{automationError}</Text>
-            ) : !automation ? (
-              <Text style={s.small}>正在读取…</Text>
-            ) : (
-              <Text style={s.small}>{automation.policies.filter(p => p.enabled).length} 条策略</Text>
-            )
-          }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('approval')} />}
         />
       </View>
     </View>

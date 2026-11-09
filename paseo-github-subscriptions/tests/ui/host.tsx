@@ -63,7 +63,7 @@ export function createPreview(options: PreviewOptions) {
         },
         async list() {
           return {
-            entries: agents.map(a => ({ agent: { id: a.id, status: 'idle', archivedAt: null } })),
+            entries: agents.map(a => ({ agent: { id: a.id, title: a.title, status: 'idle', archivedAt: null } })),
             pageInfo: { hasMore: false },
           };
         },
