@@ -2,8 +2,7 @@ import type { PluginClientContext } from '@getpaseo/plugin/client';
 import { createPills } from './client/pills.ts';
 import { PillPopover } from './client/pill-popover.tsx';
 import { MainScreen } from './client/dashboard.tsx';
-import { SettingsScreen } from './client/settings/index.tsx';
-import { SidebarItem, SidebarTodoItem } from './client/sidebar-item.tsx';
+import { SidebarItem } from './client/sidebar-item.tsx';
 import { registerQuotaResume } from './client/quota-resume/register.tsx';
 import { createSnapshotStore } from './client/store.ts';
 import { createControlStore } from './client/control-store.ts';
@@ -21,7 +20,6 @@ export default function contribute(client: PluginClientContext) {
     store,
     control,
     openScreen: input => client.openScreen(input),
-    openSettings: id => client.openSettings?.(id),
   };
 
   const setPresenceMode = async (mode: 'online' | 'offline' | 'auto') => {
@@ -37,13 +35,6 @@ export default function contribute(client: PluginClientContext) {
   const removers = [
     client.addScreen({ id: 'main', title: '开发自动化', Component: bind(env, MainScreen) }),
     client.addSidebarHeaderItem({ id: 'main', title: '开发自动化', Component: bind(env, SidebarItem) }),
-    client.addSidebarHeaderItem({ id: 'todo', title: '待办', Component: bind(env, SidebarTodoItem) }),
-    client.addSettingsScreen?.({
-      id: 'dev-automation',
-      title: '开发自动化',
-      icon: 'Sliders',
-      Component: bind(env, SettingsScreen),
-    }),
     client.addCommandCenterItem?.({
       id: 'open-todo',
       title: '打开待办总览',

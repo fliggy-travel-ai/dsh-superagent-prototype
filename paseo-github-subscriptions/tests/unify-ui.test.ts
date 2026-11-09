@@ -1,25 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-test('第二期客户端入口：注册 1 个主屏幕、2 行侧栏、1 个设置页与命令面板项，去掉旧重复入口', async () => {
+test('第二期客户端入口：只注册 1 个主屏幕、1 个开发自动化侧栏入口与命令面板项，不注册独立设置页和待办侧栏项', async () => {
   const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
   installTsxAndReactNativeHooks();
   const { createPreview } = await import('./ui/host.tsx');
 
-  const { handle } = createPreview({
+  const { App, handle } = createPreview({
     scene: 'shadow',
     layout: 'wide',
     theme: 'dark',
     route: 'screen:main',
   });
+  handle.daemon.latencyMs = 0;
   try {
     assert.deepEqual([...handle.registry.screens.keys()], ['main']);
-    assert.deepEqual([...handle.registry.sidebar.keys()], ['main', 'todo']);
-    assert.deepEqual([...handle.registry.settingsScreens.keys()], ['dev-automation']);
+    assert.deepEqual([...handle.registry.sidebar.keys()], ['main']);
+    assert.deepEqual([...handle.registry.settingsScreens.keys()], []);
     assert.deepEqual(
       [...handle.registry.commands.keys()],
       ['open-todo', 'qa-mode-online', 'qa-mode-offline', 'qa-mode-auto', 'pause-all'],
     );
+    await new Promise(r => setTimeout(r, 100));
+    const renderer = createTestRenderer();
+    const tree = renderer.render(() => React.createElement(App));
+    const sidebarNodes = findNodes(
+      tree,
+      n => n.props.label === '开发自动化' && n.props.trailing !== undefined,
+    );
+    assert.equal(sidebarNodes.length, 1, '侧栏只保留一个“开发自动化”入口并带角标');
+    const trailingTree = renderer.render(() => sidebarNodes[0].props.trailing as ReactNode);
+    const trailingText = collectText(trailingTree);
+    assert.match(trailingText, /!\d+/, '“开发自动化”侧栏入口角标应同时显示异常感叹号与待办数量');
   } finally {
     handle.dispose();
   }
@@ -246,27 +258,214 @@ function createTestRenderer() {
   };
 }
 
-test('审阅项 A：预览宿主支持 route=screen:settings 并展示开发自动化设置页与 8 位指纹说明', async () => {
+test('设置页并入主页面：无独立设置页引导、凭据在对应编辑面板可设置/可移除且不显原文、本机配置卡片显示路径/校验/备份且无重复模块开关', async () => {
   const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
   installTsxAndReactNativeHooks();
-  const { createPreview } = await import('./ui/host.tsx');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const { bind } = await import('../client/ui.tsx');
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { createSnapshotStore } = await import('../client/store.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
 
-  const { App, handle } = createPreview({
-    scene: 'shadow',
-    layout: 'wide',
-    theme: 'dark',
-    route: 'screen:settings',
-  });
-  const renderer = createTestRenderer();
+  const daemon = new FakeDaemon('shadow');
+  daemon.latencyMs = 0;
+  const fakeClient = {
+    rpc: (contract: Parameters<(typeof daemon)['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
+    paseo: {
+      agents: {
+        list: async () => ({ entries: [], pageInfo: { hasMore: false } }),
+      },
+    },
+  };
+  const store = createSnapshotStore(fakeClient as never);
+  const control = createControlStore(fakeClient as never, fakeClient.paseo.agents.list as never);
+  await store.refresh();
+  await control.refresh();
+  await control.refreshUnify();
+
+  const mockTheme = {
+    colors: {
+      surface0: '#151517',
+      surface1: '#1c1c1f',
+      surface2: '#2b2b2f',
+      border: '#303035',
+      foreground: '#ececef',
+      foregroundMuted: '#8e8e95',
+      accent: '#5b8cff',
+      accentForeground: '#ffffff',
+      statusSuccess: '#4cc274',
+      statusWarning: '#e3a33b',
+      statusDanger: '#ff6b66',
+    },
+  };
+
   try {
-    const tree = renderer.render(() => React.createElement(App));
-    const text = collectText(tree);
-    assert.equal(text.includes('页面 settings 不存在'), false);
-    assert.match(text, /开发自动化设置/);
-    assert.match(text, /8 位指纹/);
-    assert.equal(text.includes('哈希后四位指纹'), false);
+    // 1. Provider 与账号页：展示“本机配置”卡片（路径、校验结果、导出备份），且无“设置 → 开发自动化”引导
+    const renderer = createTestRenderer();
+    const renderMain = (params: Record<string, string>) => {
+      const Bound = bind(
+        {
+          store,
+          control,
+          openScreen: () => {},
+        },
+        MainScreen,
+      );
+      return renderer.render(() =>
+        React.createElement(Bound as unknown as React.ComponentType<Record<string, unknown>>, {
+          theme: mockTheme,
+          host: { id: 'h1', label: 'Host' },
+          layout: { compact: false, platform: 'web' },
+          params,
+          navigation: { openAgent: () => {}, openWorkspace: () => {} },
+        }),
+      );
+    };
+
+    const providersTree = renderMain({ page: 'providers' });
+    const providersText = collectText(providersTree);
+    assert.equal(providersText.includes('设置 → 开发自动化'), false, '主页面不应再出现“设置 → 开发自动化”引导');
+    assert.match(providersText, /本机配置/);
+    assert.match(providersText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
+    assert.match(providersText, /校验通过/);
+    assert.match(providersText, /导出配置备份/);
+
+    // 点击卡片上的“导出配置备份”
+    const backupBtn = findNodes(providersTree, n => n.props.accessibilityLabel === '导出配置备份')[0];
+    assert.ok(backupBtn, '本机配置卡片应有“导出配置备份”按钮');
+    (backupBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    const afterBackupText = collectText(renderMain({ page: 'providers' }));
+    assert.match(afterBackupText, /backups\/backup-demo/);
+
+    // 2. 打开“本机配置”编辑面板（machine-config）：只显示没有对应卡片开关的模块（如待办汇总、停滞会话检查），不重复已有卡片的模块开关
+    renderer.reset();
+    const machineDrawerTree = renderMain({ page: 'providers', drawer: 'machine-config' });
+    const machineDrawerText = collectText(machineDrawerTree);
+    assert.match(machineDrawerText, /~\/\.paseo\/github-subscriptions\/machine\.json/);
+    assert.match(machineDrawerText, /配置文件格式校验通过/);
+    const todoSwitch = findNodes(machineDrawerTree, n => n.props.accessibilityLabel === '模块 待办汇总');
+    assert.equal(todoSwitch.length, 1, '本机配置抽屉应包含“待办汇总”模块开关');
+    for (const dupLabel of [
+      '模块 网页版 claude.ai',
+      '模块 新建会话默认设置',
+      '模块 升级通知',
+      '模块 子会话免提醒',
+      '模块 精确授权',
+      '模块 GitHub 订阅',
+      '模块 问答模式与蓝牙在场',
+      '模块 云端会话',
+      '模块 Claude 账号与名称带额度',
+      '模块 Antigravity',
+    ]) {
+      const dup = findNodes(machineDrawerTree, n => n.props.accessibilityLabel === dupLabel);
+      assert.equal(dup.length, 0, `不应在“本机配置”抽屉中重复出现已有卡片的模块开关：${dupLabel}`);
+    }
+
+    // 3. GitHub 订阅“监听”编辑面板（github-config）：可设置、可移除 GitHub 令牌，且不显示令牌原文
+    renderer.reset();
+    let ghDrawerTree = renderMain({ page: 'github', drawer: 'github-config' });
+    assert.equal(collectText(ghDrawerTree).includes('设置 → 开发自动化'), false);
+    assert.equal(collectText(ghDrawerTree).includes('去设置更换令牌'), false);
+    const tokenInput = findNodes(ghDrawerTree, n => n.props.accessibilityLabel === 'GitHub 令牌')[0];
+    assert.ok(tokenInput, 'GitHub 监听编辑面板应有 GitHub 令牌输入框');
+    assert.equal(tokenInput.props.secureTextEntry, true);
+    (tokenInput.props.onChangeText as (v: string) => void)('ghp_SuperSecretTokenValue987654321');
+    ghDrawerTree = renderMain({ page: 'github', drawer: 'github-config' });
+    const saveTokenBtn = findNodes(
+      ghDrawerTree,
+      n => n.props.accessibilityLabel === '更换令牌' || n.props.accessibilityLabel === '保存令牌',
+    )[0];
+    assert.ok(saveTokenBtn, '应有保存/更换令牌按钮');
+    (saveTokenBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    ghDrawerTree = renderMain({ page: 'github', drawer: 'github-config' });
+    const ghDrawerAfterSave = collectText(ghDrawerTree);
+    assert.equal(
+      ghDrawerAfterSave.includes('ghp_SuperSecretTokenValue987654321'),
+      false,
+      '界面绝不能显示 GitHub 令牌原文',
+    );
+    assert.match(ghDrawerAfterSave, /ghp_S…/);
+    const removeTokenBtn = findNodes(ghDrawerTree, n => n.props.accessibilityLabel === '移除令牌')[0];
+    assert.ok(removeTokenBtn, '应有移除令牌按钮');
+    (removeTokenBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    ghDrawerTree = renderMain({ page: 'github', drawer: 'github-config' });
+    assert.match(collectText(ghDrawerTree), /还没有保存令牌/);
+
+    // GitHub 页未配置令牌时的提示不再指向“设置 → 开发自动化”，而是打开编辑面板
+    renderer.reset();
+    const ghPageNoToken = renderMain({ page: 'github' });
+    const ghPageNoTokenText = collectText(ghPageNoToken);
+    assert.equal(ghPageNoTokenText.includes('设置 → 开发自动化'), false);
+    assert.match(ghPageNoTokenText, /去编辑面板填写/);
+
+    // 4. 网页版 claude.ai 编辑面板（browser）：可设置、可移除 AdsPower API key，且不显示原文
+    renderer.reset();
+    let browserDrawerTree = renderMain({ page: 'providers', drawer: 'browser' });
+    const adsInput = findNodes(browserDrawerTree, n => n.props.accessibilityLabel === 'AdsPower API key')[0];
+    assert.ok(adsInput, '网页版 claude.ai 编辑面板应有 AdsPower API key 输入框');
+    assert.equal(adsInput.props.secureTextEntry, true);
+    (adsInput.props.onChangeText as (v: string) => void)('adspower_raw_secret_key_12345');
+    browserDrawerTree = renderMain({ page: 'providers', drawer: 'browser' });
+    const saveAdsBtn = findNodes(
+      browserDrawerTree,
+      n => n.props.accessibilityLabel === '保存 API key' || n.props.accessibilityLabel === '重新填写并保存',
+    )[0];
+    assert.ok(saveAdsBtn, '应有保存 API key 按钮');
+    (saveAdsBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    browserDrawerTree = renderMain({ page: 'providers', drawer: 'browser' });
+    const browserAfterSave = collectText(browserDrawerTree);
+    assert.equal(browserAfterSave.includes('adspower_raw_secret_key_12345'), false, '界面绝不能显示 AdsPower API key 原文');
+    assert.match(browserAfterSave, /当前状态：已配置/);
+    const removeAdsBtn = findNodes(browserDrawerTree, n => n.props.accessibilityLabel === '清除 API key')[0];
+    assert.ok(removeAdsBtn, '应有清除 API key 按钮');
+    (removeAdsBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    browserDrawerTree = renderMain({ page: 'providers', drawer: 'browser' });
+    assert.match(collectText(browserDrawerTree), /当前状态：未配置/);
+
+    // 添加浏览器环境向导也不再出现“设置 → 开发自动化”
+    renderer.reset();
+    const addBrowserText = collectText(renderMain({ page: 'providers', drawer: 'add-browser' }));
+    assert.equal(addBrowserText.includes('设置 → 开发自动化'), false);
+
+    // 5. 升级通知编辑面板（escalation）：可设置、可移除 Webhook 凭据，展示 8 位指纹说明且不显示原文
+    renderer.reset();
+    let escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
+    const escText = collectText(escDrawerTree);
+    assert.equal(escText.includes('去设置更换'), false);
+    assert.match(escText, /8 位指纹/);
+    const urlInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 地址')[0];
+    const authInput = findNodes(escDrawerTree, n => n.props.accessibilityLabel === 'Webhook 认证头')[0];
+    assert.ok(urlInput, '升级通知编辑面板应有 Webhook 地址输入框');
+    assert.ok(authInput, '升级通知编辑面板应有 Webhook 认证头输入框');
+    (urlInput.props.onChangeText as (v: string) => void)('https://hooks.example.com/secret-webhook-path');
+    (authInput.props.onChangeText as (v: string) => void)('Bearer super-secret-webhook-auth');
+    escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
+    const saveWebhookBtn = findNodes(
+      escDrawerTree,
+      n => n.props.accessibilityLabel === '更换 Webhook 凭据' || n.props.accessibilityLabel === '保存 Webhook 凭据',
+    )[0];
+    assert.ok(saveWebhookBtn, '应有保存/更换 Webhook 凭据按钮');
+    (saveWebhookBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
+    const escAfterSave = collectText(escDrawerTree);
+    assert.equal(escAfterSave.includes('secret-webhook-path'), false, '界面绝不能显示 Webhook 地址路径原文');
+    assert.equal(escAfterSave.includes('super-secret-webhook-auth'), false, '界面绝不能显示 Webhook 认证头原文');
+    assert.match(escAfterSave, /hooks\.example\.net/);
+    const testWebhookBtn = findNodes(escDrawerTree, n => n.props.accessibilityLabel === '发测试通知')[0];
+    assert.ok(testWebhookBtn, '升级通知编辑面板应有发测试通知按钮');
+    (testWebhookBtn.props.onPress as () => void)();
+    await new Promise(r => setTimeout(r, 20));
+    escDrawerTree = renderMain({ page: 'answer', drawer: 'escalation' });
+    assert.match(collectText(escDrawerTree), /测试/);
   } finally {
-    handle.dispose();
+    store.dispose();
+    control.dispose();
   }
 });
 

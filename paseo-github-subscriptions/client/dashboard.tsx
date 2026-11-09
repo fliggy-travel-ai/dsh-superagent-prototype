@@ -95,10 +95,31 @@ function ProvidersPage({
     antigravityError,
     machineSettings,
     machineSettingsError,
+    modules,
     todo,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupResult, setBackupResult] = useState<{ backupPath: string; files: string[] } | null>(null);
+
+  const configPath =
+    machineSettings?.configPath ?? modules?.config.path ?? '~/.paseo/github-subscriptions/machine.json';
+  const hostLabel = machineSettings?.machine ?? (modules?.instance.role === 'provider' ? 'Provider 实例' : '本机');
+  const configErrors = machineSettings?.errors ?? modules?.config.errors ?? [];
+
+  const runBackup = async () => {
+    setBackupBusy(true);
+    setActionError(null);
+    try {
+      const res = await control.exportBackup();
+      setBackupResult({ backupPath: res.backupPath, files: res.files });
+    } catch (e) {
+      setActionError(errorMessage(e));
+    } finally {
+      setBackupBusy(false);
+    }
+  };
 
   const pausedAll = machineSettings?.pausedAll ?? false;
   const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
@@ -400,6 +421,36 @@ function ProvidersPage({
             actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
           />
         ) : null}
+
+        <FeatureCard
+          title="本机配置"
+          trailing={<Chip label={hostLabel} tone="neutral" />}
+          description="查看本机配置文件路径与格式校验结果，导出本机配置备份。"
+          kv={
+            <>
+              <Text style={s.mono}>{configPath}</Text>
+              {configErrors.length > 0 ? (
+                <>
+                  <Chip label={`${configErrors.length} 项校验错误`} tone="danger" />
+                  <Text style={s.small}>{configErrors.join('；')}</Text>
+                </>
+              ) : (
+                <Chip label="校验通过" tone="success" />
+              )}
+              {backupResult ? (
+                <Text style={s.small}>
+                  已导出 {backupResult.files.length} 个文件至 {backupResult.backupPath}
+                </Text>
+              ) : null}
+            </>
+          }
+          actions={
+            <>
+              <Btn small label="导出配置备份" busy={backupBusy} onPress={() => void runBackup()} />
+              <Btn small label="编辑" onPress={() => onOpenDrawer('machine-config')} />
+            </>
+          }
+        />
       </View>
     </View>
   );
@@ -671,7 +722,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 }
 
 function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
-  const { s, store, openSettings, theme } = useUi();
+  const { s, store, theme } = useUi();
   const { snapshot, error } = useStoreState();
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -692,9 +743,7 @@ function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <Notice tone="warning">
           <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
             <Text style={s.text}>未保存 GitHub 令牌，无法轮询事件。</Text>
-            {openSettings ? (
-              <Btn small label="去设置填写" onPress={() => openSettings('dev-automation')} />
-            ) : null}
+            <Btn small label="去编辑面板填写" onPress={() => onOpenDrawer('github-config')} />
           </View>
         </Notice>
       ) : null}
@@ -1102,7 +1151,7 @@ function TodoPage() {
 }
 
 export function MainScreen(props: PluginScreenProps) {
-  const { s, theme, compact, openSettings } = useUi();
+  const { s, theme, compact } = useUi();
   const storeState = useStoreState();
   const controlState = useControlState();
 
@@ -1214,13 +1263,8 @@ export function MainScreen(props: PluginScreenProps) {
             }}
           >
             <Text style={s.small}>
-              启停 Provider、模型、额度在 Paseo 设置和额度面板。令牌和 API key 在 设置 → 开发自动化。
+              启停 Provider、模型、额度在 Paseo 设置和额度面板。令牌、API key 与 Webhook 凭据在对应卡片的编辑面板配置。
             </Text>
-            {openSettings ? (
-              <Pressable onPress={() => openSettings('dev-automation')}>
-                <Text style={{ color: theme.colors.accent, fontSize: 12 }}>打开设置 → 开发自动化 ›</Text>
-              </Pressable>
-            ) : null}
           </View>
         ) : null}
       </View>
