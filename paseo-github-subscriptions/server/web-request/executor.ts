@@ -393,7 +393,8 @@ export class WebRequestExecutor {
         } else {
           auditEntry.webSubmitted = { at, ...(instanceId ? { instanceId } : {}), status: 'unknown', detail: result.detail };
         }
-        this.runtime.noteWebResult?.({ webSessionId: request.webSessionId, toolUseId: request.toolUseId, result });
+        // 云端已记录结果（例如用户已在网页上手动作答）时，不再让问答侧把提问重新打开。
+        if (!auditEntry.cloudConfirmed) this.runtime.noteWebResult?.({ webSessionId: request.webSessionId, toolUseId: request.toolUseId, result });
         await this.persistAudit();
         return result;
       };

@@ -33,6 +33,7 @@ export interface BrowserQuestionResult { id: string; sessionId: string; fingerpr
 const StateSchema = z.object({ settings: PresenceSettingsSchema, questions: z.array(QuestionSchema), notified: z.array(z.string()), speech: z.array(SpeechEventSchema).default([]), speechRetryAt: z.number().default(0) });
 const unavailable = (): PresenceObservation => ({ mode: 'unknown', observedAt: null, reason: '在场状态不可用，请选择在线或离线', source: 'unavailable' });
 const browserKey = (instanceId: string, question: Pick<BrowserQuestion, 'id' | 'sessionId' | 'fingerprint'>) => `browser:${questionFingerprint([instanceId, question.sessionId, question.id, question.fingerprint])}`;
+const WEB_RETRY_MAX_MS = 2 * 60 * 60_000;
 const nativeKey = (agentId: string, requestId: string) => `native:${questionFingerprint([agentId, requestId])}`;
 
 function toInternalSessionId(raw: string): string | null {
@@ -102,6 +103,11 @@ export class PresenceRuntime {
       if (!webSessionId || !sameSessionId(webSessionId, question.sessionId)) continue;
       const toolUseId = cloudRequestToolUseId(entry.request);
       if (browserQuestionMatchesPrompts(entry.prompts, question, toolUseId)) return nativeId;
+    }
+    // Paseo 已不再列出、但网页提交未确认的云端提问（例如页面未打开时作答，之后才打开页面）
+    if (question.toolUseId) {
+      const retry = this.state.questions.find(item => item.source === 'native' && item.webRetry && item.toolUseId === question.toolUseId && !!item.webSessionId && sameSessionId(item.webSessionId, question.sessionId));
+      if (retry) return retry.id;
     }
     return undefined;
   }
@@ -240,6 +246,9 @@ export class PresenceRuntime {
       if (question.source === 'native' && question.webRetry && !activeAgents.has(question.sessionId)) {
         question.state = 'resolved'; question.reason = '原会话已归档'; delete question.webRetry;
       }
+      if (question.source === 'native' && question.webRetry && this.clock() - Date.parse(question.at) > WEB_RETRY_MAX_MS) {
+        question.state = 'resolved'; question.reason = '超过 2 小时未确认，已自动结束；请在 claude.ai 核对结果'; delete question.webRetry;
+      }
       if (question.source === 'native' && !question.webRetry && !present.has(question.id) && question.state !== 'resolved' && !this.activeAnswers.has(question.id)) {
         question.reason = question.state === 'pending'
           ? '原会话不再等待此问题'
@@ -335,6 +344,14 @@ export class PresenceRuntime {
       }
       const observed = observedSessionIds.includes(question.sessionId) && sessions.some(session => session.sessionId === question.sessionId);
       if (observed && !current.has(question.id) && question.state !== 'resolved') { question.reason = question.state === 'unknown' ? '网页已结束此提问，回答是否生效未确认' : '网页已结束此提问'; question.state = 'resolved'; }
+    }
+    for (const question of next.questions) {
+      if (question.source !== 'native' || !question.webRetry || !question.webSessionId || !question.toolUseId) continue;
+      const webSessionId = question.webSessionId;
+      const observed = observedSessionIds.some(id => sameSessionId(id, webSessionId)) && sessions.some(session => sameSessionId(session.sessionId, webSessionId));
+      if (observed && !questions.some(item => item.toolUseId === question.toolUseId)) {
+        question.state = 'resolved'; question.reason = '网页上已没有这道提问，请在 claude.ai 核对结果'; delete question.webRetry;
+      }
     } });
     // 在场状态用 scan() 每 5 秒刷新的缓存值；远端来源主机可能要十几秒才响应，不能在同步路径里等待。
     if (generation !== this.generation || this.stopped) return [];
@@ -345,9 +362,8 @@ export class PresenceRuntime {
     for (const [id, entry] of this.decisions) {
       if (!current.has(id)) continue;
       if (overdue()) break;
-      this.decisions.delete(id);
       const valid = () => entry.generation === this.generation && !this.stopped && !this.configuring && (!entry.automatic || !this.state.settings.paused && (entry.delegated || this.observation.mode === 'offline'));
-      if (!valid()) continue;
+      if (!valid()) { this.decisions.delete(id); continue; }
       let reserved = false;
       await this.persist(next => {
         const item = next.questions.find(question => question.id === id);
@@ -361,6 +377,8 @@ export class PresenceRuntime {
           reserved = true;
         }
       });
+      // 写盘完成（状态已是“已下发”或不再待处理）后才出队，执行器不会看到“待处理且不在队列”而误判未领取。
+      if (this.decisions.get(id) === entry) this.decisions.delete(id);
       if (reserved && valid()) { decisions.push({ ...entry.decision, expiresAt: Date.now() + 5000 }); reservedEntries.set(id, entry); }
       else if (reserved) await this.persist(next => { const item = next.questions.find(question => question.id === id); if (item?.state === 'submitted') { item.state = 'pending'; delete item.answer; item.reason = '模式已变化，尚未下发'; } });
     }
@@ -553,13 +571,14 @@ export class PresenceRuntime {
     if (this.stopped) return;
     void this.persist(next => {
       const item = this.findCloudQuestion(next, input.webSessionId, input.toolUseId);
-      if (!item) return;
+      if (!item || item.cloudConfirmed) return;
       if (input.result.status === 'submitted') {
         if (input.late && item.webRetry) { item.state = 'submitted'; item.reason = '网页已提交（回执迟到），等待云端确认'; }
         return;
       }
       item.state = 'unknown';
       item.webRetry = true;
+      item.at = new Date(this.clock()).toISOString();
       item.reason = input.result.status === 'page_not_open'
         ? 'claude.ai 页面没有打开，请在 claude.ai 作答'
         : `网页提交未确认（${webRequestDetailReason(input.result.detail)}），请在 claude.ai 重试`;
@@ -570,7 +589,9 @@ export class PresenceRuntime {
     if (this.stopped) return;
     void this.persist(next => {
       const item = this.findCloudQuestion(next, input.webSessionId, input.toolUseId);
-      if (!item || item.state === 'resolved' && !item.webRetry) return;
+      if (!item) return;
+      item.cloudConfirmed = true;
+      if (item.state === 'resolved' && !item.webRetry) return;
       item.state = 'resolved';
       item.reason = input.outcome === 'denied' ? '云端记录为拒绝' : input.outcome === 'canceled' ? '云端已取消此提问' : '云端已记录结果';
       delete item.webRetry;

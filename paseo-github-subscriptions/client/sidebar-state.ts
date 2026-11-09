@@ -36,7 +36,8 @@ export function computeTodoCount(controlState: ReturnType<typeof useControlState
   const questions = controlState.presence?.questions ?? [];
   const webQuestions = questions.filter(q => q.source === 'browser' && q.state === 'pending').length;
   const unreadAuto = questions.filter(q => isUnreadAutomaticAnswer(q)).length;
+  const webRetry = questions.filter(q => q.webRetry && q.state !== 'resolved').length;
   const stalled = controlState.stalled?.sessions.length ?? 0;
   const escalations = controlState.escalation?.pendingEvents.length ?? 0;
-  return webQuestions + unreadAuto + stalled + escalations;
+  return webQuestions + unreadAuto + webRetry + stalled + escalations;
 }

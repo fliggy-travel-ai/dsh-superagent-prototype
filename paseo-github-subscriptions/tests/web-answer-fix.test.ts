@@ -225,3 +225,157 @@ test('迟到回执为已提交时另记 lateReceipt.status = submitted，并通�
     assert.deepEqual(env.webResults.at(-1), { webSessionId: 'session_abc123', toolUseId: 'toolu_01', result: { status: 'submitted' }, late: true });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+// ---- PR #12 审阅（#1704 评论 6733092094）第 1–6 项 ----
+
+async function retryFixture(clock = Date.now) {
+  const directory = await mkdtemp(join(tmpdir(), 'web-answer-retry-'));
+  const agents: QuestionAgent[] = [cloudAgent([cloudRequest()])];
+  const port: PresencePort = {
+    list: async () => structuredClone(agents), refresh: async id => structuredClone(agents.find(item => item.id === id) ?? null),
+    respond: async () => {}, observe: async () => online(),
+    speak: async () => ({ played: true, engine: 'neural' }), cancelSpeech: async () => {}, hosts: async () => [],
+  };
+  const runtime = new PresenceRuntime(directory, port, clock, new WebRequestLedger());
+  await runtime.start();
+  await runtime.configure({ ...runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+  const nativeId = runtime.snapshot().questions.find(item => item.source === 'native')!.id;
+  // 用户在 Paseo 原生界面作答后，Paseo 不再列出该请求
+  agents[0]!.pendingPermissions = [];
+  await runtime.refresh();
+  return { runtime, agents, nativeId, close: async () => { await runtime.stop(); await rm(directory, { recursive: true, force: true }); } };
+}
+const settle = async (runtime: PresenceRuntime) => { await runtime.refresh(); };
+
+async function todoItems(runtime: PresenceRuntime) {
+  const { TodoRuntime } = await import('../server/todo.ts');
+  const todo = new TodoRuntime({
+    selfHost: async () => ({ id: 'srv-mini', name: 'Mac mini' }), hosts: async () => [{ id: 'srv-mini', name: 'Mac mini', online: true }],
+    presence: async () => runtime.snapshot(), browser: async () => null, stalled: async () => null,
+    remoteLocal: async () => { throw new Error('no remote'); }, remoteAct: async () => ({ ok: false, message: 'no' }),
+    answerQuestion: async () => ({}), markQuestionRead: async () => ({}),
+  });
+  return (await todo.local()).items;
+}
+
+test('审阅 1：网页作答未确认的云端提问出现在待办列表，带原因和原网页链接，不带作答表单；侧栏备用计数也算它', async () => {
+  const setup = await retryFixture();
+  try {
+    assert.deepEqual(await todoItems(setup.runtime), []);
+    setup.runtime.noteWebResult({ webSessionId: 'session_one', toolUseId: 'toolu_1', result: { status: 'unknown', detail: 'no_receipt' } });
+    await settle(setup.runtime);
+    const items = await todoItems(setup.runtime);
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.type, 'web');
+    assert.equal(items[0]!.label, '网页重试');
+    assert.equal(items[0]!.url, 'https://claude.ai/code/session_one');
+    assert.match(items[0]!.text, /请在 claude\.ai 重试/);
+    assert.equal(items[0]!.question, undefined);
+    const { computeTodoCount } = await import('../client/sidebar-state.ts');
+    assert.equal(computeTodoCount({ todo: null, presence: setup.runtime.snapshot(), stalled: null, escalation: null } as any), 1);
+  } finally { await setup.close(); }
+});
+
+test('审阅 2：已有云端确认时不再把提问重新打开（执行器不回写，问答侧也跳过）', async () => {
+  const setup = await retryFixture();
+  try {
+    setup.runtime.noteCloudConfirmed({ webSessionId: 'session_one', toolUseId: 'toolu_1', outcome: 'answered' });
+    await settle(setup.runtime);
+    setup.runtime.noteWebResult({ webSessionId: 'session_one', toolUseId: 'toolu_1', result: { status: 'unknown', detail: 'not_claimed' } });
+    await settle(setup.runtime);
+    assert.equal(setup.runtime.snapshot().questions.find(item => item.id === setup.nativeId)!.state, 'resolved');
+    assert.deepEqual(await todoItems(setup.runtime), []);
+  } finally { await setup.close(); }
+
+  const dir = await mkdtemp(join(tmpdir(), 'web-answer-exec-confirmed-'));
+  try {
+    const env = executorEnv();
+    const executor = new WebRequestExecutor(dir, env.bridge, env.runtime, undefined, env.options);
+    // 答案排队期间用户在网页上手动作答，云端先确认；执行器 20 秒后返回“未及时领取”
+    let confirmed = false;
+    env.setOnSleep(() => { if (!confirmed) { confirmed = true; executor.confirmCloud({ webSessionId: 'session_abc123', toolUseId: 'toolu_01', outcome: 'answered' }); } });
+    assert.deepEqual(await executor.answerWebRequest(request), { status: 'unknown', detail: 'not_claimed' });
+    assert.deepEqual(env.webResults, []);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('审阅 2：网页重试的提问在完整扫描里已不在页面上时自动结束，超过 2 小时也自动结束', async () => {
+  let now = Date.now();
+  const setup = await retryFixture(() => now);
+  try {
+    setup.runtime.noteWebResult({ webSessionId: 'session_one', toolUseId: 'toolu_1', result: { status: 'unknown', detail: 'no_receipt' } });
+    await settle(setup.runtime);
+    // 页面仍显示这道提问：保留
+    await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
+    assert.equal(setup.runtime.snapshot().questions.find(item => item.id === setup.nativeId)!.state, 'unknown');
+    // 完整扫描该会话，页面上已没有这道提问：结束
+    await setup.runtime.browserSync('browser-one', [], [], syncSessions, ['one']);
+    let question = setup.runtime.snapshot().questions.find(item => item.id === setup.nativeId)!;
+    assert.equal(question.state, 'resolved');
+    assert.match(question.reason, /网页上已没有这道提问/);
+
+    setup.runtime.noteWebResult({ webSessionId: 'session_one', toolUseId: 'toolu_1', result: { status: 'page_not_open' } });
+    await settle(setup.runtime);
+    assert.equal(setup.runtime.snapshot().questions.find(item => item.id === setup.nativeId)!.state, 'unknown');
+    now += 2 * 60 * 60_000 + 1000;
+    await settle(setup.runtime);
+    question = setup.runtime.snapshot().questions.find(item => item.id === setup.nativeId)!;
+    assert.equal(question.state, 'resolved');
+    assert.match(question.reason, /超过 2 小时/);
+  } finally { await setup.close(); }
+});
+
+test('审阅 3：页面未打开时提问进入网页重试，之后打开页面，网页提问关联到它，待办只有一条', async () => {
+  const setup = await retryFixture();
+  try {
+    setup.runtime.noteWebResult({ webSessionId: 'session_one', toolUseId: 'toolu_1', result: { status: 'page_not_open' } });
+    await settle(setup.runtime);
+    await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
+    await settle(setup.runtime);
+    const browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
+    assert.equal(browserQ.delegatedTo, setup.nativeId);
+    const items = await todoItems(setup.runtime);
+    assert.equal(items.length, 1, JSON.stringify(items.map(item => item.label)));
+    assert.equal(items[0]!.label, '网页重试');
+  } finally { await setup.close(); }
+});
+
+test('审阅 5：同步请求里点同意记录带未知字段或未知取值时不整条拒绝，丢弃未知部分', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'web-answer-bridge-loose-'));
+  const bridge = new BrowserBridge(directory, async () => null);
+  try {
+    const server = createServer(); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); await new Promise<void>(resolve => server.close(() => resolve()));
+    if (!address || typeof address === 'string') throw new Error('port');
+    await bridge.start(); await bridge.configure({ enabled: true, port: address.port });
+    const pairing = await bridge.pairing();
+    const approval = { sessionId: 'abc', reservationId: 'r-1', digest: 'b'.repeat(64), button: 'Allow once', at: new Date().toISOString(), status: 'dismissed', readGate: 'read_gate_future', futureField: 1 };
+    const response = await fetch(pairing.url, { method: 'POST', headers: { origin: `chrome-extension://${'a'.repeat(32)}`, authorization: `Bearer ${pairing.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ instanceId: 'one', sessions: [], approvals: [approval] }) });
+    assert.equal(response.status, 200);
+    const stored = bridge.snapshot().approvals?.[0] as Record<string, unknown>;
+    assert.equal(stored.reservationId, 'r-1');
+    assert.equal('futureField' in stored, false);
+    assert.equal(stored.readGate, undefined);
+  } finally { await bridge.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('审阅 6：下发答案写盘期间执行器看到的状态始终是“排队中”或“已下发”，不会误判未领取', async () => {
+  const setup = await fixture(async () => online());
+  try {
+    setup.agents.push(cloudAgent([cloudRequest()]));
+    await setup.runtime.refresh();
+    await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
+    const browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    let done = false;
+    const seen: string[] = [];
+    const sync = setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']).finally(() => { done = true; });
+    while (!done) {
+      const state = setup.runtime.browserState(browserQ.id)!;
+      seen.push(`${state.state}:${state.queued}`);
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal((await sync).length, 1);
+    assert.ok(!seen.includes('pending:false'), seen.join(','));
+  } finally { await setup.close(); }
+});

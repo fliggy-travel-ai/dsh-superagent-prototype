@@ -277,6 +277,14 @@
           if (pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) setTimeout(schedule, retryIntervalMs());
           return;
         }
+        // 滚动期间卡片可能继续流式更新：按新文字重做完整资格复核（含 cardSafe 敏感判断）。
+        const latest = scope.innerText || scope.textContent || '';
+        if (latest.length > 16000 || !eligible(button, scope, latest)) {
+          recordCardAttempt(cardId);
+          recordCardResult(cardId, 'skipped');
+          await report('skipped');
+          return;
+        }
         readGate = 'read_gate_scrolled';
       }
       recordCardAttempt(cardId);
@@ -339,6 +347,13 @@
           recordCardResult(cardId, 'skipped');
           await report('skipped', 'read_gate_blocked');
           if (pageVisible() && (!cardId || (cardHistory.get(cardId)?.clicks || 0) < maxClicksPerCard())) setTimeout(schedule, retryIntervalMs());
+          return;
+        }
+        const latest = card.innerText || card.textContent || '';
+        if (!menuCardEligible(moreButton, card, latest)) {
+          recordCardAttempt(cardId);
+          recordCardResult(cardId, 'skipped');
+          await report('skipped');
           return;
         }
         readGate = 'read_gate_scrolled';

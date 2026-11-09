@@ -2086,7 +2086,7 @@ test('approval-reserve 被后台拒绝时，内容脚本在本地给该卡片记
 
 
 // #1704 评论 6732392628：阅读门槛（“Scroll to the end to allow this.”）自动滚到底，复核提示消失后再点 Allow once。
-async function runReadGateScenario(options: { clearsOnScroll: boolean; persistentChecked?: boolean; rounds?: number }) {
+async function runReadGateScenario(options: { clearsOnScroll: boolean; persistentChecked?: boolean; rounds?: number; changeOnScroll?: (card: DomNode) => void }) {
   const fixture = JSON.parse(await readFile(new URL('./fixtures/claude-web/permission-read-gate.json', import.meta.url), 'utf8'));
   const cardTree = DomNode.fromTuple(fixture.tree);
   const body = new DomNode('body', {}, []);
@@ -2106,7 +2106,7 @@ async function runReadGateScenario(options: { clearsOnScroll: boolean; persisten
   const scrollEvents: any[] = [];
   rows.dispatchEvent = (event: any) => {
     scrollEvents.push(event);
-    if (event?.type === 'scroll' && options.clearsOnScroll && rows.scrollTop + rows.clientHeight >= rows.scrollHeight) hint.hidden = true;
+    if (event?.type === 'scroll' && options.clearsOnScroll && rows.scrollTop + rows.clientHeight >= rows.scrollHeight) { hint.hidden = true; options.changeOnScroll?.(card); }
     return true;
   };
   // 门槛还在时页面不接受“允许”
@@ -2208,4 +2208,17 @@ test('后台把阅读门槛结果 readGate 写进点同意记录并随同步上�
   const { BrowserApprovalSchema } = await import('../shared/browser.ts');
   assert.equal(BrowserApprovalSchema.safeParse({ sessionId: 'abc', reservationId: 'r', digest, button: 'Allow once', at: new Date().toISOString(), status: 'dismissed', readGate: 'read_gate_scrolled' }).success, true);
   assert.equal(BrowserApprovalSchema.safeParse({ sessionId: 'abc', reservationId: 'r', digest, button: 'Allow once', at: new Date().toISOString(), status: 'dismissed', readGate: 'other' }).success, false);
+});
+
+test('阅读门槛：滚动后卡片内容变化，完整复核不通过（出现已勾选的永久授权或敏感内容）时不点击，记 skipped', async () => {
+  for (const change of [
+    (card: DomNode) => { card.appendChild(new DomNode('input', { type: 'checkbox', role: 'checkbox', 'aria-checked': 'true' }, [])); },
+    (card: DomNode) => { card.appendChild(new DomNode('p', {}, ['Plan: proceed with ExitPlanMode'])); },
+  ]) {
+    const run = await runReadGateScenario({ clearsOnScroll: true, changeOnScroll: change });
+    assert.equal(run.allowOnce.clicks, 0);
+    assert.equal(run.deny.clicks, 0);
+    assert.ok(run.results.length >= 1);
+    assert.ok(run.results.every(result => result.status === 'skipped' && !result.readGate), JSON.stringify(run.results));
+  }
 });
