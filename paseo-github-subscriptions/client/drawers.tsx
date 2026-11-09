@@ -205,12 +205,12 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
         <View style={{ gap: 8 }}>
           <Text style={s.small}>把浏览器里的 claude.ai 会话关联到 Paseo 会话，便于跳回原会话。</Text>
           {(browser?.sessions ?? []).map(sess => (
-            <View key={`${sess.instanceId}:${sess.sessionId}`} style={[s.row, { justifyContent: 'space-between' }]}>
+            <View key={`${sess.instanceId}:${sess.sessionId}`} style={{ gap: 6 }}>
               <Text style={s.small}>
                 {sess.instanceName} · {sess.title}
               </Text>
-              <View style={s.wrap}>
-                {bindTargets.slice(0, 2).map(target => (
+              <ScrollView style={{ maxHeight: 160 }} contentContainerStyle={s.wrap}>
+                {bindTargets.map(target => (
                   <Btn
                     key={target.id}
                     small
@@ -225,7 +225,7 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                     }
                   />
                 ))}
-              </View>
+              </ScrollView>
             </View>
           ))}
         </View>

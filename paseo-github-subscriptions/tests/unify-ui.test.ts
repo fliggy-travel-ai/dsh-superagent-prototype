@@ -1450,6 +1450,8 @@ test('1737-remove-automation：删除精确授权卡片与模块后，问答与�
   const allEntries = [
     { agent: { id: 'agent-refund', title: '【订单退款】联调', status: 'idle', archivedAt: null } },
     { agent: { id: 'agent-search', title: '【搜索排序】实验', status: 'running', archivedAt: null } },
+    { agent: { id: 'agent-pay', title: '【支付链路】巡检', status: 'running', archivedAt: null } },
+    { agent: { id: 'agent-points', title: '【会员积分】回归', status: 'idle', archivedAt: null } },
   ];
   const control = createControlStore(
     daemon as never,
@@ -1490,6 +1492,8 @@ test('1737-remove-automation：删除精确授权卡片与模块后，问答与�
   );
   const bindBtn = findNodes(browserTree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '绑定 【搜索排序】实验')[0];
   assert.ok(bindBtn, 'BrowserDrawer 应展示 Paseo 会话绑定按钮');
+  const bindFourth = findNodes(browserTree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '绑定 【会员积分】回归')[0];
+  assert.ok(bindFourth, 'BrowserDrawer 绑定列表不应只截断前 2 个会话，应展示全部可滚动会话');
   (bindBtn.props.onPress as () => void)();
   await tick();
   assert.ok(
