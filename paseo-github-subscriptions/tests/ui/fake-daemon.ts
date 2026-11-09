@@ -463,6 +463,11 @@ export class FakeDaemon {
         return this.quiet;
       case 'presence.snapshot':
         return this.presence;
+      case 'presence.local-speech':
+        return { enabled: Boolean(this.presence.localSpeechEnabled) };
+      case 'presence.configure-local-speech':
+        this.presence = { ...this.presence, localSpeechEnabled: Boolean(input.enabled) };
+        return this.presence;
       case 'presence.configure':
         this.presence = { ...this.presence, settings: input as unknown as PresenceSettings };
         return this.presence;

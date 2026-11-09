@@ -11,6 +11,7 @@ export const makeBrowser = (): BrowserSnapshot => ({
 
 export const makePresence = (): PresenceSnapshot => ({
   settings: { mode: 'online', paused: false, speechEnabled: true, sourceHostId: null },
+  localSpeechEnabled: true,
   observation: { mode: 'online', observedAt: new Date(0).toISOString(), reason: '已连接随身手机', source: 'bluetooth' },
   hostName: 'Mac Mini（演示）',
   hosts: [],

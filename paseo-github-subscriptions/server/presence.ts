@@ -28,9 +28,11 @@ export interface PresencePort {
   speak(hostId: string | null, id: string, text: string): Promise<SpeechResult>;
   cancelSpeech(hostId: string | null, id: string): Promise<unknown>;
   hosts(): Promise<PresenceSnapshot['hosts']>;
+  selfId?(): string | null;
+  remoteSpeechEnabled?(hostId: string): Promise<boolean>;
 }
 export interface BrowserQuestionResult { id: string; sessionId: string; fingerprint: string; status: 'submitted' | 'unknown' }
-const StateSchema = z.object({ settings: PresenceSettingsSchema, questions: z.array(QuestionSchema), notified: z.array(z.string()), speech: z.array(SpeechEventSchema).default([]), speechRetryAt: z.number().default(0) });
+const StateSchema = z.object({ settings: PresenceSettingsSchema, localSpeechEnabled: z.boolean().optional(), questions: z.array(QuestionSchema), notified: z.array(z.string()), speech: z.array(SpeechEventSchema).default([]), speechRetryAt: z.number().default(0) });
 const unavailable = (): PresenceObservation => ({ mode: 'unknown', observedAt: null, reason: '在场状态不可用，请选择在线或离线', source: 'unavailable' });
 const browserKey = (instanceId: string, question: Pick<BrowserQuestion, 'id' | 'sessionId' | 'fingerprint'>) => `browser:${questionFingerprint([instanceId, question.sessionId, question.id, question.fingerprint])}`;
 const WEB_RETRY_MAX_MS = 2 * 60 * 60_000;
@@ -97,9 +99,25 @@ export class PresenceRuntime {
   private port: PresencePort;
   private clock: () => number;
   private ledger?: WebRequestLedger;
-  private speaking: { id: string; hostId: string | null; mode: PresenceSettings['mode']; cancelling: boolean } | null = null;
+  private speaking: {
+    id: string;
+    mode: PresenceSettings['mode'];
+    sourceHostId: string | null;
+    targets: Map<string | null, { cancelling: boolean; done: boolean }>;
+  } | null = null;
   constructor(directory: string, port: PresencePort, clock = Date.now, ledger?: WebRequestLedger) {
     this.directory = directory; this.port = port; this.clock = clock; this.ledger = ledger;
+  }
+  private selfHostId(): string | null {
+    return this.port.selfId?.() ?? this.hostList[0]?.id ?? null;
+  }
+  private isSelfHost(hostId: string | null | undefined): boolean {
+    if (!hostId) return true;
+    const self = this.selfHostId();
+    return Boolean(self && hostId === self);
+  }
+  localSpeechEnabled(): boolean {
+    return this.state.localSpeechEnabled ?? this.isSelfHost(this.state.settings.sourceHostId);
   }
   private findMatchingCloudNativeId(question: Pick<Question, 'sessionId' | 'prompts' | 'pages' | 'toolUseId'>, questions: Question[] = this.state.questions): string | undefined {
     for (const [nativeId, entry] of this.native) {
@@ -122,14 +140,19 @@ export class PresenceRuntime {
   }
   private reviewSpeech() {
     const current = this.speaking;
-    if (!current || current.cancelling) return;
+    if (!current) return;
     const settings = this.state.settings;
     const question = this.state.questions.find(item => item.id === current.id);
-    const wanted = !this.stopped && settings.speechEnabled && !settings.paused && settings.mode === current.mode && settings.sourceHostId === current.hostId
+    const globallyWanted = !this.stopped && settings.speechEnabled && !settings.paused
+      && settings.mode === current.mode && settings.sourceHostId === current.sourceHostId
       && question?.state === 'pending' && !question.delegatedTo;
-    if (wanted) return;
-    current.cancelling = true;
-    void this.port.cancelSpeech(current.hostId, current.id).catch(() => {});
+    for (const [hostId, state] of current.targets) {
+      if (state.done || state.cancelling) continue;
+      const hostWanted = globallyWanted && (!this.isSelfHost(hostId) || this.localSpeechEnabled());
+      if (hostWanted) continue;
+      state.cancelling = true;
+      void this.port.cancelSpeech(hostId, current.id).catch(() => {});
+    }
   }
   private persist(change: (next: typeof this.state) => void) {
     const operation = this.writes.then(async () => {
@@ -148,12 +171,22 @@ export class PresenceRuntime {
     try { this.state = StateSchema.parse(JSON.parse(await readFile(join(this.directory, 'presence.json'), 'utf8'))); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('在线离线配置读取失败'); }
     const lastSpeech = this.state.speech.at(-1);
-    this.speechError = lastSpeech && !lastSpeech.played && !lastSpeech.cancelled ? lastSpeech.detail ?? '上次语音未确认播放' : null;
+    const lastBatchPlayed = lastSpeech
+      ? this.state.notified.includes(lastSpeech.id) || this.state.speech.some(item => item.id === lastSpeech.id && item.played)
+      : false;
+    this.speechError = lastSpeech && !lastBatchPlayed && !lastSpeech.played && !lastSpeech.cancelled ? lastSpeech.detail ?? '上次语音未确认播放' : null;
     await this.persist(next => { for (const question of next.questions) if (question.state === 'submitted') { question.state = 'unknown'; question.reason = '插件重启，提交结果未确认；请在原会话检查'; } });
     await this.refresh();
     if (!this.stopped) this.timer = setInterval(() => void this.refresh(), 5000);
   }
-  snapshot(): PresenceSnapshot { return structuredClone({ settings: this.state.settings, observation: this.observation, questions: this.state.questions, speech: this.state.speech, hostName: hostname(), hosts: this.hostList, error: [this.error, this.speechError].filter(Boolean).join('；') || null }); }
+  snapshot(): PresenceSnapshot { return structuredClone({ settings: this.state.settings, localSpeechEnabled: this.localSpeechEnabled(), observation: this.observation, questions: this.state.questions, speech: this.state.speech, hostName: this.hostList[0]?.name || hostname(), hosts: this.hostList, error: [this.error, this.speechError].filter(Boolean).join('；') || null }); }
+  async configureLocalSpeech(enabled: boolean): Promise<PresenceSnapshot> {
+    if (this.stopped) throw new Error('问答服务已停止，请稍后再试');
+    const clean = z.boolean().parse(enabled);
+    await this.persist(next => { next.localSpeechEnabled = clean; });
+    if (clean) await this.refresh();
+    return this.snapshot();
+  }
   async markRead(input: QuestionRead): Promise<PresenceSnapshot> {
     if (this.stopped) throw new Error('问答服务已停止，请稍后再试');
     await this.persist(next => {
@@ -275,6 +308,45 @@ export class PresenceRuntime {
     try { await this.process(question, generation); }
     catch { this.error = '部分问题暂时无法处理，请打开原会话核查'; }
   }
+  private async resolveSpeechTargets(): Promise<Array<string | null>> {
+    if (this.hostList.length > 0 || this.port.selfId) {
+      this.hostList = await this.port.hosts().catch(() => this.hostList);
+    }
+    const selfId = this.selfHostId();
+    const targets: Array<string | null> = [];
+    const seen = new Set<string>();
+    if (this.localSpeechEnabled()) {
+      targets.push(selfId);
+      if (selfId) seen.add(selfId);
+    }
+    const remoteCandidates: string[] = [];
+    for (const host of this.hostList) {
+      if (!host.id || this.isSelfHost(host.id) || seen.has(host.id)) continue;
+      seen.add(host.id);
+      if (host.online) remoteCandidates.push(host.id);
+    }
+    if (this.hostList.length === 0 && this.state.settings.sourceHostId && !this.isSelfHost(this.state.settings.sourceHostId)) {
+      remoteCandidates.push(this.state.settings.sourceHostId);
+    }
+    if (remoteCandidates.length > 0) {
+      const checks = await Promise.all(
+        remoteCandidates.map(async hostId => {
+          try {
+            const enabled = this.port.remoteSpeechEnabled
+              ? await this.port.remoteSpeechEnabled(hostId)
+              : hostId === this.state.settings.sourceHostId;
+            return enabled ? hostId : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      for (const hostId of checks) {
+        if (hostId) targets.push(hostId);
+      }
+    }
+    return targets;
+  }
   private async process(question: Question, generation: number) {
     if (this.stopped || this.configuring || this.state.settings.paused || generation !== this.generation || this.decisions.has(question.id) || this.activeAnswers.has(question.id)) return;
     if (question.delegatedTo) return;
@@ -290,31 +362,91 @@ export class PresenceRuntime {
     const reason = (cloudBrowser ? '云端会话提问，等待同步到 Paseo；只接受人工回答' : automaticAnswerBlockReason(question.prompts)) ?? (this.observation.mode === 'offline' ? '没有唯一明确的推荐项，请人工选择' : this.observation.mode === 'unknown' ? '在场状态未知，等待用户回答' : '在线：等待用户回答');
     if (question.reason !== reason) await this.persist(next => { const item = next.questions.find(item => item.id === question.id); if (item) item.reason = reason; });
     if (this.observation.mode === 'online' && this.state.settings.speechEnabled && !this.state.notified.includes(question.id) && !this.notifications.size && this.clock() >= this.state.speechRetryAt) {
-      const hostId = this.state.settings.sourceHostId;
-      const speaking = { id: question.id, hostId, mode: this.state.settings.mode, cancelling: false };
-      const current = () => !this.stopped && !speaking.cancelling && generation === this.generation && this.state.settings.sourceHostId === hostId && this.state.settings.speechEnabled && !this.state.settings.paused;
-      const record = (receipt: SpeechResult, own: boolean) => this.persist(next => {
-        if (receipt.played && !next.notified.includes(question.id)) next.notified.push(question.id);
-        if (own) next.speechRetryAt = receipt.retryAt ?? this.clock() + SPEECH_COOLDOWN_MS;
-        next.speech.push({ ...receipt, id: question.id, hostId, at: new Date().toISOString() }); next.speech = next.speech.slice(-50);
-      });
-      const notification = Promise.resolve().then(() => {
-        if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused || !this.state.settings.speechEnabled || this.state.questions.find(item => item.id === question.id)?.state !== 'pending') return null;
-        this.speaking = speaking;
-        return this.port.speak(hostId, question.id, `注意，${question.title.slice(0, 80)}，有一个问题等待你确认。`);
-      })
-        .then(async receipt => {
-          if (receipt === null) return;
-          const own = !receipt.cancelled && current();
-          if (own) this.speechError = receipt.played ? null : receipt.detail || '语音尚未播放，稍后重试';
-          await record(receipt, own);
+      const mode = this.state.settings.mode;
+      const sourceHostId = this.state.settings.sourceHostId;
+      const isGlobalCurrent = () =>
+        !this.stopped && generation === this.generation && this.state.settings.sourceHostId === sourceHostId
+        && this.state.settings.speechEnabled && !this.state.settings.paused;
+      let activeSpeaking: NonNullable<typeof this.speaking> | null = null;
+      const notification = Promise.resolve()
+        .then(async () => {
+          if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused || !this.state.settings.speechEnabled) return;
+          const qBefore = this.state.questions.find(item => item.id === question.id);
+          if (qBefore?.state !== 'pending' || qBefore.delegatedTo) return;
+          const rawTargets = await this.resolveSpeechTargets();
+          if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused || !this.state.settings.speechEnabled) return;
+          const qReady = this.state.questions.find(item => item.id === question.id);
+          if (qReady?.state !== 'pending' || qReady.delegatedTo) return;
+          const finalTargets = rawTargets.filter(hostId => !this.isSelfHost(hostId) || this.localSpeechEnabled());
+          if (finalTargets.length === 0) return;
+
+          activeSpeaking = {
+            id: question.id,
+            mode,
+            sourceHostId,
+            targets: new Map(finalTargets.map(h => [h, { cancelling: false, done: false }])),
+          };
+          this.speaking = activeSpeaking;
+          this.reviewSpeech();
+          const text = `注意，${question.title.slice(0, 80)}，有一个问题等待你确认。`;
+
+          const outcomes = await Promise.all(
+            finalTargets.map(async hostId => {
+              const targetState = activeSpeaking!.targets.get(hostId)!;
+              if (targetState.cancelling) {
+                targetState.done = true;
+                return {
+                  hostId,
+                  receipt: { played: false, cancelled: true, detail: '语音播放已取消' } as SpeechResult,
+                  own: false,
+                  at: new Date().toISOString(),
+                };
+              }
+              try {
+                const receipt = await this.port.speak(hostId, question.id, text);
+                targetState.done = true;
+                const own = !receipt.cancelled && !targetState.cancelling && isGlobalCurrent() && (!this.isSelfHost(hostId) || this.localSpeechEnabled());
+                return { hostId, receipt, own, at: new Date().toISOString() };
+              } catch {
+                targetState.done = true;
+                const own = !targetState.cancelling && isGlobalCurrent() && (!this.isSelfHost(hostId) || this.localSpeechEnabled());
+                const detail = own ? '未收到语音播放回执，稍后核对；请查看人工待办' : '设置已变化，旧语音请求已取消';
+                return {
+                  hostId,
+                  receipt: { played: false, cancelled: !own || undefined, detail } as SpeechResult,
+                  own,
+                  at: new Date().toISOString(),
+                };
+              }
+            }),
+          );
+
+          const anyPlayed = outcomes.some(o => o.receipt.played);
+          const ownFailures = outcomes.filter(o => !o.receipt.played && o.own && !o.receipt.cancelled);
+          if (anyPlayed) {
+            this.speechError = null;
+          } else if (ownFailures.length > 0) {
+            this.speechError = ownFailures.map(o => o.receipt.detail || '语音尚未播放，稍后重试')[0]!;
+          }
+          await this.persist(next => {
+            if (anyPlayed && !next.notified.includes(question.id)) next.notified.push(question.id);
+            if (anyPlayed && outcomes.some(o => o.receipt.played && o.own)) {
+              next.speechRetryAt = this.clock() + SPEECH_COOLDOWN_MS;
+            } else if (!anyPlayed && ownFailures.length > 0) {
+              next.speechRetryAt = Math.min(...ownFailures.map(o => o.receipt.retryAt ?? this.clock() + SPEECH_COOLDOWN_MS));
+            }
+            for (const o of outcomes) {
+              next.speech.push({ ...o.receipt, id: question.id, hostId: o.hostId, at: o.at });
+            }
+            next.speech = next.speech.slice(-50);
+          }).catch(() => {
+            if (!anyPlayed && ownFailures.length > 0) this.speechError = '语音播放及记录未确认，请查看人工待办';
+          });
         })
-        .catch(async () => {
-          const own = current();
-          const detail = own ? '未收到语音播放回执，稍后核对；请查看人工待办' : '设置已变化，旧语音请求已取消';
-          if (own) this.speechError = detail;
-          await record({ played: false, cancelled: !own || undefined, detail }, own).catch(() => { if (own) this.speechError = '语音播放及记录未确认，请查看人工待办'; });
-        }).finally(() => { if (this.speaking === speaking) this.speaking = null; this.notifications.delete(notification); });
+        .finally(() => {
+          if (activeSpeaking && this.speaking === activeSpeaking) this.speaking = null;
+          this.notifications.delete(notification);
+        });
       this.notifications.add(notification);
     }
   }

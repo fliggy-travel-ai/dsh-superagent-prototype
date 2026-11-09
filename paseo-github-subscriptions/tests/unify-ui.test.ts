@@ -1501,3 +1501,62 @@ test('1737-remove-automation：删除精确授权卡片与模块后，问答与�
     '点击绑定按钮后应更新 browser.bindings',
   );
 });
+
+test('1737-speech-local：语音提醒卡片与抽屉展示“在这台电脑播放（主机名）”开关，切换立即保存且不触发重载', async () => {
+  const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
+  installTsxAndReactNativeHooks();
+  const { FakeDaemon } = await import('./ui/fake-daemon.ts');
+  const { createControlStore } = await import('../client/control-store.ts');
+  const { bind } = await import('../client/ui.tsx');
+  const { MainScreen } = await import('../client/dashboard.tsx');
+  const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+  const mockTheme = {
+    colors: {
+      surface0: '#151517', surface1: '#1c1c1f', surface2: '#2b2b2f', border: '#303035', foreground: '#ececef', foregroundMuted: '#8e8e95',
+      accent: '#5b8cff', accentForeground: '#ffffff', statusSuccess: '#4cc274', statusWarning: '#e3a33b', statusDanger: '#ff6b66',
+    },
+  };
+  const daemon = new FakeDaemon('shadow');
+  daemon.latencyMs = 0;
+  const control = createControlStore(
+    daemon as never,
+    (async () => ({ entries: [], pageInfo: { hasMore: false } })) as never,
+  );
+  try {
+    await Promise.all([control.refresh(), control.refreshUnify()]);
+    const Bound = bind(
+      { store: { subscribe: () => () => {}, getState: () => ({ snapshot: daemon.state, error: null, loaded: true }) } as never, control, openScreen: () => {} },
+      MainScreen,
+    );
+    const renderer = createTestRenderer();
+    let tree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
+    );
+    const expectedLabel = `在这台电脑播放（${daemon.presence.hostName}）`;
+    assert.ok(collectText(tree).includes(expectedLabel), `语音提醒卡片应显示“${expectedLabel}”`);
+
+    const localSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
+    assert.ok(localSwitch, '应找到“在这台电脑播放”开关');
+    const initialVal = Boolean(localSwitch.props.value);
+    (localSwitch.props.onValueChange as (v: boolean) => void)(!initialVal);
+    await tick();
+
+    assert.equal(control.getState().moduleReloading, false, '切换本机播放开关不应触发插件重载');
+    tree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
+    );
+    const updatedSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
+    assert.equal(Boolean(updatedSwitch?.props.value), !initialVal, '切换后本机播放开关状态应立即更新');
+
+    // 打开语音提醒编辑面板，同样展示并可切换本机播放开关
+    renderer.reset();
+    const drawerTree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer', drawer: 'speech' } } as never),
+    );
+    const drawerSwitch = findNodes(drawerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
+    assert.ok(drawerSwitch, '语音提醒编辑抽屉也应展示本机播放开关');
+    assert.equal(Boolean(drawerSwitch.props.value), !initialVal);
+  } finally {
+    control.dispose();
+  }
+});

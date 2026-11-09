@@ -57,13 +57,16 @@ export const BrowserDecisionSchema = z.strictObject({
   source: z.enum(['automatic', 'manual']).optional(),
   expiresAt: z.number(),
 });
+export const LocalSpeechStateSchema = z.strictObject({ enabled: z.boolean() });
 export const PresenceSnapshotSchema = z.strictObject({
   settings: PresenceSettingsSchema, observation: PresenceObservationSchema,
   questions: z.array(QuestionSchema), hostName: z.string(),
   hosts: z.array(z.strictObject({ id: z.string(), name: z.string(), online: z.boolean() })),
   error: z.string().nullable(),
   speech: z.array(SpeechEventSchema).optional(),
+  localSpeechEnabled: z.boolean().optional(),
 });
+export type LocalSpeechState = z.infer<typeof LocalSpeechStateSchema>;
 export type PresenceSettings = z.infer<typeof PresenceSettingsSchema>;
 export type PresenceObservation = z.infer<typeof PresenceObservationSchema>;
 export type QuestionPrompt = z.infer<typeof QuestionPromptSchema>;
@@ -80,5 +83,7 @@ export const presenceConfigure = defineRpc({ name: 'presence.configure', input: 
 export const presenceAnswer = defineRpc({ name: 'presence.answer', input: QuestionAnswerSchema, output: PresenceSnapshotSchema });
 export const presenceRead = defineRpc({ name: 'presence.read', input: QuestionReadSchema, output: PresenceSnapshotSchema });
 export const presenceLocal = defineRpc({ name: 'presence.local', input: z.object({}), output: PresenceObservationSchema });
+export const presenceLocalSpeech = defineRpc({ name: 'presence.local-speech', input: z.object({}), output: LocalSpeechStateSchema });
+export const presenceConfigureLocalSpeech = defineRpc({ name: 'presence.configure-local-speech', input: LocalSpeechStateSchema, output: PresenceSnapshotSchema });
 export const presenceSpeak = defineRpc({ name: 'presence.speak', input: z.strictObject({ id: z.string().max(200), text: z.string().max(500) }), output: SpeechResultSchema });
 export const presenceSpeakCancel = defineRpc({ name: 'presence.speak-cancel', input: z.strictObject({ id: z.string().min(1).max(200) }), output: z.strictObject({ cancelled: z.boolean() }) });

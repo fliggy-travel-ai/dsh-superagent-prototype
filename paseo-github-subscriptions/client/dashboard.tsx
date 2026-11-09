@@ -478,7 +478,42 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
               thumbColor={theme.colors.accentForeground}
             />
           }
-          description="判定在线时，用语音播报新提问和停滞的主会话。"
+          belowTitle={
+            presenceModOff || !presence ? null : (
+              <View
+                style={[
+                  s.row,
+                  {
+                    justifyContent: 'space-between',
+                    backgroundColor: theme.colors.surface2,
+                    borderRadius: 8,
+                    borderWidth: 1,
+                    borderColor: theme.colors.border,
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                  },
+                ]}
+              >
+                <Text style={[s.small, { color: theme.colors.foreground, flexShrink: 1 }]}>
+                  {`在这台电脑播放（${presence.hostName || '本机'}）`}
+                </Text>
+                <Switch
+                  accessibilityLabel={`在这台电脑播放（${presence.hostName || '本机'}）`}
+                  disabled={moduleReloading || presenceModOff}
+                  value={Boolean(presence.localSpeechEnabled)}
+                  onValueChange={enabled => {
+                    if (presenceModOff) return;
+                    void control
+                      .configureLocalSpeech(enabled)
+                      .catch(e => setActionError(errorMessage(e)));
+                  }}
+                  trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+                  thumbColor={theme.colors.accentForeground}
+                />
+              </View>
+            )
+          }
+          description="判定在线时，向开启“在这台电脑播放”的主机播报新提问。"
           kv={
             presenceModOff ? (
               <ModuleOffHint />
@@ -487,7 +522,13 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             ) : !presence ? (
               <Text style={s.small}>正在读取…</Text>
             ) : (
-              <Text style={s.small}>播报主机 {presence.hostName || '本机'}</Text>
+              <>
+                <Chip
+                  label={presence.localSpeechEnabled ? '本机播放开启' : '本机不播放'}
+                  tone={presence.localSpeechEnabled ? 'success' : 'neutral'}
+                />
+                <Text style={s.small}>{presence.hostName || '本机'}</Text>
+              </>
             )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('speech')} />}
