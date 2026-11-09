@@ -237,8 +237,9 @@ export class EscalationRuntime {
     attempt.check();
     const timer = setInterval(() => run(async () => { await tick(); }), 1000);
     attempt.add(() => clearInterval(timer));
-    // 存量记录：回填请求编号后立即对账一次，之后定时对账。
-    const reconcile = async () => { await reconciler.sweep(); await engine.reconcilePending(); };
+    // 存量记录：回填请求编号后立即对账一次（只结束已归档或不存在的），之后定时对账。
+    // 引擎对账同样按等待列表判断，启动宽限期内不做。
+    const reconcile = async () => { await reconciler.sweep(); if (reconciler.trusted()) await engine.reconcilePending(); };
     run(async () => { await reconciler.backfill(auditPath); await reconcile(); });
     const reconcileTimer = setInterval(() => run(reconcile), RECONCILE_MS);
     attempt.add(() => clearInterval(reconcileTimer));

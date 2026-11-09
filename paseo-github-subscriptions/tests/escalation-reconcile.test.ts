@@ -20,6 +20,7 @@ function fixture(views: Record<string, AgentView | Error>) {
     records,
     audit: async entry => { audits.push(entry); },
     lookup: async id => { lookups.push(id); const view = views[id]; if (view instanceof Error) throw view; return view === undefined ? null : view; },
+    graceMs: 0,
   });
   return { dir, records, audits, lookups, reconciler, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -64,4 +65,27 @@ test('权限钩子结束提问时立即移出待办并写审计；订阅推送�
     await f.reconciler.settle('main', agentView({ status: 'idle', pendingPermissions: [] }));
     assert.deepEqual(f.records.pending(), []);
   } finally { f.done(); }
+});
+
+test('启动后 2 分钟内只按会话已归档或不存在结束，之后才按“请求已不在等待”结束；引擎对账同样推迟', async () => {
+  let now = Date.parse('2026-11-09T12:00:00Z');
+  const dir = mkdtempSync(join(tmpdir(), 'reconcile-'));
+  try {
+    const records = new EscalationRecords(join(dir, 'records.json'), () => now);
+    const reconciler = new EscalationReconciler({
+      records, audit: async () => {}, now: () => now,
+      lookup: async id => id === 'restored' ? { status: 'idle', archivedAt: null, pending: [] } : null,
+    });
+    records.upsert(record('restoring', 'restored', { requests: [{ agentId: 'restored', requestId: 'p1' }] }));
+    records.upsert(record('gone', 'missing', { requests: [{ agentId: 'missing', requestId: 'p2' }] }));
+    assert.equal(reconciler.trusted(), false);
+    assert.deepEqual((await reconciler.sweep()).map(item => item.id), ['gone']);
+    await reconciler.settle('restored', agentView({ status: 'idle', pendingPermissions: [] }));
+    assert.deepEqual(records.pending().map(item => item.id), ['restoring']);
+    now += 119_000;
+    assert.deepEqual(await reconciler.sweep(), []);
+    now += 1_000;
+    assert.equal(reconciler.trusted(), true);
+    assert.deepEqual((await reconciler.sweep()).map(item => item.id), ['restoring']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

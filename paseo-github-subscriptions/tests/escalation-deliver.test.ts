@@ -91,3 +91,12 @@ test('页面记录带来源请求编号：单条取自身请求，合并通知�
   assert.deepEqual(noticeRecord(group, 'live', 'delivered').requests, [{ agentId: 'main', requestId: 'p1' }, { agentId: 'x', requestId: 'p2' }]);
   assert.equal(noticeRecord(notice({ event: 'error', requestId: undefined, permissionId: null }), 'live', 'delivered').requests, undefined);
 });
+
+test('合并的出错通知：页面记录保存全部出错成员的会话编号', () => {
+  const group = notice({ event: 'error', requestId: undefined, permissionId: null, events: [
+    notice({ id: 'a', event: 'error', agentId: 'a', requestId: undefined }), notice({ id: 'b', event: 'error', agentId: 'b', requestId: undefined }),
+    notice({ id: 'a2', event: 'error', agentId: 'a', requestId: undefined }), notice({ id: 'p', event: 'new_project', agentId: '', requestId: undefined }),
+  ] });
+  assert.deepEqual(noticeRecord(group, 'live', 'delivered').sessions, [{ agentId: 'a' }, { agentId: 'b' }]);
+  assert.equal(noticeRecord(notice({ event: 'asked', requestId: 'p' }), 'live', 'delivered').sessions, undefined);
+});

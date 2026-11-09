@@ -1,6 +1,6 @@
 import type { Notice } from '../../notify/engine.ts';
 import { webhookPayload, type WebhookCredentials } from './webhook.ts';
-import { requestsOf, type EscalationRecord } from './records.ts';
+import { errorSessionsOf, requestsOf, type EscalationRecord } from './records.ts';
 
 export interface DeliverDeps {
   mode(): 'shadow' | 'live';
@@ -20,11 +20,13 @@ export function noticeRecord(notice: Notice, delivery: 'shadow' | 'live', status
   const name = EVENT_NAMES[notice.event] ?? notice.event;
   const text = notice.questionSummary?.text || '';
   const requests = requestsOf(notice);
+  const sessions = notice.event === 'error' ? errorSessionsOf(notice) : undefined;
   return {
     id: notice.id, event: notice.event, agentId: notice.agentId, sessionTitle: notice.title || '未命名会话', workspaceId: notice.workspaceId,
     questionText: text, summary: `${name}：${text || notice.title || '无标题'}`,
     at: new Date(now()).toISOString(), delivery, status, acknowledged: false,
     ...(requests ? { requests } : {}),
+    ...(sessions ? { sessions } : {}),
   };
 }
 

@@ -139,3 +139,39 @@ test('旧记录没有请求编号：从审计日志按通知编号回填，合�
     assert.deepEqual(store.agentsWithOpen().sort(), ['main', 'x']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('合并的出错事件：全部成员会话恢复运行、不存在、已归档或已关闭才结束', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'records-'));
+  try {
+    const store = new EscalationRecords(join(dir, 'records.json'), () => Date.parse('2026-11-08T12:00:00Z'));
+    store.upsert(record('errors', { event: 'error', agentId: 'a', sessions: [{ agentId: 'a' }, { agentId: 'b' }, { agentId: 'c' }] }));
+    assert.deepEqual(store.agentsWithOpen().sort(), ['a', 'b', 'c']);
+    assert.deepEqual(store.settleAgent('a', { status: 'running', archivedAt: null, pending: [] }), []);
+    assert.deepEqual(store.settleAgent('b', { status: 'error', archivedAt: null, pending: [] }), []);
+    assert.deepEqual(store.settleAgent('c', null), []);
+    assert.deepEqual(store.pending().map(item => item.id), ['errors']);
+    assert.deepEqual(store.agentsWithOpen(), ['b']);
+    assert.deepEqual(store.settleAgent('b', { status: 'idle', archivedAt: '2026-11-08T11:59:00.000Z', pending: [] }).map(item => [item.id, item.closedReason]), [['errors', 'session-archived']]);
+    assert.deepEqual(store.pending(), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('只按会话已归档或不存在结束（守护进程刚重启，等待列表还没恢复）：其他判断都不做', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'records-'));
+  try {
+    const store = new EscalationRecords(join(dir, 'records.json'), () => Date.parse('2026-11-08T12:00:00Z'));
+    store.upsert(record('q', { agentId: 'a', requests: [{ agentId: 'a', requestId: 'p1' }] }));
+    store.upsert(record('legacy', { agentId: 'b' }));
+    store.upsert(record('err', { agentId: 'c', event: 'error' }));
+    store.upsert(record('gone', { agentId: 'd', requests: [{ agentId: 'd', requestId: 'p2' }] }));
+    store.upsert(record('archived', { agentId: 'e', requests: [{ agentId: 'e', requestId: 'p3' }] }));
+    const options = { onlyGone: true };
+    store.settleAgent('a', { status: 'idle', archivedAt: null, pending: [] }, options);
+    store.settleAgent('b', { status: 'closed', archivedAt: null, pending: [] }, options);
+    store.settleAgent('c', { status: 'running', archivedAt: null, pending: [] }, options);
+    store.settleAgent('d', null, options);
+    store.settleAgent('e', { status: 'idle', archivedAt: '2026-11-08T11:00:00.000Z', pending: [] }, options);
+    assert.deepEqual(store.pending().map(item => item.id).sort(), ['err', 'legacy', 'q']);
+    assert.deepEqual(store.recent().find(item => item.id === 'q')!.requests, [{ agentId: 'a', requestId: 'p1' }]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

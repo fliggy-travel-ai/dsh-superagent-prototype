@@ -20,6 +20,8 @@ export interface EscalationRecord {
   acknowledged: boolean;
   /** 来源提问（合并通知含全部提问成员）。旧记录没有，启动时从审计日志回填。 */
   requests?: Array<{ agentId: string; requestId: string; done?: boolean }>;
+  /** 出错事件的成员会话（合并通知含全部出错成员）。旧记录没有，只看 agentId。 */
+  sessions?: Array<{ agentId: string; done?: boolean }>;
   /** 来源不再等待时自动结束的时间（ISO）和原因。 */
   closedAt?: string;
   closedReason?: ClosedReason;
@@ -74,6 +76,7 @@ export class EscalationRecords {
     if (previous) this.records[index] = {
       ...record, acknowledged: previous.acknowledged || record.acknowledged,
       ...(previous.requests ? { requests: previous.requests } : {}),
+      ...(previous.sessions ? { sessions: previous.sessions } : {}),
       ...(previous.closedAt ? { closedAt: previous.closedAt, closedReason: previous.closedReason } : {}),
     };
     else this.records.push(record);
@@ -100,14 +103,16 @@ export class EscalationRecords {
       .sort((left, right) => right.at.localeCompare(left.at));
   }
 
+  /** 记录还在等的会话：出错事件看成员会话，提问看未结束的请求；旧记录只看 agentId。 */
+  private members(item: EscalationRecord): string[] {
+    if (item.event === 'error' && item.sessions?.length) return item.sessions.filter(s => !s.done).map(s => s.agentId);
+    if (item.requests?.length) return item.requests.filter(r => !r.done).map(r => r.agentId);
+    return item.agentId ? [item.agentId] : [];
+  }
+
   /** 有未结束记录的会话，供对账逐个查询。 */
   agentsWithOpen(): string[] {
-    const ids = new Set<string>();
-    for (const item of this.open()) {
-      if (item.agentId) ids.add(item.agentId);
-      for (const request of item.requests ?? []) if (!request.done) ids.add(request.agentId);
-    }
-    return [...ids];
+    return [...new Set(this.open().flatMap(item => this.members(item)))];
   }
 
   private finish(item: EscalationRecord, reason: ClosedReason) {
@@ -131,33 +136,41 @@ export class EscalationRecords {
   }
 
   /**
-   * 按会话现状对账。会话查不到、已归档、已关闭：全部结束。
+   * 按会话现状对账。会话查不到、已归档、已关闭：这个会话的部分结束。
    * 提问：请求已不在等待列表中就结束；旧记录不知道请求编号时，会话没有任何等待中的请求才结束。
-   * 错误：会话已继续运行才结束。
+   * 错误：会话已继续运行才结束；合并的出错事件要全部成员会话都结束。
+   * onlyGone：守护进程刚重启时会话还没恢复，等待列表为空、状态也不可信，只按“已归档或不存在”结束。
    */
-  settleAgent(agentId: string, view: AgentView): EscalationRecord[] {
+  settleAgent(agentId: string, view: AgentView, options: { onlyGone?: boolean } = {}): EscalationRecord[] {
     const closed: EscalationRecord[] = [];
-    const whole: ClosedReason | null = !view ? 'session-gone' : view.archivedAt ? 'session-archived' : view.status === 'closed' ? 'session-closed' : null;
+    const whole: ClosedReason | null = !view ? 'session-gone' : view.archivedAt ? 'session-archived' : !options.onlyGone && view.status === 'closed' ? 'session-closed' : null;
     let changed = false;
+    const close = (item: EscalationRecord, reason: ClosedReason) => { this.finish(item, reason); closed.push(item); };
     for (const item of this.open()) {
+      if (!this.members(item).includes(agentId)) continue;
+      if (item.event === 'error') {
+        const reason = whole ?? (!options.onlyGone && view!.status === 'running' ? 'session-resumed' : null);
+        if (!reason) continue;
+        if (!item.sessions?.length) { close(item, reason); continue; }
+        for (const session of item.sessions) if (session.agentId === agentId) session.done = true;
+        changed = true;
+        if (item.sessions.every(s => s.done)) close(item, reason);
+        continue;
+      }
       const mine = (item.requests ?? []).filter(r => r.agentId === agentId && !r.done);
-      if (item.agentId !== agentId && !mine.length) continue;
       if (whole) {
         for (const request of mine) request.done = true;
         changed ||= mine.length > 0;
-        if ((item.requests ?? []).every(r => r.done)) { this.finish(item, whole); closed.push(item); }
+        if ((item.requests ?? []).every(r => r.done)) close(item, whole);
         continue;
       }
-      if (item.event === 'error') {
-        if (view!.status === 'running') { this.finish(item, 'session-resumed'); closed.push(item); }
-        continue;
-      }
+      if (options.onlyGone) continue;
       if (!item.requests?.length) {
-        if (!view!.pending.length) { this.finish(item, 'resolved'); closed.push(item); }
+        if (!view!.pending.length) close(item, 'resolved');
         continue;
       }
       for (const request of mine) if (!view!.pending.includes(request.requestId)) { request.done = true; changed = true; }
-      if (item.requests.every(r => r.done)) { this.finish(item, 'resolved'); closed.push(item); }
+      if (item.requests.every(r => r.done)) close(item, 'resolved');
     }
     if (closed.length || changed) this.save();
     return closed;
@@ -204,4 +217,11 @@ export function requestsOf(notice: NoticeLike): EscalationRecord['requests'] {
     if (!requests.some(r => r.agentId === member.agentId && r.requestId === member.requestId)) requests.push({ agentId: member.agentId, requestId: member.requestId });
   }
   return requests.length ? requests : undefined;
+}
+
+/** 出错通知的成员会话：单条取自身，合并通知取全部出错成员，去重。没有就返回 undefined。 */
+export function errorSessionsOf(notice: NoticeLike): EscalationRecord['sessions'] {
+  const ids = new Set<string>();
+  for (const member of notice.events?.length ? notice.events : [notice]) if (member?.event === 'error' && typeof member.agentId === 'string' && member.agentId) ids.add(member.agentId);
+  return ids.size ? [...ids].map(agentId => ({ agentId })) : undefined;
 }

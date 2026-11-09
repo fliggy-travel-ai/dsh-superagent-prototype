@@ -7,7 +7,13 @@ export interface ReconcileDeps {
   /** 查询会话现状：null 表示 Paseo 中查不到；抛错表示暂时查不到，保留记录下次再查。 */
   lookup(agentId: string): Promise<AgentView>;
   log?(line: string): void;
+  now?(): number;
+  /** 启动后多久才相信“请求已不在等待”。默认 2 分钟。 */
+  graceMs?: number;
 }
+
+/** 守护进程重启后会话恢复需要时间，恢复前等待列表为空。 */
+const STARTUP_GRACE_MS = 120_000;
 
 /** 会话快照（订阅推送或 ref 刷新）中与结束判断有关的字段。 */
 export function agentView(agent: { status?: string | null; archivedAt?: string | null; pendingPermissions?: ReadonlyArray<{ id: string }> | null }): NonNullable<AgentView> {
@@ -20,7 +26,13 @@ export function agentView(agent: { status?: string | null; archivedAt?: string |
  */
 export class EscalationReconciler {
   private readonly deps: ReconcileDeps;
-  constructor(deps: ReconcileDeps) { this.deps = deps; }
+  private readonly startedAt: number;
+  constructor(deps: ReconcileDeps) { this.deps = deps; this.startedAt = this.now(); }
+
+  private now() { return this.deps.now?.() ?? Date.now(); }
+
+  /** 启动宽限期已过：可以按会话的等待列表和状态结束，否则只按“已归档或不存在”结束。 */
+  trusted() { return this.now() - this.startedAt >= (this.deps.graceMs ?? STARTUP_GRACE_MS); }
 
   private async report(closed: EscalationRecord[], extra: Record<string, unknown> = {}) {
     for (const item of closed) {
@@ -37,10 +49,10 @@ export class EscalationReconciler {
 
   /** 按订阅推送的会话快照对账，不额外查询。 */
   async settle(agentId: string, view: AgentView) {
-    return this.report(this.deps.records.settleAgent(agentId, view));
+    return this.report(this.deps.records.settleAgent(agentId, view, { onlyGone: !this.trusted() }));
   }
 
-  /** 逐个查询有未结束记录的会话。启动时和定时调用；单个会话查询失败不影响其他会话。 */
+  /** 逐个查询有未结束记录的会话。启动时和定时调用；单个会话查询失败不影响其他会话。启动宽限期内只按“已归档或不存在”结束。 */
   async sweep() {
     const closed: EscalationRecord[] = [];
     for (const agentId of this.deps.records.agentsWithOpen()) {
