@@ -14,10 +14,8 @@ type BluetoothDevice = BluetoothSnapshot['devices'][number];
 type ImmediateWindow = EscalationSnapshot['immediate'][number];
 
 export type DrawerId =
-  | 'claude-accounts'
   | 'browser'
   | 'add-browser'
-  | 'claude-quota'
   | 'session-defaults'
   | 'provider-instance'
   | 'cloud'
@@ -32,10 +30,8 @@ export type DrawerId =
   | 'machine-config';
 
 const DRAWER_TITLES: Record<DrawerId, string> = {
-  'claude-accounts': 'Claude 账号',
   browser: '网页版 claude.ai',
   'add-browser': '添加浏览器环境',
-  'claude-quota': 'Claude 名称带额度',
   'session-defaults': '新建会话默认设置',
   'provider-instance': 'Provider 实例',
   cloud: '云端会话',
@@ -117,98 +113,6 @@ function StepRow(props: { num: number; title: string; children?: ReactNode }) {
         <Text style={s.text}>{props.title}</Text>
         {props.children}
       </View>
-    </View>
-  );
-}
-
-function ClaudeAccountsDrawer() {
-  const { s, control } = useUi();
-  const { claudeAccounts, claudeAccountsStatus, claudeAccountsError } = useControlState();
-  const [labels, setLabels] = useState<Record<string, string>>({});
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const accounts = claudeAccounts?.accounts ?? [];
-
-  const saveLabel = async (providerId: string, fallback: string) => {
-    const next = (labels[providerId] ?? fallback).trim();
-    if (!next) return;
-    setBusyId(providerId);
-    setMsg(null);
-    try {
-      await control.renameClaudeAccount({ providerId, label: next });
-      setMsg('名称已保存');
-    } catch (error) {
-      setMsg(errorMessage(error));
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  return (
-    <View style={{ gap: 12 }}>
-      {claudeAccountsStatus === 'disabled' ||
-      (claudeAccounts && !claudeAccounts.enabled && !claudeAccounts.error) ? (
-        <Notice tone="neutral">
-          <Text style={s.text}>Claude 账号与额度模块未启用（等待对应服务端模块合并或开启）。</Text>
-        </Notice>
-      ) : null}
-      {claudeAccountsError || claudeAccounts?.error ? (
-        <Notice tone="danger">
-          <Text style={s.text}>{claudeAccountsError ?? claudeAccounts?.error}</Text>
-        </Notice>
-      ) : null}
-
-      <SectionTitle>本机账号</SectionTitle>
-      {accounts.length === 0 ? (
-        <Text style={s.muted}>本机暂无已登记的 Claude 账号。</Text>
-      ) : (
-        <View>
-          <TableRow first header cells={['名称', '邮箱', '状态', '配置目录', '操作']} />
-          {accounts.map(acc => (
-            <TableRow
-              key={acc.providerId}
-              cells={[
-                <TextInput
-                  key="name"
-                  style={[s.input, { paddingVertical: 4, minWidth: 80 }]}
-                  value={labels[acc.providerId] ?? acc.label}
-                  onChangeText={val => setLabels(prev => ({ ...prev, [acc.providerId]: val }))}
-                  onSubmitEditing={() => void saveLabel(acc.providerId, acc.label)}
-                />,
-                <Text key="email" style={s.mono}>
-                  {acc.email ?? '—'}
-                </Text>,
-                <Chip
-                  key="status"
-                  label={acc.needsRelogin ? '需要重新登录' : '正常'}
-                  tone={acc.needsRelogin ? 'danger' : 'success'}
-                />,
-                <Text key="dir" style={s.mono}>
-                  {acc.configDir}
-                </Text>,
-                acc.needsRelogin ? (
-                  <Text key="act" style={s.small}>
-                    请在 Paseo 的 Provider 设置中重新登录
-                  </Text>
-                ) : (
-                  <Btn
-                    key="act"
-                    small
-                    label="保存名称"
-                    busy={busyId === acc.providerId}
-                    onPress={() => void saveLabel(acc.providerId, acc.label)}
-                  />
-                ),
-              ]}
-            />
-          ))}
-        </View>
-      )}
-      {msg ? <Text style={s.small}>{msg}</Text> : null}
-      <RuleNote>
-        本机只显示本机钥匙串里的账号。各账号的 5 小时与 7 天额度请直接在 Paseo 原生额度面板查看。
-      </RuleNote>
     </View>
   );
 }
@@ -503,101 +407,6 @@ function AddBrowserDrawer() {
           tone={browserError ? 'danger' : browser?.connected ? 'success' : 'neutral'}
         />
       </StepRow>
-    </View>
-  );
-}
-
-function ClaudeQuotaDrawer() {
-  const { s, control, theme } = useUi();
-  const { claudeAccounts, claudeAccountsStatus, claudeAccountsError, providerQuotas, providerQuotasStatus } =
-    useControlState();
-  const autoCont = claudeAccounts?.quotaName.autoResumeDefault ?? false;
-  const lowestPct = claudeAccounts?.quotaName.lowestRemainingPct ?? null;
-  const quotaError = claudeAccountsError ?? claudeAccounts?.error ?? null;
-  const hasQuotaError = claudeAccountsStatus === 'error' || Boolean(quotaError);
-  const quotaDisabled =
-    !hasQuotaError &&
-    (claudeAccountsStatus === 'disabled' ||
-      Boolean(claudeAccounts && (!claudeAccounts.enabled || !claudeAccounts.quotaName.enabled)));
-  const [err, setErr] = useState<string | null>(null);
-
-  const update = async (patch: { autoResumeDefault?: boolean }) => {
-    setErr(null);
-    try {
-      await control.configureClaudeAccounts(patch);
-    } catch (failure) {
-      setErr(errorMessage(failure));
-    }
-  };
-
-  return (
-    <View style={{ gap: 14 }}>
-      {hasQuotaError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取失败：{quotaError ?? '无法读取 Claude 额度状态'}</Text>
-        </Notice>
-      ) : quotaDisabled ? (
-        <Notice tone="neutral">
-          <Text style={s.text}>Claude 额度模块未启用（等待对应服务端模块合并或开启）。</Text>
-        </Notice>
-      ) : null}
-      <TableRow
-        first
-        cells={[
-          '名称显示额度',
-          hasQuotaError ? (
-            <Chip key="st" label="读取失败" tone="danger" />
-          ) : quotaDisabled ? (
-            <Chip key="st" label="未启用" tone="neutral" />
-          ) : !claudeAccounts ? (
-            <Chip key="st" label="正在读取" tone="neutral" />
-          ) : (
-            <Chip
-              key="st"
-              label={lowestPct !== null ? `已开启 · 当前最低 ${lowestPct}%` : '已开启'}
-              tone="success"
-            />
-          ),
-        ]}
-      />
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
-        <Switch
-          accessibilityLabel="新建 Claude 会话默认开启自动继续"
-          disabled={!claudeAccounts || claudeAccountsStatus !== 'ready' || hasQuotaError || quotaDisabled}
-          value={autoCont}
-          onValueChange={val => void update({ autoResumeDefault: val })}
-          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-          thumbColor={theme.colors.accentForeground}
-        />
-      </View>
-
-      <SectionTitle>隐藏的内置额度来源</SectionTitle>
-      <TableRow
-        first
-        cells={[
-          '过滤内置单账号来源',
-          providerQuotasStatus === 'disabled' ? (
-            <Chip key="hb" label="未启用" tone="neutral" />
-          ) : !providerQuotas ? (
-            <Chip key="hb" label="未生效" tone="warning" />
-          ) : (
-            <Chip
-              key="hb"
-              label={providerQuotas.hideBuiltinApplied ? '已生效' : '未生效'}
-              tone={providerQuotas.hideBuiltinApplied ? 'success' : 'warning'}
-            />
-          ),
-        ]}
-      />
-      {providerQuotas?.hideBuiltin.length ? (
-        <Text style={s.small}>配置列表：{providerQuotas.hideBuiltin.join(', ')}</Text>
-      ) : null}
-
-      {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
-      <RuleNote>
-        在会话的 Claude 名称后始终显示 5 小时与 7 天剩余百分比。内置额度来源过滤仅在客户端支持模块枚举时生效，正式版如不支持将显示“未生效”。
-      </RuleNote>
     </View>
   );
 }
@@ -1918,7 +1727,7 @@ function GithubConfigDrawer() {
 
 function MachineConfigDrawer() {
   const { s, control, theme } = useUi();
-  const { machineSettings, modules } = useControlState();
+  const { machineSettings, modules, claudeAccounts, claudeAccountsStatus, claudeAccountsError } = useControlState();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupResult, setBackupResult] = useState<{ backupPath: string; files: string[] } | null>(null);
@@ -1947,6 +1756,17 @@ function MachineConfigDrawer() {
       setError(errorMessage(failure));
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const claudeError = claudeAccountsError ?? claudeAccounts?.error ?? null;
+  const autoResumeReady = claudeAccountsStatus === 'ready' && Boolean(claudeAccounts?.enabled) && !claudeError;
+  const setAutoResume = async (autoResumeDefault: boolean) => {
+    setError(null);
+    try {
+      await control.configureClaudeAccounts({ autoResumeDefault });
+    } catch (failure) {
+      setError(errorMessage(failure));
     }
   };
 
@@ -2031,6 +1851,20 @@ function MachineConfigDrawer() {
         </View>
       )}
 
+      <SectionTitle>Claude 自动继续</SectionTitle>
+      <View style={[s.row, { justifyContent: 'space-between' }]}>
+        <Text style={s.text}>新建 Claude 会话默认开启自动继续</Text>
+        <Switch
+          accessibilityLabel="新建 Claude 会话默认开启自动继续"
+          disabled={!autoResumeReady}
+          value={claudeAccounts?.quotaName.autoResumeDefault ?? false}
+          onValueChange={val => void setAutoResume(val)}
+          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+          thumbColor={theme.colors.accentForeground}
+        />
+      </View>
+      {claudeError ? <Text style={s.small}>读取失败：{claudeError}</Text> : null}
+
       <View style={[s.wrap, { paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }]}>
         <Btn label="导出配置备份" onPress={() => void runBackup()} busy={backupBusy} />
         {backupResult ? (
@@ -2057,14 +1891,10 @@ export function DrawerOverlay(props: {
 
   const renderContent = () => {
     switch (drawerId) {
-      case 'claude-accounts':
-        return <ClaudeAccountsDrawer />;
       case 'browser':
         return <BrowserDrawer onOpenDrawer={onOpenDrawer} />;
       case 'add-browser':
         return <AddBrowserDrawer />;
-      case 'claude-quota':
-        return <ClaudeQuotaDrawer />;
       case 'session-defaults':
         return <SessionDefaultsDrawer />;
       case 'provider-instance':

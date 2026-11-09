@@ -25,7 +25,6 @@ import {
 import {
   claudeAccountsSnapshot,
   claudeAccountsConfigure,
-  claudeAccountsRename,
   type ClaudeAccountsSnapshot,
 } from '../shared/claude-accounts.ts';
 import {
@@ -330,11 +329,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     exportBackup: () => write(() => client.rpc(machineSettingsExportBackup, {})),
     configureClaudeAccounts: (input: { autoResumeDefault?: boolean }) => write(async () => {
       const result = await client.rpc(claudeAccountsConfigure, input);
-      emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
-      return result;
-    }),
-    renameClaudeAccount: (input: { providerId: string; label?: string; realEmail?: string }) => write(async () => {
-      const result = await client.rpc(claudeAccountsRename, input);
       emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
       return result;
     }),
