@@ -14,6 +14,8 @@ const StoredRequestSchema = z.object({
   openedAt: z.number(),
   closedAt: z.number().optional(),
   imported: z.boolean().optional(),
+  // 由“关闭未知编号”产生的墓碑：不算一次真实的请求
+  tombstone: z.boolean().optional(),
   request: z.object({
     toolUseId: z.string(),
     toolName: z.string(),

@@ -22,10 +22,11 @@ type DaemonPending = { id: string; name?: string; kind?: string; input?: unknown
 type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string; pendingPermissions?: DaemonPending[] } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
 const caps = ['prompt.message', 'prompt.steer', 'session.persistence', 'permission'] as const;
 type PendingRequest = { toolUseId: string; toolName: string; kind: 'question' | 'tool'; input: Record<string, unknown> };
-type RequestEntry = { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response']; openedAt: number; closedAt?: number; imported?: boolean };
+type RequestEntry = { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response']; openedAt: number; closedAt?: number; imported?: boolean; tombstone?: boolean };
 // 对账兜底（#1737 评论 6734539343）：云端 forward 停止后关闭请求不再到达，Paseo 会一直显示网页上早已处理的请求。
-const SUPERSEDE_MS = 10 * 60_000; // 同一会话有更新的请求、本请求已过 10 分钟：网页上已处理过（claude.ai 一次只等一个提示）
-const EXPIRE_MS = 2 * 60 * 60_000;
+const SUPERSEDE_MS = 10 * 60_000; // 同一会话之后有新请求、本请求已过 10 分钟：网页上已处理过
+const NEWER_GAP_MS = 60_000; // “新请求”须晚于本条至少 60 秒：并行工具调用几乎同时触发的请求互不算新请求
+const EXPIRE_MS = 2 * 60 * 60_000; // 只用于重载后从 daemon 读回的存量请求
 const REPLAY_CLOSED_MS = 24 * 60 * 60_000;
 export type CloudSessionOptions = { store?: CloudRequestStore; now?: () => number; sweepIntervalMs?: number; importFromDaemon?: boolean };
 export const CLOUD_MANUAL_REQUEST_MARKER = 'cloudSessionManual';
@@ -153,14 +154,14 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const requests = new Map<string, Map<string, RequestEntry>>();
   const pending = (cloud: string) => { let entries = requests.get(cloud); if (!entries) { entries = new Map(); requests.set(cloud, entries); } return entries; };
   for (const stored of options.store?.load() ?? []) {
-    pending(stored.cloud).set(stored.toolUseId, { request: stored.request ?? { toolUseId: stored.toolUseId, toolName: '', kind: 'tool', input: {} }, closed: stored.closed, delivered: false, openedAt: stored.openedAt, ...(stored.closedAt !== undefined ? { closedAt: stored.closedAt } : {}), ...(stored.imported ? { imported: true } : {}) });
+    pending(stored.cloud).set(stored.toolUseId, { request: stored.request ?? { toolUseId: stored.toolUseId, toolName: '', kind: 'tool', input: {} }, closed: stored.closed, delivered: false, openedAt: stored.openedAt, ...(stored.closedAt !== undefined ? { closedAt: stored.closedAt } : {}), ...(stored.imported ? { imported: true } : {}), ...(stored.tombstone ? { tombstone: true } : {}) });
   }
   let saving: Promise<unknown> = Promise.resolve();
   const imports = new Set<Promise<unknown>>();
   const persist = () => {
     if (!options.store) return;
     const entries: StoredRequest[] = [];
-    for (const [cloud, map] of requests) for (const [toolUseId, entry] of map) entries.push({ cloud, toolUseId, closed: entry.closed, openedAt: entry.openedAt, ...(entry.closedAt !== undefined ? { closedAt: entry.closedAt } : {}), ...(entry.imported ? { imported: true } : {}), ...(entry.closed ? {} : { request: entry.request }) });
+    for (const [cloud, map] of requests) for (const [toolUseId, entry] of map) entries.push({ cloud, toolUseId, closed: entry.closed, openedAt: entry.openedAt, ...(entry.closedAt !== undefined ? { closedAt: entry.closedAt } : {}), ...(entry.imported ? { imported: true } : {}), ...(entry.tombstone ? { tombstone: true } : {}), ...(entry.closed ? {} : { request: entry.request }) });
     saving = options.store.save(entries).catch(() => { console.error('云端请求表保存失败'); });
   };
   const emitResolved = (cloud: string, toolUseId: string) => { const s = sessions.get(cloud); if (s) s.emit({ type: 'session.permission_resolved', sessionId: s.id, permissionId: toolUseId }); };
@@ -188,26 +189,28 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
     if (entry?.closed) return { closed: false };
     if (!entry) {
       // 插件重载等原因丢了条目：仍让 Paseo 撤下，并记墓碑，之后同编号的通知不再显示。
-      entries.set(toolUseId, { request: { toolUseId, toolName: '', kind: 'tool', input: {} }, closed: true, delivered: false, openedAt: now(), closedAt: now() });
+      entries.set(toolUseId, { request: { toolUseId, toolName: '', kind: 'tool', input: {} }, closed: true, delivered: false, openedAt: now(), closedAt: now(), tombstone: true });
       emitResolved(cloudSessionId, toolUseId); persist(); return { closed: true };
     }
     close(cloudSessionId, toolUseId, entry, outcome); persist(); return { closed: true };
   };
-  // 撤下网页上已处理过的请求：同会话有更新请求且已过 10 分钟，或已等 2 小时。墓碑超过 7 天或超过上限时丢弃。
+  // 撤下网页上已处理过的请求：同会话之后有新请求（晚 60 秒以上，墓碑不算）且本条已过 10 分钟；重载后读回的存量请求等满 2 小时也撤下。
+  // 墓碑超过 7 天或超过上限时丢弃。
   const sweep = () => {
     const t = now(); let changed = false;
     for (const [cloud, entries] of requests) {
-      const openedAt = [...entries.values()].map(entry => entry.openedAt);
+      const openedAt = [...entries.values()].filter(entry => !entry.tombstone).map(entry => entry.openedAt);
       const stale: string[] = [];
       for (const [toolUseId, entry] of entries) {
         if (entry.closed) continue;
-        const superseded = t - entry.openedAt >= SUPERSEDE_MS && openedAt.some(at => at > entry.openedAt);
-        if (superseded || t - entry.openedAt >= EXPIRE_MS) { close(cloud, toolUseId, entry); stale.push(toolUseId); }
+        const superseded = t - entry.openedAt >= SUPERSEDE_MS && openedAt.some(at => at >= entry.openedAt + NEWER_GAP_MS);
+        const expired = entry.imported && t - entry.openedAt >= EXPIRE_MS;
+        if (superseded || expired) { close(cloud, toolUseId, entry); stale.push(toolUseId); }
       }
       if (stale.length) {
         changed = true;
         const s = sessions.get(cloud);
-        if (s) s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text: `已撤下 ${stale.length} 条 Paseo 中的云端请求：之后已有新的请求，或已等待超过 2 小时，网页上应已处理。如 claude.ai 仍在等待，请在网页上处理。` } });
+        if (s) s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text: `已撤下 ${stale.length} 条 Paseo 中的云端请求：之后已有新的请求，或是插件重载前留下、已等待超过 2 小时的请求，网页上应已处理。如 claude.ai 仍在等待，请在网页上处理。` } });
       }
       for (const [toolUseId, entry] of entries) if (entry.closed && t - (entry.closedAt ?? entry.openedAt) > CLOSED_TTL_MS) { entries.delete(toolUseId); changed = true; }
       if (!entries.size) requests.delete(cloud);

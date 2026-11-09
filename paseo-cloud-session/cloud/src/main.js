@@ -155,15 +155,21 @@ function resultOutcome(block,row) {
   if(block.is_error && /(?:user (?:denied|rejected)|permission (?:denied|rejected) by (?:the )?user|denied by (?:the )?user|tool use was rejected|user (?:does not|doesn't) want to proceed|用户拒绝)/i.test(text)) return 'denied';
   return 'answered';
 }
-// 钩子输入没带 tool_use_id 时，从记录里找“同名、输入相同、还没有结果”的最后一个 tool_use。
-// 新调用可能还没写进记录，等一会儿再找；找不到就不通知，避免用上一个同名调用的编号。
+// 钩子输入没带 tool_use_id 时，从记录里找“同名、还没有结果”的 tool_use：输入相同的取最后一个；
+// 钩子输入可能带记录里没有的默认值（如 multiSelect、replace_all），对不上时若同名且无结果的只有一个就用它。
+// 新调用可能还没写进记录，等一会儿再找；仍不能唯一确定就不通知，避免用上一个同名调用的编号。
 async function findToolUseId(path, toolName, toolInput, waitMs) {
-  const deadline=Date.now()+waitMs;
+  const started=Date.now(), deadline=started+waitMs, fallbackAfter=started+Math.min(1000,waitMs/2);
   for(;;) {
     try {
       const lines=(await readFile(path,'utf8')).split('\n'); const finished=new Set();
       for(const line of lines) {try {const row=JSON.parse(line); if(row.type==='user' && Array.isArray(row.message?.content)) for(const b of row.message.content) if(b.type==='tool_result' && typeof b.tool_use_id==='string') finished.add(b.tool_use_id);} catch {}}
-      for(let i=lines.length-1;i>=0;i--) {try {const row=JSON.parse(lines[i]); if(row.type!=='assistant' || row.isSidechain || row.isMeta) continue; const blocks=row.message?.content; if(!Array.isArray(blocks)) continue; for(let j=blocks.length-1;j>=0;j--) {const b=blocks[j]; if(b.type==='tool_use' && b.name===toolName && typeof b.id==='string' && b.id && !finished.has(b.id) && isDeepStrictEqual(b.input ?? {},toolInput)) return b.id;}} catch {}}
+      const candidates=[];
+      for(const line of lines) {try {const row=JSON.parse(line); if(row.type!=='assistant' || row.isSidechain || row.isMeta || !Array.isArray(row.message?.content)) continue; for(const b of row.message.content) if(b.type==='tool_use' && b.name===toolName && typeof b.id==='string' && b.id && !finished.has(b.id)) candidates.push(b);} catch {}}
+      const exact=candidates.filter(b=>isDeepStrictEqual(b.input ?? {},toolInput));
+      if(exact.length) return exact.at(-1).id;
+      // 先给输入完全相同的新调用写入记录的时间，再退回“唯一候选”
+      if(candidates.length===1 && Date.now()>=fallbackAfter) return candidates[0].id;
     } catch {}
     if(Date.now()>=deadline) return '';
     await sleep(200);

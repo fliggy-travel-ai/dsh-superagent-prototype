@@ -26,8 +26,31 @@ test('钩子没带编号时按“同名且输入相同”的 tool_use 找编号�
     setTimeout(() => void appendFile(transcript, use('new-id', 'mcp__paseo__add_repo', { repo: 'second' }) + '\n'), 400);
     await notifyRequest({ tool_name: 'mcp__paseo__add_repo', tool_input: { repo: 'second' }, transcript_path: transcript }, e, rpc);
     assert.deepEqual(seen, ['new-id']);
+    // 两个调用都已有结果后，没有同名且无结果的调用：等不到就不通知
+    await appendFile(transcript, [result('old-id'), result('new-id')].join('\n') + '\n');
     await notifyRequest({ tool_name: 'mcp__paseo__add_repo', tool_input: { repo: 'never' }, transcript_path: transcript }, { ...e, PASEO_CLOUD_ID_WAIT_MS: '300' }, rpc);
     assert.deepEqual(seen, ['new-id']);
+  } finally { await rm(dir, { recursive: true, force: true }); await rm(sessionDir(e.CLAUDE_CODE_REMOTE_SESSION_ID), { recursive: true, force: true }); }
+});
+
+test('钩子输入带默认值（multiSelect:false、replace_all:false）而记录里没有时，同名且无结果的调用只有一个就用它；有两个时不猜', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'paseo-default-test-')), transcript = join(dir, 't.jsonl');
+  const e = { ...env, CLAUDE_CODE_REMOTE_SESSION_ID: 'cse_default' + Date.now(), PASEO_CLOUD_ID_WAIT_MS: '300' };
+  try {
+    await writeFile(transcript, [
+      use('ask-done', 'AskUserQuestion', { questions: [{ question: '旧问题' }] }), result('ask-done'),
+      use('ask-1', 'AskUserQuestion', { questions: [{ question: '选哪个？', options: [{ label: 'A' }] }] }),
+      use('edit-1', 'Edit', { file_path: '/a', old_string: 'x', new_string: 'y' }),
+    ].join('\n') + '\n');
+    const seen = [];
+    const rpc = async (c, v) => { seen.push(v.request.toolUseId); return { shown: true }; };
+    await notifyRequest({ tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: '选哪个？', options: [{ label: 'A' }], multiSelect: false }] }, transcript_path: transcript }, e, rpc);
+    await notifyRequest({ tool_name: 'Edit', tool_input: { file_path: '/a', old_string: 'x', new_string: 'y', replace_all: false }, transcript_path: transcript }, e, rpc);
+    assert.deepEqual(seen, ['ask-1', 'edit-1']);
+    // 两个同名且无结果的调用：输入对不上时不猜
+    await appendFile(transcript, use('edit-2', 'Edit', { file_path: '/b', old_string: 'x', new_string: 'y' }) + '\n');
+    await notifyRequest({ tool_name: 'Edit', tool_input: { file_path: '/c', old_string: 'x', new_string: 'y', replace_all: false }, transcript_path: transcript }, e, rpc);
+    assert.deepEqual(seen, ['ask-1', 'edit-1']);
   } finally { await rm(dir, { recursive: true, force: true }); await rm(sessionDir(e.CLAUDE_CODE_REMOTE_SESSION_ID), { recursive: true, force: true }); }
 });
 

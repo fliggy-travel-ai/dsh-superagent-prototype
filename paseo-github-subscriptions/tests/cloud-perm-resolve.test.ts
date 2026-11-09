@@ -69,7 +69,7 @@ test('云端推送的时间线里工具调用已结束时，插件直接关闭�
   } finally { f.close(); }
 });
 
-test('有更新请求且已过 10 分钟的旧请求、超过 2 小时的请求被撤下，并在时间线说明', async () => {
+test('有更新请求（晚于本条至少 60 秒）且已过 10 分钟的旧请求被撤下，并在时间线说明；非存量请求等 2 小时也不撤下', async () => {
   const f = await fixture();
   try {
     f.cloud.notify({ cloudSessionId: cloudId, request: tool('toolu_old') });
@@ -81,9 +81,32 @@ test('有更新请求且已过 10 分钟的旧请求、超过 2 小时的请求�
     f.cloud.sweep();
     assert.deepEqual(f.resolved(), ['toolu_old']);
     assert.ok(f.events.some(event => event.type === 'timeline.item' && /已撤下/.test(JSON.stringify(event))));
-    f.advance(2 * 60 * MIN);
+    // 用户离开很久：真实在等的请求不撤下（2 小时规则只用于重载后读回的存量）
+    f.advance(3 * 60 * MIN);
     f.cloud.sweep();
-    assert.deepEqual(f.resolved(), ['toolu_old', 'toolu_new']);
+    assert.deepEqual(f.resolved(), ['toolu_old']);
+  } finally { f.close(); }
+});
+
+test('并行工具调用几乎同时触发的多个请求，10 分钟后都还在', async () => {
+  const f = await fixture();
+  try {
+    for (const id of ['toolu_p1', 'toolu_p2', 'toolu_p3']) { f.cloud.notify({ cloudSessionId: cloudId, request: tool(id, id) }); f.advance(2000); }
+    f.advance(15 * MIN);
+    f.cloud.sweep();
+    assert.deepEqual(f.resolved(), []);
+  } finally { f.close(); }
+});
+
+test('墓碑不算“之后有新请求”', async () => {
+  const f = await fixture();
+  try {
+    f.cloud.notify({ cloudSessionId: cloudId, request: tool('toolu_waiting') });
+    f.advance(5 * MIN);
+    f.cloud.resolve({ cloudSessionId: cloudId, toolUseId: 'toolu_unknown_late', outcome: 'answered' });
+    f.advance(20 * MIN);
+    f.cloud.sweep();
+    assert.deepEqual(f.resolved(), ['toolu_unknown_late']);
   } finally { f.close(); }
 });
 
@@ -126,7 +149,7 @@ test('墓碑有上限和过期：超过 7 天的墓碑丢弃，总数不超过�
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('重载后从 daemon 读回存量待批请求：之后有新请求并过 10 分钟即撤下（部署后清理 38530eb6 的残留）', async () => {
+test('重载后从 daemon 读回存量待批请求：之后有新请求（晚 60 秒以上）并过 10 分钟即撤下（部署后清理 38530eb6 的残留）', async () => {
   const pending = [
     { id: 'toolu_stale_1', name: 'mcp__paseo__get_agent_status', kind: 'tool', input: {} },
     { id: 'toolu_stale_2', name: 'AskUserQuestion', kind: 'question', input: { questions: [] } },
@@ -143,5 +166,18 @@ test('重载后从 daemon 读回存量待批请求：之后有新请求并过 10
     f.advance(10 * MIN);
     f.cloud.sweep();
     assert.deepEqual(f.resolved().sort(), ['toolu_stale_1', 'toolu_stale_2']);
+  } finally { f.close(); }
+});
+
+test('重载后读回的存量请求没有新请求时，等满 2 小时撤下', async () => {
+  const f = await fixture({ pending: [{ id: 'toolu_lonely', name: 'Bash', kind: 'tool', input: {} }] });
+  try {
+    await f.cloud.flush();
+    f.advance(119 * MIN);
+    f.cloud.sweep();
+    assert.deepEqual(f.resolved(), []);
+    f.advance(2 * MIN);
+    f.cloud.sweep();
+    assert.deepEqual(f.resolved(), ['toolu_lonely']);
   } finally { f.close(); }
 });
