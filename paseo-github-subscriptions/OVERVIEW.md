@@ -75,3 +75,20 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 ## 浏览器环境剩余额度
 
 已配对的浏览器环境在 Paseo 面板额度区域展示 `claude.ai` 的 5 小时窗口和每周窗口剩余额度及重置时间。条目名称优先由插件服务端通过 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，可通过配置或环境变量覆盖）查询当前浏览器环境在 AdsPower 中的名称：可在插件“额度设置”中填写 AdsPower API key（只保存在本机权限 0600 的插件状态文件中，不写日志，不返回给前端，前端仅显示“已配置/已配置（来自环境变量）/未配置”，支持清除与重新填写，并保留环境变量 `PASEO_ADSPOWER_API_KEY` / `ADSPOWER_API_KEY` 作为后备来源）；要准确显示环境名称需在扩展选项页填写一次环境序号，单环境自动识别只在本机单个活跃环境且单个扩展上报时生效；读不到名称时按顺序回退显示环境序号、`user_id` 或扩展上报的环境名称，查询失败时在额度详情中显示具体原因（连接失败、需要在额度设置填写 AdsPower API key、API key 无效，请在额度设置重新填写、被限流、未找到环境）。扩展在每个已配对浏览器环境中保持一个后台 `https://claude.ai/settings/usage`（跳转到 `/new#settings/usage`）用量页面标签页，每 10 分钟刷新该标签页并在页面加载完成后只读页面显示的额度比例与重置文字，每分钟通过本机 `/usage` 路由上报当前状态。用户把该用量标签页切走、改地址或关闭时，扩展不强行改回，下一轮读取时另开一个后台用量页面标签页。浏览器未打开、通道关闭、未登录或读取失败时，面板保留并展示上一次同步的额度、环境名称与相对同步时间，超过三天未连接的环境自动移除。扩展不构造 `claude.ai` 请求，不点击任何页面，不刷新业务会话标签页，不切换账号，也不修改网页设置。
+
+## Claude 账号额度、升级通知和子会话免提醒（#1737 第二期）
+
+三个模块默认关闭。行为、配置和迁移见 `docs/answer-usage-modules.md`。主会话是置顶工作区中的会话；停滞会话、子会话免提醒和升级通知使用同一判定。
+
+### 复制自 Paseo 自带插件的文件
+
+`server/vendor/paseo-0.15.0/claude-usage-source/` 原样复制 Paseo 0.15.0 自带插件 `claude-usage-source` 的 `server/usage.ts`、`server/stores.ts`、`shared/input.ts` 和 `icon.svg`，保持相对路径，没有修改。Paseo 更新后运行 `npm run vendor:check` 比较，有变化时重新复制。自有逻辑放在 `server/modules/usage-claude-accounts/`。
+
+### 迁入的旧插件
+
+| 旧插件 | 迁入模块 | 来源版本 |
+|---|---|---|
+| `claude-quota-resume` | `usage.claudeAccounts` | 2026-11-07 的本机副本（OVERVIEW 更新于 11 月 7 日，要求 Paseo ≥ 0.14.0，已核对 0.15.0） |
+| `subsession-quiet` | `answer.quietChildren` | 本机副本 0.0.0 |
+| `event-notifications` | `answer.escalation`、`answer.quietChildren`（事件转发） | Mac Mini 副本，包含 2026-11-08 的启动重试修复 |
+

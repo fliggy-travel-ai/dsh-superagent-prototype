@@ -4,6 +4,7 @@ import { PillPopover } from './client/pill-popover.tsx';
 import { MainScreen, UsageSettingsScreen } from './client/dashboard.tsx';
 import { SettingsScreen } from './client/settings/index.tsx';
 import { SidebarItem } from './client/sidebar-item.tsx';
+import { registerQuotaResume } from './client/quota-resume/register.tsx';
 import { createSnapshotStore } from './client/store.ts';
 import { createControlStore } from './client/control-store.ts';
 import { bind, type Env } from './client/ui.tsx';
@@ -24,11 +25,13 @@ export default function contribute(client: PluginClientContext) {
     client.addSettingsScreen?.({ id: 'usage', title: '额度设置', icon: 'Gauge', Component: bind(env, UsageSettingsScreen) }),
   ].filter((remove): remove is NonNullable<typeof remove> => typeof remove === 'function');
   const pills = createPills(client, store, bind(env, PillPopover));
+  const quotaResume = registerQuotaResume(client);
   store.start();
   control.start();
 
   return () => {
     pills.dispose();
+    quotaResume();
     store.dispose();
     control.dispose();
     for (const remove of removers) remove();

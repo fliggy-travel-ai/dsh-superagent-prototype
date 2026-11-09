@@ -2,18 +2,94 @@
   "version": 1,
   "machine": "macmini",
   "modules": {
-    "providers.defaults": true
+    "providers.defaults": true,
+    "answer.quietChildren": true,
+    "answer.escalation": true,
+    "usage.claudeAccounts": true
   },
   "agentDefaults": [
     {
-      "provider": ["codex", "codex-2", "codex-3", "codex-4", "codex-5"],
+      "provider": [
+        "codex",
+        "codex-2",
+        "codex-3",
+        "codex-4",
+        "codex-5"
+      ],
       "apply": "always",
       "modeId": "full-access",
-      "features": { "service_tier": "priority" },
-      "removeFeatures": ["fast_mode"]
+      "features": {
+        "service_tier": "priority"
+      },
+      "removeFeatures": [
+        "fast_mode"
+      ]
     },
-    { "provider": "claude-user-pilot", "modeId": "bypassPermissions", "replaceModeIds": ["auto"] },
-    { "provider": ["opencode", "glm-acp-agent"], "features": { "auto_accept": true } },
-    { "provider": "qoder", "modeId": "yolo", "features": { "auto_accept": true } }
-  ]
+    {
+      "provider": "claude-user-pilot",
+      "modeId": "bypassPermissions",
+      "replaceModeIds": [
+        "auto"
+      ]
+    },
+    {
+      "provider": [
+        "opencode",
+        "glm-acp-agent"
+      ],
+      "features": {
+        "auto_accept": true
+      }
+    },
+    {
+      "provider": "qoder",
+      "modeId": "yolo",
+      "features": {
+        "auto_accept": true
+      }
+    }
+  ],
+  "quietChildren": {
+    "enabled": true,
+    "forwardEvents": false
+  },
+  "escalation": {
+    "delivery": "shadow",
+    "timezone": "Asia/Singapore",
+    "immediate": [
+      {
+        "days": "daily",
+        "from": "01:00",
+        "to": "09:30"
+      },
+      {
+        "days": "weekdays",
+        "from": "12:00",
+        "to": "14:00"
+      }
+    ],
+    "delayMinutes": 0,
+    "webhook": {
+      "urlService": "示例-webhook-地址",
+      "authService": "示例-webhook-鉴权",
+      "account": "示例账号"
+    },
+    "quotaAlerts": {
+      "enabled": true,
+      "fileDirectory": "/path/to/quota-webhook-files"
+    },
+    "newObjects": true,
+    "prefilter": {
+      "command": "/usr/bin/python3",
+      "script": "/path/to/prefilter.py"
+    }
+  },
+  "claudeAccounts": {
+    "sourceId": "claude-accounts",
+    "labelWithQuota": true,
+    "autoResumeDefault": false,
+    "renewal": true,
+    "loginWorkspaceName": "账号登录",
+    "loginGuide": false
+  }
 }

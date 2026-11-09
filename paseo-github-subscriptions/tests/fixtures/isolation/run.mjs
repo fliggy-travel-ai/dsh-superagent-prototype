@@ -1,3 +1,4 @@
+import '../../resolve-js-to-ts.mjs';
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 

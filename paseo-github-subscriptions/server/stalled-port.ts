@@ -2,6 +2,7 @@ import type { DaemonClient, FetchAgentTimelineCursor } from '@getpaseo/client/in
 import type { PresenceHosts } from './presence-port.ts';
 import type { StalledAgent, StalledPort } from './stalled.ts';
 import { SnapshotSchema } from '../shared/model.ts';
+import type { RolesReader } from './core/session-roles.ts';
 
 async function list(client: DaemonClient, hostId: string): Promise<StalledAgent[]> {
   const agents: StalledAgent[] = [];
@@ -16,7 +17,7 @@ async function list(client: DaemonClient, hostId: string): Promise<StalledAgent[
   throw new Error('会话清单未完整返回，暂不判定停滞。');
 }
 
-export function stalledPort(origin: DaemonClient, hosts: PresenceHosts, githubListeners: () => string[]): StalledPort {
+export function stalledPort(origin: DaemonClient, hosts: PresenceHosts, githubListeners: () => string[], roles: RolesReader): StalledPort {
   const hostId = () => origin.getLastServerInfoMessage()!.serverId;
   const onHost = <T>(id: string, operation: (client: DaemonClient) => Promise<T>): Promise<T> => id === hostId() ? operation(origin) : hosts.withHost(id, operation);
   return {
@@ -24,6 +25,8 @@ export function stalledPort(origin: DaemonClient, hosts: PresenceHosts, githubLi
       return new Set((await list(origin, hostId())).filter(agent => !agent.archivedAt && ['idle', 'error'].includes(agent.status)).map(agent => agent.id));
     },
     async collect() {
+      // 置顶状态只存在本机；读取失败时抛错，不能当作“没有主会话”。
+      const workspaceRoles = await roles.read();
       const directory = await origin.listHosts();
       const enabled = directory.hosts.filter(host => host.enabled && host.serverId);
       if (enabled.some(host => host.status !== 'online')) throw new Error('有来源主机离线，无法确认跨主机子会话，暂不判定停滞。');
@@ -42,7 +45,7 @@ export function stalledPort(origin: DaemonClient, hosts: PresenceHosts, githubLi
         const name = id === directory.self.serverId ? '本机' : enabled.find(host => host.serverId === id)?.label || id;
         throw new Error(`读取主机“${name}”的工作状态失败：${error instanceof Error ? error.message : String(error)}`);
       })));
-      return { hostId: hostId(), agents: pages.flat(), listeners };
+      return { hostId: hostId(), agents: pages.flat(), listeners, roles: workspaceRoles };
     },
     async subagents(agent) {
       return onHost(agent.hostId, async client => {
