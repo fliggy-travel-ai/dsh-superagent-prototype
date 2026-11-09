@@ -189,7 +189,7 @@ async function reconcile() {
           const activity = await chrome.tabs.sendMessage(tab.id, { type: 'read-activity' });
           if (['working', 'waiting', 'limited', 'unknown'].includes(activity?.state) && typeof activity.reason === 'string' && typeof activity.lastMessage === 'string' && Number.isFinite(Date.parse(activity.observedAt))) activities.push({ state: activity.state, reason: activity.reason.slice(0,300), lastMessage: activity.lastMessage.slice(-2000), observedAt: new Date().toISOString() });
         } catch {}
-        if (data.approvalEnabled === false) continue;
+        if (data.approvalEnabled === false) { complete = false; continue; }
         const questions = await readQuestions(tab.id, session.sessionId);
         if (!questions) { complete = false; continue; }
         for (const question of questions) {

@@ -518,3 +518,24 @@ test('模式切换 SegmentedControl 与权限卡片不算提问；敏感词提�
   assert.equal(controls.optionBtns[1]!.getAttribute('aria-pressed'), 'true');
   assert.equal(controls.submitOrNext!.clicks, 1);
 });
+
+test('开关为关时跳过读取提问不应把会话标为完整观测（observedSessionIds 为空），重新开启后不误关待答提问', async () => {
+  const fixture = background(true);
+  fixture.setQuestions([sample]);
+  fixture.respond(() => ({ approvalEnabled: false }));
+  await fixture.flush();
+  assert.equal(fixture.state.approvalEnabled, false);
+
+  // 开关关闭期间再次同步（包括服务端重新开启开关返回 approvalEnabled: true 的那一轮）：
+  // 因为本轮跳过了 readQuestions，observedSessionIds 必须为空，不能用空 questions 把待答提问标为已结束。
+  fixture.respond(() => ({ approvalEnabled: true }));
+  await fixture.sync();
+  const reopenRequest = fixture.bodies[1]!;
+  assert.deepEqual(reopenRequest.questions, []);
+  assert.deepEqual(reopenRequest.observedSessionIds, [], '跳过读取提问时 complete 必须为 false，不能上报 observedSessionIds');
+
+  // 收到 approvalEnabled: true 后立即触发下一轮同步，此时才完整读取并上报 observedSessionIds
+  const afterReopen = fixture.bodies.at(-1)!;
+  assert.deepEqual(afterReopen.questions, [sample]);
+  assert.deepEqual(afterReopen.observedSessionIds, ['abc123']);
+});
