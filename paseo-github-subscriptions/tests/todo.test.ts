@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { TodoRuntime, type TodoPort } from '../server/todo.ts';
 import type { PresenceSnapshot } from '../shared/presence.ts';
 import type { BrowserSnapshot } from '../shared/browser.ts';
@@ -953,4 +954,287 @@ test('审阅项 4/7/8c：todo.stalled 与 todo 模块共用同一个 StalledRunt
 
   await host.dispose();
   await main.stop();
+});
+
+test('暂停中途崩溃后再次暂停又失败时保留 inProgress 与原值，恢复后回到原值', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pause-crash-retry-test-'));
+  const machinePath = join(dir, 'machine.json');
+  writeFileSync(
+    machinePath,
+    JSON.stringify({
+      version: 1,
+      machine: 'macbook',
+      modules: {
+        'todo.stalled': true,
+        'answer.presence': true,
+        'answer.escalation': true,
+        'answer.quietChildren': true,
+        github: true,
+        'answer.automation': true,
+      },
+    }),
+  );
+
+  let presencePaused = false;
+  let escalationEnabled = true;
+  let quietEnabled = true;
+  let githubEnabled = true;
+  let autoPaused = false;
+  let failPresence = false;
+
+  const noopMod = (id: string) => ({
+    id,
+    label: id,
+    defaultEnabled: true,
+    appliesTo: () => true,
+    register() {},
+  });
+
+  const main = {
+    stalledPaused: false,
+    invalidateStalledCache() {},
+    readyPresence: async () => {
+      if (failPresence) throw new Error('问答模式读取失败');
+      return {
+        snapshot: () => ({ settings: { mode: 'online', paused: presencePaused, speechEnabled: true, sourceHostId: null } }),
+        configure: async (next: { paused: boolean }) => {
+          presencePaused = next.paused;
+        },
+      };
+    },
+    escalation: {
+      snapshot: async () => ({ enabled: escalationEnabled }),
+      configure: async (patch: { enabled?: boolean }) => {
+        if (patch.enabled !== undefined) escalationEnabled = patch.enabled;
+      },
+    },
+    quiet: {
+      snapshot: async () => ({ enabled: quietEnabled }),
+      configure: async (patch: { enabled?: boolean }) => {
+        if (patch.enabled !== undefined) quietEnabled = patch.enabled;
+      },
+    },
+    github: async () => ({
+      storage: { state: { preferences: { enabled: githubEnabled } } },
+      preferences: async (next: { enabled: boolean }) => {
+        githubEnabled = next.enabled;
+      },
+    }),
+    readyAutomation: async () => ({
+      snapshot: () => ({ paused: autoPaused }),
+      pause: async (p: boolean) => {
+        autoPaused = p;
+      },
+    }),
+  };
+
+  const handlers = new Map<string, (input: any) => Promise<any>>();
+  const server = {
+    handle(contract: { name: string }, handler: (input: any) => Promise<any>) {
+      handlers.set(contract.name, handler);
+    },
+    addHook() {
+      return () => {};
+    },
+  } as unknown as PluginServerContext;
+
+  const machine = loadMachineConfig(machinePath, {});
+  const host = startModules(
+    [
+      noopMod('todo.stalled') as never,
+      noopMod('answer.presence') as never,
+      noopMod('answer.escalation') as never,
+      noopMod('answer.quietChildren') as never,
+      noopMod('github') as never,
+      noopMod('answer.automation') as never,
+    ],
+    {
+      server,
+      instance: resolveInstance('main'),
+      machine,
+      services: { home: dir, daemon: {} as never, main: main as never },
+      stateDirectory: dir,
+      baseDirectory: dir,
+    },
+  );
+  registerMachineSettingsRpcs({
+    server,
+    machine,
+    host,
+    services: { home: dir, daemon: {} as never, main: main as never },
+    stateDirectory: dir,
+    baseDirectory: dir,
+  });
+
+  // 模拟暂停中途进程崩溃：升级通知、子会话免提醒、GitHub 监听已关，状态文件留有 inProgress: true 和原值
+  escalationEnabled = false;
+  quietEnabled = false;
+  githubEnabled = false;
+  writeFileSync(
+    join(dir, 'pause-all.json'),
+    JSON.stringify({
+      paused: false,
+      inProgress: true,
+      saved: {
+        stalledPaused: false,
+        presencePaused: false,
+        escalationEnabled: true,
+        quietEnabled: true,
+        githubEnabled: true,
+      },
+    }),
+  );
+
+  // 再暂停时问答模式读取失败
+  failPresence = true;
+  await assert.rejects(() => handlers.get('machine.settings.pause-all')!({ paused: true }), /问答模式读取失败/);
+
+  // 状态文件仍保留进行中标记和原值
+  const stateAfterFail = JSON.parse(readFileSync(join(dir, 'pause-all.json'), 'utf8'));
+  assert.equal(stateAfterFail.inProgress, true, '崩溃后再次暂停失败仍应保留 inProgress 标记');
+  assert.equal(stateAfterFail.saved?.escalationEnabled, true);
+  assert.equal(stateAfterFail.saved?.quietEnabled, true);
+  assert.equal(stateAfterFail.saved?.githubEnabled, true);
+
+  // 恢复后三项回到原值
+  failPresence = false;
+  await handlers.get('machine.settings.pause-all')!({ paused: false });
+  assert.equal(escalationEnabled, true, '恢复后升级通知应回到原值 true');
+  assert.equal(quietEnabled, true, '恢复后子会话免提醒应回到原值 true');
+  assert.equal(githubEnabled, true, '恢复后 GitHub 监听应回到原值 true');
+
+  await host.dispose();
+});
+
+test('已暂停时再次收到暂停请求直接返回，不重新执行、不回滚，开关和状态文件都不变', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pause-idempotent-test-'));
+  const machinePath = join(dir, 'machine.json');
+  writeFileSync(
+    machinePath,
+    JSON.stringify({
+      version: 1,
+      machine: 'macbook',
+      modules: {
+        'todo.stalled': true,
+        'answer.presence': true,
+        'answer.escalation': true,
+        'answer.quietChildren': true,
+        github: true,
+        'answer.automation': true,
+      },
+    }),
+  );
+
+  let presencePaused = false;
+  let escalationEnabled = true;
+  let quietEnabled = true;
+  let githubEnabled = true;
+  let autoPaused = false;
+  let shouldFailAutomation = false;
+
+  const noopMod = (id: string) => ({
+    id,
+    label: id,
+    defaultEnabled: true,
+    appliesTo: () => true,
+    register() {},
+  });
+
+  const main = {
+    stalledPaused: false,
+    invalidateStalledCache() {},
+    readyPresence: async () => ({
+      snapshot: () => ({ settings: { mode: 'online', paused: presencePaused, speechEnabled: true, sourceHostId: null } }),
+      configure: async (next: { paused: boolean }) => {
+        presencePaused = next.paused;
+      },
+    }),
+    escalation: {
+      snapshot: async () => ({ enabled: escalationEnabled }),
+      configure: async (patch: { enabled?: boolean }) => {
+        if (patch.enabled !== undefined) escalationEnabled = patch.enabled;
+      },
+    },
+    quiet: {
+      snapshot: async () => ({ enabled: quietEnabled }),
+      configure: async (patch: { enabled?: boolean }) => {
+        if (patch.enabled !== undefined) quietEnabled = patch.enabled;
+      },
+    },
+    github: async () => ({
+      storage: { state: { preferences: { enabled: githubEnabled } } },
+      preferences: async (next: { enabled: boolean }) => {
+        githubEnabled = next.enabled;
+      },
+    }),
+    readyAutomation: async () => {
+      if (shouldFailAutomation) throw new Error('授权模块连接失败');
+      return {
+        snapshot: () => ({ paused: autoPaused }),
+        pause: async (p: boolean) => {
+          autoPaused = p;
+        },
+      };
+    },
+  };
+
+  const handlers = new Map<string, (input: any) => Promise<any>>();
+  const server = {
+    handle(contract: { name: string }, handler: (input: any) => Promise<any>) {
+      handlers.set(contract.name, handler);
+    },
+    addHook() {
+      return () => {};
+    },
+  } as unknown as PluginServerContext;
+
+  const machine = loadMachineConfig(machinePath, {});
+  const host = startModules(
+    [
+      noopMod('todo.stalled') as never,
+      noopMod('answer.presence') as never,
+      noopMod('answer.escalation') as never,
+      noopMod('answer.quietChildren') as never,
+      noopMod('github') as never,
+      noopMod('answer.automation') as never,
+    ],
+    {
+      server,
+      instance: resolveInstance('main'),
+      machine,
+      services: { home: dir, daemon: {} as never, main: main as never },
+      stateDirectory: dir,
+      baseDirectory: dir,
+    },
+  );
+  registerMachineSettingsRpcs({
+    server,
+    machine,
+    host,
+    services: { home: dir, daemon: {} as never, main: main as never },
+    stateDirectory: dir,
+    baseDirectory: dir,
+  });
+
+  // 第一次暂停成功
+  await handlers.get('machine.settings.pause-all')!({ paused: true });
+  assert.equal(presencePaused, true);
+  assert.equal(escalationEnabled, false);
+  assert.equal(quietEnabled, false);
+  assert.equal(githubEnabled, false);
+  assert.equal(autoPaused, true);
+  const stateBefore = readFileSync(join(dir, 'pause-all.json'), 'utf8');
+
+  // 已暂停时再次暂停且中途模块设置会失败：应直接返回，不重新执行、不回滚
+  shouldFailAutomation = true;
+  const secondRes = await handlers.get('machine.settings.pause-all')!({ paused: true });
+  assert.deepEqual(secondRes, { paused: true });
+  assert.equal(presencePaused, true);
+  assert.equal(escalationEnabled, false);
+  assert.equal(quietEnabled, false);
+  assert.equal(githubEnabled, false);
+  assert.equal(autoPaused, true);
+  assert.equal(readFileSync(join(dir, 'pause-all.json'), 'utf8'), stateBefore);
+
+  await host.dispose();
 });

@@ -173,6 +173,9 @@ export function registerMachineSettingsRpcs(options: {
       if (!main) throw new Error('主实例服务不可用');
 
       const prev = await readPauseAllState(stateDirectory);
+      if (paused && prev.paused) {
+        return { paused: true };
+      }
       const reuseSaved = Boolean(prev.paused || prev.inProgress);
       const saved: NonNullable<PauseAllState['saved']> = paused
         ? reuseSaved
@@ -298,12 +301,12 @@ export function registerMachineSettingsRpcs(options: {
           const results = await Promise.allSettled([...rollbacks].reverse().map(fn => fn()));
           rollbackFailed = results.some(r => r.status === 'rejected');
         }
-        if (paused && !prev.paused && !rollbackFailed) {
+        if (paused && !prev.paused && !prev.inProgress && !rollbackFailed) {
           await writePauseAllState(stateDirectory, { paused: false });
         } else {
           await writePauseAllState(stateDirectory, {
             paused: prev.paused,
-            ...(rollbackFailed ? { inProgress: true } : {}),
+            ...(prev.inProgress || rollbackFailed ? { inProgress: true } : {}),
             ...(Object.keys(saved).length > 0 ? { saved } : {}),
           });
         }
