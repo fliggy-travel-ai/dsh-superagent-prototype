@@ -491,9 +491,9 @@
     queued = true;
     setTimeout(scan, 150);
   }
-  chrome.storage.local.get('approvalEnabled').then(data => { enabled = data.approvalEnabled !== false; schedule(); });
+  chrome.storage.local.get('approvalEnabled').then(data => { enabled = data.approvalEnabled === true; schedule(); });
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.approvalEnabled) { enabled = changes.approvalEnabled.newValue !== false; schedule(); }
+    if (area === 'local' && changes.approvalEnabled) { enabled = changes.approvalEnabled.newValue === true; schedule(); }
   });
   document.addEventListener?.('visibilitychange', event => {
     if (!event?.isTrusted || !pageVisible()) return;

@@ -21,7 +21,7 @@ async function page(options: { title?: string; text?: string; disabled?: boolean
   }
   button.parentElement = scope;
   const context = { document: { querySelectorAll: () => buttons, documentElement: {}, body: {} }, location: { origin: options.origin ?? 'https://claude.ai', pathname: '/code/session_example' },
-    chrome: { storage: { local: { get: async () => ({ approvalEnabled: options.enabled }) }, onChanged: { addListener: (handler: typeof changes) => { changes = handler; } } }, runtime: { sendMessage: async (message: any) => {
+    chrome: { storage: { local: { get: async () => ('enabled' in options ? { approvalEnabled: options.enabled } : { approvalEnabled: true }) }, onChanged: { addListener: (handler: typeof changes) => { changes = handler; } } }, runtime: { sendMessage: async (message: any) => {
       if (options.storageFailure) throw new Error('storage failed');
       if (message.type === 'approval-reserve') { if (audit.has(message.digest)) return { allowed: false }; audit.set(message.digest, 'reserved'); return { allowed: true }; }
       audit.set(message.digest, message.status);
@@ -33,10 +33,19 @@ async function page(options: { title?: string; text?: string; disabled?: boolean
   await Promise.resolve();
   const flush = async () => { for (let step = 0; step < 15; step++) { while (timers.length) timers.shift()!(); await Promise.resolve(); } };
   await flush();
-  return { count: () => clicks, audit, button, scope, context, scan: async () => { repeat(); await flush(); }, toggle: async (enabled: boolean) => { changes({ approvalEnabled: { newValue: enabled } }, 'local'); await flush(); } };
+  return { count: () => clicks, audit, button, scope, context, scan: async () => { repeat(); await flush(); }, toggle: async (enabled: boolean | undefined) => { changes({ approvalEnabled: { newValue: enabled } }, 'local'); await flush(); } };
 }
 
-test('安装默认自动点击，窗口仍显示时记录状态且不重复点击', async () => {
+test('首次安装未同步时默认不点击；收到 approvalEnabled===true 后点击且窗口仍显示时不重复点击', async () => {
+  const unsynced = await page({ enabled: undefined });
+  assert.equal(unsynced.count(), 0, 'approvalEnabled 为 undefined 时不应自动点击');
+  await unsynced.toggle(true);
+  assert.equal(unsynced.count(), 1);
+  await unsynced.toggle(undefined);
+  unsynced.scope.innerText = 'Claude needs permission for second command';
+  await unsynced.scan();
+  assert.equal(unsynced.count(), 1, 'approvalEnabled 变回 undefined 时应停止自动点击');
+
   const fixture = await page(); assert.equal(fixture.count(), 1);
   await fixture.scan(); assert.equal(fixture.count(), 1);
   assert.deepEqual([...fixture.audit.values()], ['still-visible']);

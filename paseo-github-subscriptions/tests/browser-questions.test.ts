@@ -220,9 +220,11 @@ function background(paired: boolean) {
   const send = (message: any, senderTab = tab) => new Promise<any>(resolve => { if (onMessage(message, { tab: senderTab }, resolve) !== true) resolve(null); });
   return { state, messages, bodies, send, flush, setOffline: (value: boolean) => { offline = value; }, sync: async () => { startup(); await flush(); }, setQuestions: (list: any[]) => { questionsOnPage = list; }, setStatus: (status: string) => { answerStatus = status; }, respond: (fn: (body: any) => any) => { respondWith = fn; } };
 }
-test('权限点击先持久化去重，同一会话跨标签只允许一次并验证回执来源', async () => {
+test('权限点击先持久化去重，未同步时不放行，同一会话跨标签只允许一次并验证回执来源', async () => {
   const fixture = background(false);
   const reservation = { type: 'approval-reserve', digest: 'a'.repeat(64), button: 'Allow once' };
+  assert.equal((await fixture.send(reservation)).allowed, false, 'approvalEnabled 未设置时不应放行');
+  fixture.state.approvalEnabled = true;
   const otherTab = { id: 8, windowId: 1, groupId: -1, url: 'https://claude.ai/code/session_abc123' };
   const results = await Promise.all([fixture.send(reservation), fixture.send(reservation, otherTab)]);
   assert.deepEqual(results.map(result => result.allowed), [true, false]);

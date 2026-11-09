@@ -331,7 +331,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         }
       }
       if (message.type === 'approval-reserve') {
-        if (stored.approvalEnabled === false || typeof message.button !== 'string' || message.button.length > 100) return { allowed: false };
+        if (stored.approvalEnabled !== true || typeof message.button !== 'string' || message.button.length > 100) return { allowed: false };
         const cardEntries = audit.filter(entry =>
           entry.sessionId === session && (cardId ? entry.cardId === cardId : !entry.cardId && entry.digest === message.digest),
         );
