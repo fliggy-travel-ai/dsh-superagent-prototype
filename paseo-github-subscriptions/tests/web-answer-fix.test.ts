@@ -267,7 +267,11 @@ test('审阅 1：网页作答未确认的云端提问出现在待办列表，带
     const items = await todoItems(setup.runtime);
     assert.equal(items.length, 1);
     assert.equal(items[0]!.type, 'web');
-    assert.equal(items[0]!.label, '网页重试');
+    // 沿用已有标签，旧版插件解析远端待办时不会因未知标签整包失败（复审第二轮第 1 项）
+    assert.equal(items[0]!.label, '网页等待');
+    assert.match(items[0]!.text, /^【网页重试】/);
+    const { TodoLabelSchema } = await import('../shared/todo.ts');
+    assert.equal((TodoLabelSchema.options as readonly string[]).includes('网页重试'), false);
     assert.equal(items[0]!.url, 'https://claude.ai/code/session_one');
     assert.match(items[0]!.text, /请在 claude\.ai 重试/);
     assert.equal(items[0]!.question, undefined);
@@ -336,7 +340,11 @@ test('审阅 3：页面未打开时提问进入网页重试，之后打开页面
     assert.equal(browserQ.delegatedTo, setup.nativeId);
     const items = await todoItems(setup.runtime);
     assert.equal(items.length, 1, JSON.stringify(items.map(item => item.label)));
-    assert.equal(items[0]!.label, '网页重试');
+    assert.equal(items[0]!.label, '网页等待');
+    assert.match(items[0]!.text, /^【网页重试】/);
+    // 备用计数也只算一条（已关联的网页提问不重复计数，复审第二轮第 3 项）
+    const { computeTodoCount } = await import('../client/sidebar-state.ts');
+    assert.equal(computeTodoCount({ todo: null, presence: setup.runtime.snapshot(), stalled: null, escalation: null } as any), 1);
   } finally { await setup.close(); }
 });
 
@@ -377,5 +385,23 @@ test('审阅 6：下发答案写盘期间执行器看到的状态始终是“排
     }
     assert.equal((await sync).length, 1);
     assert.ok(!seen.includes('pending:false'), seen.join(','));
+  } finally { await setup.close(); }
+});
+
+test('复审第二轮第 2 项：网页重试未经云端确认就超时结束时，清掉网页提问的关联标记，网页提问重新出现在待办', async () => {
+  let now = Date.now();
+  const setup = await retryFixture(() => now);
+  try {
+    setup.runtime.noteWebResult({ webSessionId: 'session_one', toolUseId: 'toolu_1', result: { status: 'page_not_open' } });
+    await settle(setup.runtime);
+    await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
+    assert.equal(setup.runtime.snapshot().questions.find(item => item.source === 'browser')!.delegatedTo, setup.nativeId);
+    now += 2 * 60 * 60_000 + 1000;
+    await settle(setup.runtime);
+    await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
+    const browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
+    assert.equal(browserQ.delegatedTo, undefined);
+    const items = await todoItems(setup.runtime);
+    assert.deepEqual(items.map(item => item.label), ['网页提问']);
   } finally { await setup.close(); }
 });

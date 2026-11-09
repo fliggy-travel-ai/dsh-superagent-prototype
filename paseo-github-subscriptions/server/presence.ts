@@ -34,6 +34,11 @@ const StateSchema = z.object({ settings: PresenceSettingsSchema, questions: z.ar
 const unavailable = (): PresenceObservation => ({ mode: 'unknown', observedAt: null, reason: '在场状态不可用，请选择在线或离线', source: 'unavailable' });
 const browserKey = (instanceId: string, question: Pick<BrowserQuestion, 'id' | 'sessionId' | 'fingerprint'>) => `browser:${questionFingerprint([instanceId, question.sessionId, question.id, question.fingerprint])}`;
 const WEB_RETRY_MAX_MS = 2 * 60 * 60_000;
+// 网页重试未经云端确认就结束：清掉网页提问指向它的关联标记，页面上仍在等待的提问重新回到待办。
+function endWebRetry(next: { questions: Question[] }, question: Question) {
+  delete question.webRetry;
+  for (const item of next.questions) if (item.source === 'browser' && item.delegatedTo === question.id) delete item.delegatedTo;
+}
 const nativeKey = (agentId: string, requestId: string) => `native:${questionFingerprint([agentId, requestId])}`;
 
 function toInternalSessionId(raw: string): string | null {
@@ -96,7 +101,7 @@ export class PresenceRuntime {
   constructor(directory: string, port: PresencePort, clock = Date.now, ledger?: WebRequestLedger) {
     this.directory = directory; this.port = port; this.clock = clock; this.ledger = ledger;
   }
-  private findMatchingCloudNativeId(question: Pick<Question, 'sessionId' | 'prompts' | 'pages' | 'toolUseId'>): string | undefined {
+  private findMatchingCloudNativeId(question: Pick<Question, 'sessionId' | 'prompts' | 'pages' | 'toolUseId'>, questions: Question[] = this.state.questions): string | undefined {
     for (const [nativeId, entry] of this.native) {
       if (!isCloudRequest(entry.request, entry.agent)) continue;
       const webSessionId = cloudRequestWebSessionId(entry.request, entry.agent);
@@ -106,7 +111,7 @@ export class PresenceRuntime {
     }
     // Paseo 已不再列出、但网页提交未确认的云端提问（例如页面未打开时作答，之后才打开页面）
     if (question.toolUseId) {
-      const retry = this.state.questions.find(item => item.source === 'native' && item.webRetry && item.toolUseId === question.toolUseId && !!item.webSessionId && sameSessionId(item.webSessionId, question.sessionId));
+      const retry = questions.find(item => item.source === 'native' && item.webRetry && item.toolUseId === question.toolUseId && !!item.webSessionId && sameSessionId(item.webSessionId, question.sessionId));
       if (retry) return retry.id;
     }
     return undefined;
@@ -244,10 +249,10 @@ export class PresenceRuntime {
     const activeAgents = new Set(agents.filter(agent => !agent.archivedAt).map(agent => agent.id));
     await this.persist(next => { for (const question of next.questions) {
       if (question.source === 'native' && question.webRetry && !activeAgents.has(question.sessionId)) {
-        question.state = 'resolved'; question.reason = '原会话已归档'; delete question.webRetry;
+        question.state = 'resolved'; question.reason = '原会话已归档'; endWebRetry(next, question);
       }
       if (question.source === 'native' && question.webRetry && this.clock() - Date.parse(question.at) > WEB_RETRY_MAX_MS) {
-        question.state = 'resolved'; question.reason = '超过 2 小时未确认，已自动结束；请在 claude.ai 核对结果'; delete question.webRetry;
+        question.state = 'resolved'; question.reason = '超过 2 小时未确认，已自动结束；请在 claude.ai 核对结果'; endWebRetry(next, question);
       }
       if (question.source === 'native' && !question.webRetry && !present.has(question.id) && question.state !== 'resolved' && !this.activeAnswers.has(question.id)) {
         question.reason = question.state === 'pending'
@@ -258,7 +263,7 @@ export class PresenceRuntime {
         question.state = 'resolved';
       }
       if (question.source === 'browser' && !question.delegatedTo) {
-        const match = this.findMatchingCloudNativeId(question);
+        const match = this.findMatchingCloudNativeId(question, next.questions);
         if (match) question.delegatedTo = match;
       }
       if (question.source === 'browser' && question.state === 'submitted' && Date.now() - Date.parse(question.at) > 30_000) { question.state = 'unknown'; question.reason = '网页未确认提交结果，请在原网页检查'; }
@@ -350,7 +355,7 @@ export class PresenceRuntime {
       const webSessionId = question.webSessionId;
       const observed = observedSessionIds.some(id => sameSessionId(id, webSessionId)) && sessions.some(session => sameSessionId(session.sessionId, webSessionId));
       if (observed && !questions.some(item => item.toolUseId === question.toolUseId)) {
-        question.state = 'resolved'; question.reason = '网页上已没有这道提问，请在 claude.ai 核对结果'; delete question.webRetry;
+        question.state = 'resolved'; question.reason = '网页上已没有这道提问，请在 claude.ai 核对结果'; endWebRetry(next, question);
       }
     } });
     // 在场状态用 scan() 每 5 秒刷新的缓存值；远端来源主机可能要十几秒才响应，不能在同步路径里等待。
