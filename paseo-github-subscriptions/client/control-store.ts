@@ -37,7 +37,13 @@ import {
   antigravityAccountAdd,
   type AntigravitySnapshot,
 } from '../shared/antigravity.ts';
-import { providerQuotasSnapshot, type ProviderQuotasSnapshot } from '../shared/provider-quotas.ts';
+import {
+  providerQuotasSnapshot,
+  providerQuotasConfigure,
+  type ProviderQuotasConfigureInput,
+  type ProviderQuotasSnapshot,
+} from '../shared/provider-quotas.ts';
+import { syncHideBuiltinUsage } from './hide-builtin.ts';
 import {
   escalationSnapshot,
   escalationConfigure,
@@ -218,6 +224,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
           }
         }),
         client.rpc(providerQuotasSnapshot, {}).then(value => {
+          syncHideBuiltinUsage(value.hideBuiltin);
           emit({ providerQuotas: value, providerQuotasStatus: 'ready' });
         }).catch(error => {
           emit({ providerQuotasStatus: isRpcDisabledError(error, 'usage.providerQuotas', mods) ? 'disabled' : 'error' });
@@ -341,6 +348,12 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     addAntigravityAccount: (input: { providerId: string; label: string; homeDir?: string; proxy?: string }) => write(async () => {
       const result = await client.rpc(antigravityAccountAdd, input);
       emit({ antigravity: result, antigravityStatus: 'ready', antigravityError: null });
+      return result;
+    }),
+    configureProviderQuotas: (input: ProviderQuotasConfigureInput) => write(async () => {
+      const result = await client.rpc(providerQuotasConfigure, input);
+      syncHideBuiltinUsage(result.hideBuiltin);
+      emit({ providerQuotas: result, providerQuotasStatus: 'ready' });
       return result;
     }),
     configureEscalation: (input: {

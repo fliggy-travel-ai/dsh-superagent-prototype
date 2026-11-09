@@ -139,7 +139,7 @@ function readSnapshotFromDisk(machinePath: string, services: Services, overrideE
     enabled,
     enabledSources: [...parsedConfig.enabledSources],
     hideBuiltin: [...parsedConfig.hideBuiltin],
-    hideBuiltinApplied: false,
+    hideBuiltinApplied: true,
     skippedConflicts,
     reloadRequired: registered ? !sameSet(registered, allowedSources) : touched.has(services),
     error: overrideError !== undefined ? overrideError : configError ?? conflictError ?? lastErrors.get(services) ?? null,

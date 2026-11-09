@@ -43,3 +43,11 @@ export function SidebarSeparator() {
   const theme = useContext(HostThemeContext);
   return <View style={{ height: 1, backgroundColor: theme?.colors.border, marginVertical: 6 }} />;
 }
+
+export function Icon({ name }: { name?: string; size?: number; color?: string }) {
+  return <Text>{name ?? '•'}</Text>;
+}
+
+export function StreamedText({ text }: { text?: string; isStreaming?: boolean; color?: string; fontSize?: number }) {
+  return <Text>{text ?? ''}</Text>;
+}

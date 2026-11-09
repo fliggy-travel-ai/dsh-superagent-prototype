@@ -1,38 +1,19 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUILTIN_USAGE_SOURCE_IDS, type BuiltinUsageSourceId } from '../../../shared/provider-quotas.ts';
+import {
+  BUILTIN_USAGE_SOURCE_IDS,
+  normalizeHideBuiltinId,
+  normalizeUsagePins,
+  type BuiltinUsageSourceId,
+  type UsagePin,
+} from '../../../shared/provider-quotas.ts';
 
-const BUILTIN_ID_SET = new Set<string>(BUILTIN_USAGE_SOURCE_IDS);
-
-const EFFECTIVE_WINDOW_SOURCES = new Set<string>([
-  'antigravity',
-  'codex-multi',
-  'cursor-cli',
-  'grok-multi',
-  'glm',
-  'qoder',
-]);
+export { normalizeHideBuiltinId, normalizeUsagePins, type UsagePin };
 
 export interface UserPluginEntry {
   source: 'directory';
   path: string;
   enabled?: boolean;
-}
-
-export interface UsagePin {
-  sourceId: string;
-  windowId: string;
-}
-
-/**
- * 将用户配置的内置额度来源标识（如 "codex" 或 "codex-usage-source"）规范化为短标识（如 "codex"）。
- */
-export function normalizeHideBuiltinId(raw: string): BuiltinUsageSourceId | null {
-  const trimmed = raw.trim().replace(/-usage-source$/u, '');
-  if (BUILTIN_ID_SET.has(trimmed)) {
-    return trimmed as BuiltinUsageSourceId;
-  }
-  return null;
 }
 
 /**
@@ -118,28 +99,4 @@ export async function suppressBuiltinUsagePlugins(
   }
   await deps.patchPlugins(userPlugins);
   return { disabledPluginIds: pluginIds };
-}
-
-/**
- * 按 hideBuiltin 配置过滤侧栏固定的额度项，并保持多窗口来源只固定 effective 窗口。
- */
-export function normalizeUsagePins(
-  pins: unknown,
-  options: { hideBuiltin: readonly string[] },
-): UsagePin[] | null {
-  if (!Array.isArray(pins)) return null;
-  const suppressed = new Set<string>();
-  for (const item of options.hideBuiltin) {
-    const normalized = normalizeHideBuiltinId(item);
-    if (normalized) suppressed.add(normalized);
-  }
-  const filtered = pins.filter((pin): pin is UsagePin => {
-    if (!pin || typeof pin !== 'object') return false;
-    const { sourceId, windowId } = pin as { sourceId?: string; windowId?: string };
-    if (typeof sourceId !== 'string' || typeof windowId !== 'string') return false;
-    if (suppressed.has(sourceId)) return false;
-    if (EFFECTIVE_WINDOW_SOURCES.has(sourceId) && windowId !== 'effective') return false;
-    return true;
-  });
-  return filtered.length > 0 ? filtered : null;
 }

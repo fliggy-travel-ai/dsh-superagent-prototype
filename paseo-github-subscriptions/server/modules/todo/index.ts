@@ -113,7 +113,8 @@ export const todoModule: Module = {
         return {
           enabled: true,
           forwardEvents: true,
-          status: 'running',
+          pinnedWorkspaceCount: 0,
+          pinnedWorkspaces: [],
           error: null,
           recentHandled: handled.recent(20),
         };

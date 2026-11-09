@@ -458,9 +458,22 @@ export class FakeDaemon {
       case 'provider-quotas.snapshot':
         return {
           enabled: true,
-          providers: [
-            { id: 'codex', label: 'Codex', configured: true, status: 'ok', remainingPct: 88, error: null },
-          ],
+          enabledSources: ['antigravity', 'codex-multi', 'qoder', 'glm'],
+          hideBuiltin: ['codex', 'grok', 'cursor', 'kimi', 'zai'],
+          hideBuiltinApplied: true,
+          skippedConflicts: [],
+          reloadRequired: false,
+          error: null,
+        };
+      case 'provider-quotas.configure':
+        return {
+          enabled: input.enabled !== undefined ? Boolean(input.enabled) : true,
+          enabledSources: Array.isArray(input.enabledSources) ? (input.enabledSources as string[]) : ['antigravity', 'codex-multi', 'qoder', 'glm'],
+          hideBuiltin: Array.isArray(input.hideBuiltin) ? (input.hideBuiltin as string[]) : ['codex', 'grok', 'cursor', 'kimi', 'zai'],
+          hideBuiltinApplied: true,
+          skippedConflicts: [],
+          reloadRequired: true,
+          error: null,
         };
       case 'escalation.snapshot':
         return this.escalation;

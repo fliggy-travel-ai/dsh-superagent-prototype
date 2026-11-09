@@ -22,6 +22,7 @@ const expired = () => jwt(Math.floor(Date.now() / 1000) - 3600);
 function fakeTransport(handler: (url: URL, init: any, body: string) => { status: number; body: string } | Error) {
   const calls: string[] = [];
   const originals = { http: http.request, https: https.request };
+  net.setScutilRunnerForTest(() => '');
   const make = (label: string) => ((...args: any[]) => {
     // 两种调用形式：request(URL, 选项, 回调) 和 request(选项)。
     const [target, init, callback] = args[0] instanceof URL ? args : [args[0], args[0], args[1]];
@@ -38,7 +39,7 @@ function fakeTransport(handler: (url: URL, init: any, body: string) => { status:
         if (result instanceof Error) { req.emit('error', result); return; }
         const res = new EventEmitter() as any;
         res.statusCode = result.status;
-        callback(res);
+        if (typeof callback === 'function') callback(res);
         res.emit('data', Buffer.from(result.body));
         res.emit('end');
       });
@@ -47,7 +48,7 @@ function fakeTransport(handler: (url: URL, init: any, body: string) => { status:
   }) as never;
   http.request = make('http');
   https.request = make('https');
-  return { calls, restore() { http.request = originals.http; https.request = originals.https; } };
+  return { calls, restore() { http.request = originals.http; https.request = originals.https; net.setScutilRunnerForTest(null); } };
 }
 
 test('系统代理：优先读 HTTPS，遵守例外列表，只读 scutil 一次且出错不抛', () => {

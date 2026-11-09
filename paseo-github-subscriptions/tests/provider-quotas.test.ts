@@ -221,7 +221,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
     enabled: false,
     enabledSources: [],
     hideBuiltin: [],
-    hideBuiltinApplied: false,
+    hideBuiltinApplied: true,
     skippedConflicts: [],
     reloadRequired: false,
     error: null,
@@ -237,7 +237,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
     enabled: true,
     enabledSources: ['antigravity', 'codex-multi', 'grok-multi'],
     hideBuiltin: ['codex', 'grok'],
-    hideBuiltinApplied: false,
+    hideBuiltinApplied: true,
     skippedConflicts: [],
     reloadRequired: true,
     error: null,
@@ -353,12 +353,80 @@ test('provider-quotas.configure：machine.json 损坏时报错，不覆盖；写
   assert.match(snapshot.error, /machine\.json 无法解析/);
 });
 
-test('provider-quotas.snapshot：隐藏内置额度来源目前只保存配置，快照明确标为未生效', async () => {
-  const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, providerQuotas: { sources: [], hideBuiltin: ['codex'] } } });
+import { syncHideBuiltinUsage } from '../client/hide-builtin.ts';
+
+test('provider-quotas.snapshot：隐藏内置额度来源已在客户端生效，快照标为 hideBuiltinApplied: true 并过滤显示与侧栏固定项', async () => {
+  const { machinePath, handlers, server, services } = createFakeEnv({ machineJson: { version: 1, providerQuotas: { sources: [], hideBuiltin: ['codex', 'grok-usage-source'] } } });
   registerProviderQuotasRpcs({ server, machinePath, services });
   const snapshot = await handlers.get('provider-quotas.snapshot')!({});
-  assert.deepEqual(snapshot.hideBuiltin, ['codex']);
-  assert.equal(snapshot.hideBuiltinApplied, false);
+  assert.deepEqual(snapshot.hideBuiltin, ['codex', 'grok']);
+  assert.equal(snapshot.hideBuiltinApplied, true);
+
+  let storedRaw = JSON.stringify({
+    usage: {
+      pins: [
+        { sourceId: 'codex', windowId: '5h' },
+        { sourceId: 'grok', windowId: 'daily' },
+        { sourceId: 'codex-multi', windowId: 'weekly' },
+        { sourceId: 'codex-multi', windowId: 'effective' },
+        { sourceId: 'claude-browser', windowId: '5h' },
+      ],
+    },
+  });
+  let persistedState: any = JSON.parse(storedRaw);
+  const mod3353 = {
+    settleReports: (_cur: any, next: any) => next,
+    upsertReport: (cur: any, item: any) => [...(cur ?? []), item],
+    resolveUsageView: (input: any) => ({ kind: 'ready', reports: input.reports }),
+  };
+  const mod3273 = {
+    effectiveUsagePins: (prefs: any, reports: any) =>
+      prefs?.pins ?? reports.map((r: any) => ({ sourceId: r.sourceId, windowId: 'effective' })),
+  };
+  const mod996 = {
+    persistAppSettings: async (updater: (prev: any) => any) => {
+      const patch = updater(persistedState);
+      persistedState = { ...persistedState, ...patch };
+    },
+  };
+
+  syncHideBuiltinUsage(snapshot.hideBuiltin, {
+    localStorage: {
+      getItem: () => storedRaw,
+      setItem: (_k: string, val: string) => {
+        storedRaw = val;
+      },
+    },
+    __r: (id: number) => (id === 996 ? mod996 : id === 3273 ? mod3273 : id === 3353 ? mod3353 : null),
+  });
+
+  assert.deepEqual(JSON.parse(storedRaw).usage.pins, [
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ]);
+  assert.deepEqual(persistedState.usage.pins, [
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'claude-browser', windowId: '5h' },
+  ]);
+
+  const rawReports = [
+    { id: 'r1', sourceId: 'codex' },
+    { id: 'r2', sourceId: 'grok' },
+    { id: 'r3', sourceId: 'codex-multi' },
+    { id: 'r4', sourceId: 'zai' },
+  ];
+  assert.deepEqual(mod3353.settleReports([], rawReports), [
+    { id: 'r3', sourceId: 'codex-multi' },
+    { id: 'r4', sourceId: 'zai' },
+  ]);
+  assert.deepEqual(mod3353.resolveUsageView({ reports: rawReports }).reports, [
+    { id: 'r3', sourceId: 'codex-multi' },
+    { id: 'r4', sourceId: 'zai' },
+  ]);
+  assert.deepEqual(mod3273.effectiveUsagePins({ pins: null }, rawReports), [
+    { sourceId: 'codex-multi', windowId: 'effective' },
+    { sourceId: 'zai', windowId: 'effective' },
+  ]);
 });
 
 test('读不到 Paseo 的 config.json 时按旧插件仍启用处理：全部来源跳过，模块出错', () => {
