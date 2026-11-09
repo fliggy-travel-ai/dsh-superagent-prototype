@@ -17,9 +17,7 @@ export type DrawerId =
   | 'browser'
   | 'add-browser'
   | 'session-defaults'
-  | 'provider-instance'
   | 'cloud'
-  | 'antigravity'
   | 'qa-mode'
   | 'bluetooth'
   | 'escalation'
@@ -33,9 +31,7 @@ const DRAWER_TITLES: Record<DrawerId, string> = {
   browser: '网页版 claude.ai',
   'add-browser': '添加浏览器环境',
   'session-defaults': '新建会话默认设置',
-  'provider-instance': 'Provider 实例',
   cloud: '云端会话',
-  antigravity: 'Antigravity 账号',
   'qa-mode': '问答模式',
   bluetooth: '蓝牙在场判定',
   escalation: '升级通知',
@@ -573,46 +569,6 @@ function SessionDefaultsDrawer() {
   );
 }
 
-function ProviderInstanceDrawer() {
-  const { s } = useUi();
-  const { providerInstance, providerInstanceError } = useControlState();
-  const running = providerInstance
-    ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
-    : false;
-  const providers = providerInstance ? providerInstance.providers.map(p => p.id).join(', ') || '无' : '—';
-  const runningCount = providerInstance?.runningSessionsCount ?? 0;
-
-  return (
-    <View style={{ gap: 12 }}>
-      {providerInstanceError ? (
-        <Notice tone="danger">
-          <Text style={s.text}>读取失败：{providerInstanceError}</Text>
-        </Notice>
-      ) : null}
-      <TableRow
-        first
-        cells={[
-          '状态',
-          providerInstanceError ? (
-            <Chip key="st" label="读取失败" tone="danger" />
-          ) : !providerInstance ? (
-            <Chip key="st" label="正在读取" tone="neutral" />
-          ) : (
-            <Chip key="st" label={running ? '运行中' : '未运行'} tone={running ? 'success' : 'danger'} />
-          ),
-        ]}
-      />
-      <TableRow cells={['状态目录', <Text key="dir" style={s.mono}>~/.paseo/providers</Text>]} />
-      <TableRow cells={['承载的 Provider', <Text key="p" style={s.mono}>{providers}</Text>]} />
-      <TableRow cells={['运行中的会话', providerInstance ? `${runningCount} 个` : '—']} />
-      <RuleNote>
-        为什么单独开一个实例：重载“开发自动化”插件（改界面、规则、GitHub 订阅）不会重启这个实例，正在跑的
-        Antigravity 和云端会话不会中断。只有在更新 Provider 代码后、且当前没有运行中的会话时，才重载该实例。
-      </RuleNote>
-    </View>
-  );
-}
-
 function CloudSessionDrawer() {
   const { s } = useUi();
   const { cloudSession, cloudSessionError, providerInstance } = useControlState();
@@ -644,131 +600,6 @@ function CloudSessionDrawer() {
       <RuleNote>
         把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。由本机 Provider 实例承载；主实例通过跨实例转发收发消息和提问。
       </RuleNote>
-    </View>
-  );
-}
-
-function AntigravityDrawer() {
-  const { s, control, theme } = useUi();
-  const { antigravity, antigravityStatus, antigravityError } = useControlState();
-  const [providerId, setProviderId] = useState('');
-  const [label, setLabel] = useState('');
-  const [homeDir, setHomeDir] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const accounts = antigravity?.accounts ?? [];
-
-  const addAccount = async () => {
-    if (!providerId.trim() || !label.trim()) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await control.addAntigravityAccount({
-        providerId: providerId.trim(),
-        label: label.trim(),
-        homeDir: homeDir.trim() || undefined,
-      });
-      setProviderId('');
-      setLabel('');
-      setHomeDir('');
-    } catch (failure) {
-      setErr(errorMessage(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <View style={{ gap: 12 }}>
-      {antigravityStatus === 'disabled' ? (
-        <Notice tone="neutral">
-          <Text style={s.text}>Antigravity 多账号模块未启用（等待对应服务端模块合并或开启）。</Text>
-        </Notice>
-      ) : null}
-      {antigravity?.reloadRequired ? (
-        <Notice tone="warning">
-          <Text style={s.text}>Antigravity 账号配置已变更，需在无运行中会话时重载 Provider 实例后生效。</Text>
-        </Notice>
-      ) : null}
-      {antigravityError || antigravity?.error || err ? (
-        <Notice tone="danger">
-          <Text style={s.text}>{err ?? antigravityError ?? antigravity?.error}</Text>
-        </Notice>
-      ) : null}
-
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <SectionTitle>本机 Antigravity 账号</SectionTitle>
-        <Text style={s.small}>运行中会话：{antigravity?.runningSessionsCount ?? 0} 个</Text>
-      </View>
-      {accounts.length === 0 ? (
-        <Text style={s.muted}>暂无已登记的 Antigravity 账号。</Text>
-      ) : (
-        <View>
-          <TableRow first header cells={['账号标识', '名称', '目录', '启用']} />
-          {accounts.map(acc => (
-            <TableRow
-              key={acc.providerId}
-              cells={[
-                <Text key="id" style={s.mono}>
-                  {acc.providerId}
-                </Text>,
-                acc.label,
-                <Text key="dir" style={s.mono}>
-                  {acc.homeDir ?? '默认'}
-                </Text>,
-                <Switch
-                  key="sw"
-                  accessibilityLabel={`启用 ${acc.label}`}
-                  value={acc.enabled}
-                  onValueChange={val =>
-                    void control
-                      .toggleAntigravityAccount({ providerId: acc.providerId, enabled: val })
-                      .catch(e => setErr(errorMessage(e)))
-                  }
-                  trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-                  thumbColor={theme.colors.accentForeground}
-                />,
-              ]}
-            />
-          ))}
-        </View>
-      )}
-      <View style={s.wrap}>
-        <TextInput
-          accessibilityLabel="Antigravity 账号 ID"
-          style={s.input}
-          value={providerId}
-          onChangeText={setProviderId}
-          placeholder="标识（如 antigravity-3）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-        <TextInput
-          accessibilityLabel="Antigravity 名称"
-          style={s.input}
-          value={label}
-          onChangeText={setLabel}
-          placeholder="显示名称（如 账号 C）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-        />
-        <TextInput
-          accessibilityLabel="Antigravity 目录"
-          style={s.input}
-          value={homeDir}
-          onChangeText={setHomeDir}
-          placeholder="配置目录（可选，如 ~/.agy-c）"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          autoCapitalize="none"
-        />
-        <Btn
-          primary
-          label="添加账号"
-          disabled={!providerId.trim() || !label.trim() || busy}
-          onPress={() => void addAccount()}
-        />
-      </View>
-      <RuleNote>停用或移除账号不会中断已经用该账号启动的会话；新回合按剩余可用账号顺序选择。</RuleNote>
     </View>
   );
 }
@@ -976,7 +807,7 @@ function BluetoothDrawer() {
 }
 
 function EscalationDrawer() {
-  const { s, control, now, theme } = useUi();
+  const { s, control, theme } = useUi();
   const { escalation, escalationStatus, escalationError, machineSettings, modules } = useControlState();
   const escMsMod = machineSettings?.modules.find(m => m.id === 'answer.escalation');
   const escLiveMod = modules?.modules.find(m => m.id === 'answer.escalation');
@@ -992,6 +823,9 @@ function EscalationDrawer() {
   const [newTo, setNewTo] = useState('09:30');
   const [delayInput, setDelayInput] = useState(() => String(escalation?.delayMinutes ?? 0));
   const [prevDelay, setPrevDelay] = useState<number | undefined>(escalation?.delayMinutes);
+  // 每处保存都在原位置给出结果：哪一处、成功还是失败、原因。
+  const [scheduleBusy, setScheduleBusy] = useState<ScheduleTarget | null>(null);
+  const [scheduleMsg, setScheduleMsg] = useState<{ target: ScheduleTarget; ok: boolean; text: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   if (escalation?.delayMinutes !== prevDelay) {
@@ -1007,23 +841,23 @@ function EscalationDrawer() {
     }
   }, [escalation?.delayMinutes]);
 
-  const delivery = escalation?.delivery ?? 'shadow';
   const delayMinutes = escalation?.delayMinutes ?? 0;
   const windows = escalation?.immediate ?? [];
-  const recentDeliveries = escalation?.recentDeliveries ?? [];
   const webhook = escalation?.webhook;
+  const delayText = (minutes: number) => (minutes === 0 ? '立即通知' : `满 ${minutes} 分钟未答后通知`);
 
-  const saveSchedule = async (nextWindows: ImmediateWindow[], nextDelay = delayMinutes) => {
-    setErr(null);
+  const saveSchedule = async (target: ScheduleTarget, nextWindows: ImmediateWindow[], nextDelay: number, success: string) => {
+    if (scheduleBusy) return;
+    setScheduleBusy(target);
+    setScheduleMsg(null);
     try {
-      const normalized = nextWindows.map(w => ({
-        days: w.days,
-        from: w.from,
-        to: w.to,
-      }));
+      const normalized = nextWindows.map(w => ({ days: w.days, from: w.from, to: w.to }));
       await control.configureEscalation({ immediate: normalized, delayMinutes: nextDelay });
+      setScheduleMsg({ target, ok: true, text: success });
     } catch (failure) {
-      setErr(errorMessage(failure));
+      setScheduleMsg({ target, ok: false, text: `保存失败：${errorMessage(failure)}` });
+    } finally {
+      setScheduleBusy(null);
     }
   };
 
@@ -1031,20 +865,27 @@ function EscalationDrawer() {
     if (!escalation) return;
     const from = newFrom.trim();
     const to = newTo.trim();
-    if (!from || !to) return;
-    await saveSchedule([...windows, { days: newDays, from, to }]);
+    if (!/^\d{1,2}:\d{2}$/.test(from) || !/^\d{1,2}:\d{2}$/.test(to)) {
+      setScheduleMsg({ target: 'window', ok: false, text: '请按 01:00 的格式填写开始和结束时间' });
+      return;
+    }
+    await saveSchedule('window', [...windows, { days: newDays, from, to }], delayMinutes, `已添加免等时段：${from} – ${to}`);
   };
 
   const removeWindow = async (idx: number) => {
     if (!escalation) return;
-    await saveSchedule(windows.filter((_, i) => i !== idx));
+    await saveSchedule('remove', windows.filter((_, i) => i !== idx), delayMinutes, '已删除免等时段');
   };
 
   const applyDelay = async () => {
     if (!escalation) return;
-    const parsed = Number.parseInt(delayInput, 10);
-    if (Number.isNaN(parsed) || parsed < 0) return;
-    await saveSchedule(windows, parsed);
+    const value = delayInput.trim();
+    if (!/^\d+$/.test(value)) {
+      setScheduleMsg({ target: 'delay', ok: false, text: '请填写 0 或正整数分钟' });
+      return;
+    }
+    const parsed = Number.parseInt(value, 10);
+    await saveSchedule('delay', windows, parsed, `已保存：其余时段${delayText(parsed)}`);
   };
 
   const saveWebhook = async () => {
@@ -1059,7 +900,7 @@ function EscalationDrawer() {
       });
       setWebhookUrl('');
       setWebhookSecret('');
-      setWebhookMsg('Webhook 凭据已保存（0600 权限）');
+      setWebhookMsg('地址已保存');
     } catch (failure) {
       setErr(errorMessage(failure));
     } finally {
@@ -1082,11 +923,24 @@ function EscalationDrawer() {
     }
   };
 
+  const message = (target: ScheduleTarget) =>
+    scheduleMsg?.target === target ? (
+      <Text style={{ color: scheduleMsg.ok ? theme.colors.statusSuccess : theme.colors.statusDanger, fontSize: 13 }}>{scheduleMsg.text}</Text>
+    ) : null;
+  const timeInput = [s.input, { width: 96, minWidth: 96, flexGrow: 0 }];
+
   return (
     <View style={{ gap: 12 }}>
       {escModOff ? (
         <Notice tone="neutral">
           <Text style={s.text}>升级通知模块未启用，请在本机配置中开启，重载后生效。</Text>
+        </Notice>
+      ) : escalation?.blockedReason ? (
+        <Notice tone="danger">
+          <View style={{ gap: 4 }}>
+            <Text style={s.strong}>旧插件仍启用，先停用</Text>
+            <Text style={s.small}>{escalation.blockedReason}</Text>
+          </View>
         </Notice>
       ) : escalationStatus === 'error' || escalationError ? (
         <Notice tone="danger">
@@ -1097,96 +951,85 @@ function EscalationDrawer() {
       {!escalation ? (
         <Text style={s.muted}>{escalationError ? `读取失败：${escalationError}` : '正在读取时段规则…'}</Text>
       ) : (
-        <View>
-          <TableRow first header cells={['规则', '时间范围', '等待策略', '操作']} />
-          {windows.map((win, idx) => (
-            <TableRow
-              key={idx}
-              cells={[
-                win.days === 'daily'
-                  ? '每天免等时段'
-                  : win.days === 'weekdays'
-                    ? '工作日'
-                    : Array.isArray(win.days)
-                      ? `周 ${win.days.join(',')}`
-                      : '周末',
-                <Text key="t" style={s.mono}>
-                  {win.from} – {win.to}
-                </Text>,
-                '立即升级通知',
-                <Btn key="del" small danger label="删除" onPress={() => void removeWindow(idx)} />,
-              ]}
-            />
-          ))}
-          <TableRow
-            cells={[
-              '其余时段',
-              '默认等待',
-              delayMinutes === 0 ? '立即通知（0 分钟）' : `满 ${delayMinutes} 分钟未答后通知`,
-              <View key="delay" style={s.row}>
-                <TextInput
-                  accessibilityLabel="其余时段等待分钟数"
-                  style={[s.input, { width: 56, paddingVertical: 4 }]}
-                  value={delayInput}
-                  onChangeText={setDelayInput}
-                  onSubmitEditing={() => void applyDelay()}
-                />
-                <Btn small label="保存分钟" onPress={() => void applyDelay()} />
-              </View>,
-            ]}
-          />
+        <View style={{ gap: 12 }}>
+          <View style={{ gap: 6 }}>
+            <Text style={s.text}>免等时段：这些时间内有提问未答，立即通知。</Text>
+            {windows.length === 0 ? <Text style={s.muted}>没有免等时段。</Text> : null}
+            {windows.map((win, idx) => (
+              <View key={idx} style={[s.wrap, { justifyContent: 'space-between' }]}>
+                <Text style={s.text}>
+                  {win.days === 'daily'
+                    ? '每天'
+                    : win.days === 'weekdays'
+                      ? '工作日'
+                      : Array.isArray(win.days)
+                        ? `周 ${win.days.join(',')}`
+                        : '周末'}{' '}
+                  <Text style={s.mono}>{win.from} – {win.to}</Text>
+                </Text>
+                <Btn small danger label="删除" disabled={scheduleBusy !== null} onPress={() => void removeWindow(idx)} />
+              </View>
+            ))}
+            {message('remove')}
+          </View>
+
+          <View style={{ gap: 6 }}>
+            <Text style={s.text}>其余时段：{delayText(delayMinutes)}</Text>
+            <View style={s.wrap}>
+              <TextInput
+                accessibilityLabel="其余时段等待分钟数"
+                style={timeInput}
+                value={delayInput}
+                onChangeText={setDelayInput}
+                onSubmitEditing={() => void applyDelay()}
+                keyboardType="number-pad"
+              />
+              <Text style={s.text}>分钟（0 表示立即通知）</Text>
+              <Btn small primary label="保存等待时间" busy={scheduleBusy === 'delay'} disabled={scheduleBusy !== null} onPress={() => void applyDelay()} />
+            </View>
+            {message('delay')}
+          </View>
+
+          <View style={{ gap: 6 }}>
+            <Text style={s.text}>添加免等时段</Text>
+            <View style={s.wrap}>
+              <Btn
+                small
+                label={newDays === 'daily' ? '范围：每天' : '范围：工作日'}
+                onPress={() => setNewDays(d => (d === 'daily' ? 'weekdays' : 'daily'))}
+              />
+              <TextInput
+                accessibilityLabel="免等开始时间"
+                style={timeInput}
+                value={newFrom}
+                onChangeText={setNewFrom}
+                placeholder="01:00"
+                placeholderTextColor={theme.colors.foregroundMuted}
+              />
+              <Text style={s.text}>至</Text>
+              <TextInput
+                accessibilityLabel="免等结束时间"
+                style={timeInput}
+                value={newTo}
+                onChangeText={setNewTo}
+                placeholder="09:30"
+                placeholderTextColor={theme.colors.foregroundMuted}
+              />
+              <Btn small primary label="添加免等时段" busy={scheduleBusy === 'window'} disabled={scheduleBusy !== null} onPress={() => void addWindow()} />
+            </View>
+            {message('window')}
+          </View>
         </View>
       )}
 
-      <View style={s.wrap}>
-        <Btn
-          small
-          disabled={!escalation}
-          label={newDays === 'daily' ? '范围：每天' : '范围：工作日'}
-          onPress={() => setNewDays(d => (d === 'daily' ? 'weekdays' : 'daily'))}
-        />
-        <TextInput
-          accessibilityLabel="免等开始时间"
-          style={[s.input, { width: 80 }]}
-          value={newFrom}
-          onChangeText={setNewFrom}
-          placeholder="01:00"
-          placeholderTextColor={theme.colors.foregroundMuted}
-        />
-        <TextInput
-          accessibilityLabel="免等结束时间"
-          style={[s.input, { width: 80 }]}
-          value={newTo}
-          onChangeText={setNewTo}
-          placeholder="09:30"
-          placeholderTextColor={theme.colors.foregroundMuted}
-        />
-        <Btn small primary disabled={!escalation} label="添加免等时段" onPress={() => void addWindow()} />
-      </View>
-
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>投递模式</Text>
-        <Segmented
-          options={[
-            { value: 'live', label: '实际发送' },
-            { value: 'shadow', label: '影子（只记日志）' },
-          ]}
-          value={delivery}
-          onChange={val => {
-            if (!escalation) return;
-            void control.configureEscalation({ delivery: val }).catch(e => setErr(errorMessage(e)));
-          }}
-        />
-      </View>
-
       <Card
-        title="Webhook 凭据状态（升级通知）"
+        title="Grok bot 类个人机器人通知 Webhook"
         trailing={
           escModOff ? (
             <Chip label="模块未启用" tone="neutral" />
           ) : (
             <Chip
-              label={webhook?.configured ? '已配置' : '未配置'}
+              label={webhook?.configured ? '已设置' : '未设置'}
               tone={webhook?.configured ? 'success' : 'neutral'}
             />
           )
@@ -1194,17 +1037,17 @@ function EscalationDrawer() {
       >
         {escModOff ? (
           <Text style={s.muted}>
-            升级通知模块未启用，请先在本机配置中开启并重载插件，再配置或更换 Webhook 凭据。
+            升级通知模块未启用，请先在本机配置中开启并重载插件，再设置 Webhook 地址。
           </Text>
         ) : (
           <>
             <View style={{ gap: 4 }}>
+              <Text style={s.text}>通知发到这个 Webhook 地址，例如 Grok bot 等个人机器人。</Text>
               <Text style={s.text}>
-                凭据文件：{webhook?.configured ? '已存在（0600 权限）' : '未创建'} · 目标域名：
-                {webhook?.hostname ?? '—'}
+                地址：{webhook?.configured ? '已保存' : '未设置'} · 域名：{webhook?.hostname ?? '—'}
               </Text>
               <Text style={s.text}>
-                指纹：<Text style={s.mono}>{webhook?.fingerprint ?? '未配置'}</Text>
+                识别码：<Text style={s.mono}>{webhook?.fingerprint ?? '—'}</Text>
               </Text>
             </View>
             <TextInput
@@ -1221,11 +1064,11 @@ function EscalationDrawer() {
               spellCheck={false}
             />
             <TextInput
-              accessibilityLabel="Webhook 认证头"
+              accessibilityLabel="Webhook 鉴权信息"
               style={s.input}
               value={webhookSecret}
               onChangeText={setWebhookSecret}
-              placeholder="可选：签名密钥或认证头（保存后不回显）"
+              placeholder="可选：鉴权信息，例如 Authorization: Bearer …（保存后不显示）"
               placeholderTextColor={theme.colors.foregroundMuted}
               secureTextEntry
               autoCapitalize="none"
@@ -1237,7 +1080,7 @@ function EscalationDrawer() {
             <View style={s.wrap}>
               <Btn
                 primary
-                label={webhook?.configured ? '更换 Webhook 凭据' : '保存 Webhook 凭据'}
+                label={webhook?.configured ? '更换地址' : '保存地址'}
                 disabled={!webhookUrl.trim() || webhookBusy !== null}
                 busy={webhookBusy === 'save'}
                 onPress={() => void saveWebhook()}
@@ -1252,58 +1095,22 @@ function EscalationDrawer() {
               ) : null}
             </View>
             <Text style={s.small}>
-              Webhook 完整地址和密钥只保存在本机 0600 凭据文件中，界面与日志只显示域名和 8 位指纹。
+              完整地址和鉴权信息只保存在本机，页面和日志只显示域名和 8 位识别码。
             </Text>
           </>
         )}
       </Card>
 
-      <SectionTitle>最近投递记录</SectionTitle>
-      {recentDeliveries.length === 0 ? (
-        <Text style={s.muted}>暂无升级投递记录。</Text>
-      ) : (
-        <View>
-          <TableRow first header cells={['会话', '升级原因', '结果', '时间']} />
-          {recentDeliveries.map(rec => (
-            <TableRow
-              key={rec.id}
-              cells={[
-                rec.sessionTitle,
-                rec.summary,
-                <Chip
-                  key="out"
-                  label={
-                    rec.status === 'delivered'
-                      ? '已发送'
-                      : rec.status === 'recorded-shadow'
-                        ? '影子记录'
-                        : '失败'
-                  }
-                  tone={
-                    rec.status === 'delivered'
-                      ? 'success'
-                      : rec.status === 'recorded-shadow'
-                        ? 'neutral'
-                        : 'danger'
-                  }
-                />,
-                <Text key="at" style={s.small}>
-                  {ago(rec.at, now)}
-                </Text>,
-              ]}
-            />
-          ))}
-        </View>
-      )}
-
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
       <RuleNote>
-        主会话有提问未回答时，按时段规则通知 Grok（不代答）。同一问题只通知一次。
+        主会话有提问未回答时，按时段规则通知 Grok（不代答）。同一问题只通知一次。通知记录在“待办总览”的处理记录中查看。
       </RuleNote>
     </View>
   );
 }
+
+type ScheduleTarget = 'delay' | 'window' | 'remove';
 
 function QuietChildrenDrawer() {
   const { s, control, theme } = useUi();
@@ -1942,12 +1749,8 @@ export function DrawerOverlay(props: {
         return <AddBrowserDrawer />;
       case 'session-defaults':
         return <SessionDefaultsDrawer />;
-      case 'provider-instance':
-        return <ProviderInstanceDrawer />;
       case 'cloud':
         return <CloudSessionDrawer />;
-      case 'antigravity':
-        return <AntigravityDrawer />;
       case 'qa-mode':
         return <QaModeDrawer />;
       case 'bluetooth':

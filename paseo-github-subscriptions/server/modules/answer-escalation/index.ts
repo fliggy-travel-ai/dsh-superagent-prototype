@@ -6,7 +6,7 @@ import { createSettingsStore } from '../../core/settings-store.ts';
 import { startWithRetry } from '../../core/start-retry.ts';
 import { summarizeError } from '../../core/modules.ts';
 import { isMainInstance, type Module } from '../types.ts';
-import { ESCALATION_FALLBACK, EscalationSectionSchema, RuntimeSettingsSchema, runtimeDefaults, type EscalationSection } from './config.ts';
+import { ESCALATION_FALLBACK, EscalationSectionSchema, RuntimeSettingsSchema, runtimeDefaults, shadowNotice, type EscalationSection } from './config.ts';
 import { migrateLegacyEscalation } from './migrate.ts';
 import { EscalationRuntime } from './runtime.ts';
 
@@ -14,9 +14,9 @@ const LEGACY_PLUGIN = 'event-notifications';
 
 /**
  * 升级通知：主会话（置顶工作区中的会话）的提问和错误按时段规则送到 Grok webhook，
- * 新建项目和工作区也通知，另有额度报警。默认关闭，打开后默认影子模式（只记录，不投递）。
+ * 新建项目和工作区也通知，另有额度报警。默认关闭。只有实际发送（影子模式已删除）。
  * 与代答（answer.presence）是两套独立规则：同一道题可能先被代答，之后仍被升级。
- * 替代旧插件 event-notifications（停旧开新；旧插件仍启用时强制影子模式）。
+ * 替代旧插件 event-notifications（停旧开新；旧插件仍启用时本模块不启动、不发送）。
  */
 export const escalationModule: Module<EscalationSection> = {
   id: 'answer.escalation',
@@ -29,14 +29,14 @@ export const escalationModule: Module<EscalationSection> = {
     const directory = join(context.stateDirectory, 'escalation');
     const legacyDirectory = config.legacyDirectory ?? join(services.home, LEGACY_PLUGIN);
     const legacy = legacyPluginStatus(services.home, LEGACY_PLUGIN);
-    // 旧插件仍在运行时它的状态还在变，复制过来没有意义，切实际发送后还可能重复发 Grok：不复制。
-    // 切到实际发送前（beforeLive）再试一次，只复制不覆盖。
-    const copyLegacy = () => {
-      if (legacy.enabled) return;
+    // 旧插件仍在运行时它的状态还在变，复制过来没有意义：不复制。停用旧插件后重载才复制，只复制不覆盖。
+    if (!legacy.enabled) {
       const migration = migrateLegacyEscalation(legacyDirectory, directory);
       if (migration.report.copied.length) console.error(`[开发自动化·升级通知] 已复制旧状态：${migration.report.copied.join('、')}。旧文件未改动。${migration.notes.join('')}`);
-    };
-    copyLegacy();
+    }
+    const settings = createSettingsStore(join(directory, 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(config));
+    const shadow = shadowNotice(config, settings.read() as { delivery?: string });
+    if (shadow) console.error(`[开发自动化·升级通知] ${shadow}`);
     const runtime = new EscalationRuntime({
       server,
       daemon: services.daemon,
@@ -44,9 +44,8 @@ export const escalationModule: Module<EscalationSection> = {
       directory,
       machineName: context.machine.machine ?? 'local',
       section: config,
-      settings: createSettingsStore(join(directory, 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(config)),
-      beforeLive: copyLegacy,
-      ...(legacy.enabled ? { forceShadow: `${legacy.problem ?? `旧插件 ${LEGACY_PLUGIN} 仍启用`}，已强制影子模式。先停用旧插件，再切换到实际发送。` } : {}),
+      settings,
+      ...(legacy.enabled ? { blocked: `${legacy.problem ?? `旧插件“会话事件通知”（${LEGACY_PLUGIN}）仍启用`}。本模块不发送，以免同一事件发两次；停用旧插件后重载本插件。` } : {}),
     });
     const lifetime = new AbortController();
     void startWithRetry(() => runtime.start().catch(error => { runtime.markFailed(error); throw error; }), {

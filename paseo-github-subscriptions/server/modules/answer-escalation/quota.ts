@@ -215,6 +215,7 @@ export interface QuotaAlertsDeps {
   hostId: string;
   statePath: string;
   pollMs?: number;
+  enabled?: () => boolean;
   /** 为 true 时只写审计，不发送。可以是函数，以便运行中切换影子和实际发送。 */
   dryRun?: boolean | (() => boolean);
   now?: () => number;
@@ -304,6 +305,7 @@ export class QuotaAlerts {
   }
 
   private async scan(triggeredBy?: string[], errorMessage?: string) {
+    if (this.deps.enabled && !this.deps.enabled()) return;
     const now = this.now();
     this.state.lastCheckAt = now;
     const credentials = await this.deps.credentials().catch((e) => {
@@ -394,6 +396,7 @@ export class QuotaAlerts {
         }
         continue;
       }
+      if (this.deps.enabled && !this.deps.enabled()) break;
       delete this.state.waiting[key];
       const dryRun = typeof this.deps.dryRun === "function" ? this.deps.dryRun() : !!this.deps.dryRun;
       await this.deps.audit({ phase: "quota-alert", mode: dryRun ? "dry-run" : "live", payload, at: now });
@@ -402,6 +405,7 @@ export class QuotaAlerts {
         continue;
       }
       try {
+        if (this.deps.enabled && !this.deps.enabled()) break;
         await this.deps.post(payload, credentials);
         this.state.active[key] = this.record(now, payload);
       } catch (e) {

@@ -56,7 +56,6 @@
     "forwardEvents": false
   },
   "escalation": {
-    "delivery": "shadow",
     "timezone": "Asia/Singapore",
     "immediate": [
       {

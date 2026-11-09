@@ -17,7 +17,7 @@
 
 **读不到置顶状态时不猜**：`workspaces.json` 不存在、无法读取或无法解析，都按错误处理并在页面显示原因——不清除任何提醒、不升级、不判停滞。
 
-**读不到 Paseo 配置时不猜**：`core/legacy-plugins.ts` 判断旧插件是否仍启用，**只有 `config.json` 不存在才算没启用**；读取或解析出错按“旧插件仍启用”处理，并在页面显示原因（额度模块不启动、升级通知强制影子、事件转发打不开）。
+**读不到 Paseo 配置时不猜**：`core/legacy-plugins.ts` 判断旧插件是否仍启用，**只有 `config.json` 不存在才算没启用**；读取或解析出错按“旧插件仍启用”处理，并在页面显示原因（额度模块不启动、升级通知不启动也不发送、事件转发打不开）。
 
 ## usage.claudeAccounts
 
@@ -61,12 +61,13 @@
 
 - **范围**：主会话（置顶工作区中的会话）的提问和错误；新建项目和新建工作区（`escalation.newObjects`）；额度报警（`escalation.quotaAlerts`）。
 - **时段规则**：`timezone`（默认 `Asia/Singapore`）、`immediate`（立即时段，默认每天 01:00–09:30、工作日 12:00–14:00，左闭右开）、`delayMinutes`（时段外等待的分钟数）。时段外的问题等满 `delayMinutes` 后升级，进入立即时段马上升级。**默认 `delayMinutes` 是 0（全天立即），与旧插件的实际行为一致**——旧插件文档写“其他时段等 30 分钟”，但代码里这条规则没有接入。要启用文档里的规则，把它设为 30。
-- **影子和实际发送**：`escalation.delivery`，**默认 `shadow`**（只记录，不投递）。两种模式各有一份去重记录（`state-shadow.json`、`state.json`），互不消耗；切换时未答复的问题带到新模式；先写好新记录文件，最后才提交设置，设置写失败时回退切换。页面用 `escalation.configure` 切换。
-- **旧插件保护**：旧插件 `event-notifications` 仍启用时强制影子模式，不能切到实际发送，避免同一事件发两次。
+- **只有实际发送**：影子模式已删除。`machine.json` 的 `escalation.delivery` 或页面旧设置（`escalation/settings.json`）写着 `shadow` 时照常读取，按实际发送处理，日志提示可以删掉这一项。去重记录只用 `state.json`；旧的 `state-shadow.json` 不读不写，文件保留不动。
+- **旧插件保护**：旧插件 `event-notifications` 仍启用时本模块不启动、不发送（避免同一事件发两次），编辑面板显示“旧插件仍启用，先停用”。停用旧插件后重载本插件才开始发送。
 - **webhook**：地址和鉴权头只从环境变量或 macOS Keychain 读取，服务名写在 `machine.json` 的 `escalation.webhook`（`urlEnv`/`authEnv`，或 `urlService`/`authService`/`account`）。仓库里没有地址、凭据和服务名。旧插件的服务名写在旧源码 `server/webhook.ts` 里，迁移时抄到 `machine.json`。额度报警 webhook 的凭据：环境变量 `QUOTA_WEBHOOK_URL`/`QUOTA_WEBHOOK_KEY`、`~/.config/dsh/quota-webhook.json`，或 `quotaAlerts.fileDirectory`（目录里 `url` 和 `key` 两个文件）。
 - **预筛**：`escalation.prefilter` 写 `{ command, script }`；脚本输出 `{"action":"suppress"}` 时不发送。没有配置就不预筛。
+- **编辑面板**：时段规则（免等时段的删除和添加、其余时段的等待分钟数，每处都有保存按钮，结果在原位置提示成功或失败原因）；“Grok bot 类个人机器人通知 Webhook”（地址、域名、8 位识别码，保存或更换地址，发测试通知）。通知记录不在面板列出，在“待办总览”的处理记录中查看；`escalation.snapshot` 仍返回 `recentDeliveries`。
 - **待办中的升级事件自动结束**：来源提问不再等待时（已回答、已取消、权限已处理，或会话不存在、已归档、已关闭），升级事件自动移出“待办总览”，`events.jsonl` 写 `record-closed`，待办的处理记录显示“已自动结束（原因）”。出错事件在会话继续运行后结束；60 秒内合并的出错事件要全部成员会话都恢复运行、不存在、已归档或已关闭才结束。触发点：权限钩子、会话列表订阅推送、启动时对账一次、之后每 60 秒对账一次（逐个查询有未结束事件的会话，查询失败的保留到下次）。启动后 2 分钟内只按“会话已归档或不存在”结束：守护进程重启后会话恢复前等待列表为空，不能据此判断提问已结束。旧记录没有请求编号，启动时从 `events.jsonl` 按通知编号回填；回填不到的，会话没有任何等待中的请求才结束。同一轮对账也清掉引擎中已送达但已不再等待的提问。“标为已处理”仍可用；按钮等待超过 15 秒提示超时并恢复，随后重新读取列表。跨主机：每台主机只结束自己的事件，两台主机都要部署本版本。
-- **状态目录** `escalation/`：`settings.json`、`state.json`、`state-shadow.json`、`events.jsonl`（审计）、`records.json`（页面的升级事件和最近投递）、`quota-alerts.json`。
+- **状态目录** `escalation/`：`settings.json`、`state.json`、`events.jsonl`（审计）、`records.json`（待办的升级事件和处理记录）、`quota-alerts.json`。
 
 ### 迁移旧状态
 
@@ -76,9 +77,9 @@
 1. 旧 `~/.paseo/event-notifications/state.json` → `escalation/state.json`（实际发送模式的去重记录）；`quota-alerts.json` → `escalation/quota-alerts.json`。
 2. 额度报警凭据目录：旧插件默认目录写在旧源码里，请抄进 `escalation.quotaAlerts.fileDirectory`；开了额度报警却没有凭据时，页面显示警告。
 3. `events.jsonl` 不复制，留作旧记录。`config.json` 不复制：日志里给出建议值（`delivery`、`webhook` 的环境变量名），请手动写入 `machine.json`。`mains`、`children`、`mainAgentsFile` 不再使用。
-4. 切换顺序：先停旧插件，打开本模块（影子），核对 `events.jsonl` 和页面记录，再在页面切到实际发送。
+4. 切换顺序：先停旧插件，再打开本模块并重载。旧插件未停用时本模块不发送。
 
 ## 已知限制
 
-- 订阅、钩子和连接部分（`runtime.ts`、`forward.ts`）没有自动化测试：它们依赖运行中的守护进程。投递、时段、配置、迁移、角色判定、清除队列和 RPC 都有单元测试。需要在影子模式下用真实守护进程观察。
+- 订阅、钩子和连接部分（`runtime.ts`、`forward.ts`）没有自动化测试：它们依赖运行中的守护进程。投递、时段、配置、迁移、角色判定、清除队列和 RPC 都有单元测试。需要用真实守护进程观察。
 - 额度来源的 `icon` 写成插件内相对路径 `server/vendor/paseo-0.15.0/claude-usage-source/icon.svg`；如果 Paseo 不按插件根目录解析，只是不显示图标。

@@ -2,6 +2,7 @@ import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 
 /** 升级通知（模块 answer.escalation）的页面契约。RPC 约定见 #1737 评论 6728145308。 */
+/** 影子模式已删除，只有实际发送。shadow 只出现在旧的投递记录和旧配置中。 */
 export const DeliverySchema = z.enum(['shadow', 'live']);
 export const WindowDaysSchema = z.union([z.enum(['daily', 'weekdays', 'weekends']), z.array(z.number().int().min(0).max(6))]);
 export const ImmediateWindowOutSchema = z.strictObject({ days: WindowDaysSchema, from: z.string(), to: z.string() });
@@ -11,7 +12,8 @@ export const EscalationSnapshotSchema = z.strictObject({
   /** 异常时页面显示红色“没有运行”。 */
   status: z.enum(['running', 'stopped', 'error']),
   error: z.string().nullable(),
-  delivery: DeliverySchema,
+  /** 旧插件 event-notifications 仍启用时模块不发送，这里给出原因；否则为 null。 */
+  blockedReason: z.string().nullable(),
   timezone: z.string(),
   immediate: z.array(ImmediateWindowOutSchema),
   delayMinutes: z.number(),
@@ -33,7 +35,6 @@ export type EscalationSnapshot = z.infer<typeof EscalationSnapshotSchema>;
 
 export const EscalationConfigureSchema = z.strictObject({
   enabled: z.boolean().optional(),
-  delivery: DeliverySchema.optional(),
   timezone: z.string().min(1).optional(),
   immediate: z.array(ImmediateWindowOutSchema).optional(),
   delayMinutes: z.number().int().min(0).optional(),

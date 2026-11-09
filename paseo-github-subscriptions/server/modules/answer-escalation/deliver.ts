@@ -3,7 +3,6 @@ import { webhookPayload, type WebhookCredentials } from './webhook.ts';
 import { errorSessionsOf, requestsOf, type EscalationRecord } from './records.ts';
 
 export interface DeliverDeps {
-  mode(): 'shadow' | 'live';
   audit(entry: Record<string, unknown>): Promise<void>;
   isMain(agentId: string): boolean;
   prefilter(payload: unknown): Promise<boolean>;
@@ -31,20 +30,14 @@ export function noticeRecord(notice: Notice, delivery: 'shadow' | 'live', status
 }
 
 /**
- * 升级通知的投递：影子模式只记录；实际发送时先预筛，再 POST 到 webhook。
+ * 升级通知的投递：先预筛，再 POST 到 webhook。影子模式已删除。
  * 抛出带 `suppressed` 的错误表示“只记录，不重试”；其他错误由引擎退避重试。
  */
 export function createSender(deps: DeliverDeps): (notice: Notice) => Promise<void> {
   const now = deps.now ?? Date.now;
   return async notice => {
-    const mode = deps.mode();
+    const mode = 'live';
     await deps.audit({ phase: 'delivery-attempt', mode, notice });
-    if (mode === 'shadow') {
-      await deps.audit({ phase: 'recorded-shadow', mode: 'shadow', notice });
-      deps.records.upsert(noticeRecord(notice, 'shadow', 'recorded-shadow', now));
-      deps.log?.(JSON.stringify({ event: notice.event, id: notice.id, agentId: notice.agentId, delivery: 'shadow' }));
-      return;
-    }
     // 完结通知由 Paseo MCP 提供，这里只记录。
     if (notice.event === 'subagent_done') throw Object.assign(Error('完结通知由 Paseo MCP 提供，仅记录'), { suppressed: true });
     // 排队期间置顶被取消的会话不再是主会话。

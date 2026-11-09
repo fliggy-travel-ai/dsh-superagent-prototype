@@ -176,7 +176,7 @@ function makeFixture() {
     enabled: true,
     status: 'running',
     error: null,
-    delivery: 'live',
+    blockedReason: null,
     timezone: 'Asia/Singapore',
     immediate: [{ days: 'daily', from: '01:00', to: '09:30' }],
     delayMinutes: 30,
@@ -1241,7 +1241,7 @@ test('已暂停时再次收到暂停请求直接返回，不重新执行、不�
 
 test('自动结束的升级事件不在待办中，处理记录写明结束原因', async () => {
   const escalation: EscalationSnapshot = {
-    enabled: true, status: 'running', error: null, delivery: 'live', timezone: 'Asia/Singapore', immediate: [], delayMinutes: 0,
+    enabled: true, status: 'running', error: null, blockedReason: null, timezone: 'Asia/Singapore', immediate: [], delayMinutes: 0,
     webhook: { configured: true, hostname: null, fingerprint: null },
     pendingEvents: [],
     recentDeliveries: [],

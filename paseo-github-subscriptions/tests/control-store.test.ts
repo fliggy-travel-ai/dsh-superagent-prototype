@@ -248,8 +248,6 @@ test('其他会话的 RPC 未注册或模块未开启时标记为 disabled 且�
     const state = store.getState();
     assert.equal(state.claudeAccountsStatus, 'disabled');
     assert.equal(state.claudeAccountsError, null);
-    assert.equal(state.antigravityStatus, 'disabled');
-    assert.equal(state.antigravityError, null);
     assert.equal(state.quietStatus, 'disabled');
     assert.equal(state.quietError, null);
     assert.equal(state.escalationStatus, 'error');

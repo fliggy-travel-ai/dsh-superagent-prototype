@@ -10,10 +10,9 @@ const notice = (extra: Partial<Notice> = {}): Notice => ({
   questionSummary: { text: '是否合并？', questions: [], options: [], recommended: [] }, needsUser: false, wake: 'immediate', coalesceWindowSeconds: 60,
   at: Date.parse('2026-11-08T10:00:00.000Z'), data: {}, ...extra,
 });
-function fixture(mode: 'shadow' | 'live' = 'shadow') {
-  const state = { mode, mains: new Set(['main']), suppress: false, postError: null as unknown, posts: [] as Notice[], audits: [] as Record<string, unknown>[], records: [] as EscalationRecord[] };
+function fixture() {
+  const state = { mains: new Set(['main']), suppress: false, postError: null as unknown, posts: [] as Notice[], audits: [] as Record<string, unknown>[], records: [] as EscalationRecord[] };
   const send = createSender({
-    mode: () => state.mode,
     audit: async entry => { state.audits.push(entry); },
     isMain: id => state.mains.has(id),
     prefilter: async () => state.suppress,
@@ -25,17 +24,16 @@ function fixture(mode: 'shadow' | 'live' = 'shadow') {
   return { state, send };
 }
 
-test('影子模式只记录，不读凭据、不发送', async () => {
-  const { state, send } = fixture('shadow');
+test('影子模式已删除：投递总是读凭据并发送', async () => {
+  const { state, send } = fixture();
   await send(notice());
-  assert.deepEqual(state.posts, []);
-  assert.deepEqual(state.audits.map(a => a.phase), ['delivery-attempt', 'recorded-shadow']);
-  assert.equal(state.records[0]!.status, 'recorded-shadow');
-  assert.equal(state.records[0]!.delivery, 'shadow');
+  assert.equal(state.posts.length, 1);
+  assert.equal(state.audits.some(a => a.phase === 'recorded-shadow'), false);
+  assert.equal(state.records[0]!.delivery, 'live');
 });
 
 test('实际发送：送到 webhook，审计记录状态码，页面记录为已送达', async () => {
-  const { state, send } = fixture('live');
+  const { state, send } = fixture();
   await send(notice());
   assert.equal(state.posts.length, 1);
   const delivered = state.audits.find(a => a.phase === 'delivered')!;
@@ -46,7 +44,7 @@ test('实际发送：送到 webhook，审计记录状态码，页面记录为已
 });
 
 test('发送失败：页面记录为失败并继续抛出，让引擎重试；重试成功后更新同一条记录', async () => {
-  const { state, send } = fixture('live');
+  const { state, send } = fixture();
   state.postError = Object.assign(new Error('Webhook HTTP 502'), { httpStatus: 502 });
   await assert.rejects(send(notice()), /502/);
   assert.equal(state.records.at(-1)!.status, 'failed');
@@ -56,20 +54,20 @@ test('发送失败：页面记录为失败并继续抛出，让引擎重试；�
 });
 
 test('已不是主会话的事件（置顶被取消）只记录，不发送', async () => {
-  const { state, send } = fixture('live');
+  const { state, send } = fixture();
   state.mains.clear();
   await assert.rejects(send(notice()), (e: any) => e.suppressed === true);
   assert.deepEqual(state.posts, []);
 });
 
 test('新建项目和工作区没有会话，也能发送', async () => {
-  const { state, send } = fixture('live');
+  const { state, send } = fixture();
   await send(notice({ event: 'new_project', agentId: '', title: '新项目' }));
   assert.equal(state.posts.length, 1);
 });
 
 test('子会话完结通知只记录；预筛要求过滤时不发送并记审计', async () => {
-  const { state, send } = fixture('live');
+  const { state, send } = fixture();
   await assert.rejects(send(notice({ event: 'subagent_done' })), (e: any) => e.suppressed === true);
   state.suppress = true;
   await send(notice({ id: 'n2' }));

@@ -28,12 +28,6 @@ import {
   type ClaudeAccountsSnapshot,
 } from '../shared/claude-accounts.ts';
 import {
-  antigravitySnapshot,
-  antigravityAccountToggle,
-  antigravityAccountAdd,
-  type AntigravitySnapshot,
-} from '../shared/antigravity.ts';
-import {
   providerQuotasSnapshot,
   providerQuotasConfigure,
   type ProviderQuotasConfigureInput,
@@ -78,9 +72,6 @@ export interface ControlState {
   claudeAccounts: ClaudeAccountsSnapshot | null;
   claudeAccountsStatus: OptionalFeatureStatus;
   claudeAccountsError: string | null;
-  antigravity: AntigravitySnapshot | null;
-  antigravityStatus: OptionalFeatureStatus;
-  antigravityError: string | null;
   providerQuotas: ProviderQuotasSnapshot | null;
   providerQuotasStatus: OptionalFeatureStatus;
   escalation: EscalationSnapshot | null;
@@ -129,9 +120,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     claudeAccounts: null,
     claudeAccountsStatus: 'loading',
     claudeAccountsError: null,
-    antigravity: null,
-    antigravityStatus: 'loading',
-    antigravityError: null,
     providerQuotas: null,
     providerQuotasStatus: 'loading',
     escalation: null,
@@ -232,15 +220,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
             emit({ claudeAccountsStatus: 'disabled', claudeAccountsError: null });
           } else {
             emit({ claudeAccountsStatus: 'error', claudeAccountsError: errorMessage(error) });
-          }
-        }),
-        client.rpc(antigravitySnapshot, {}).then(value => {
-          emit({ antigravity: value, antigravityStatus: 'ready', antigravityError: null });
-        }).catch(error => {
-          if (isRpcDisabledError(error, 'providers.antigravity', mods)) {
-            emit({ antigravityStatus: 'disabled', antigravityError: null });
-          } else {
-            emit({ antigravityStatus: 'error', antigravityError: errorMessage(error) });
           }
         }),
         client.rpc(providerQuotasSnapshot, {}).then(value => {
@@ -351,16 +330,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       emit({ claudeAccounts: result, claudeAccountsStatus: 'ready', claudeAccountsError: null });
       return result;
     }),
-    toggleAntigravityAccount: (input: { providerId: string; enabled: boolean }) => write(async () => {
-      const result = await client.rpc(antigravityAccountToggle, input);
-      emit({ antigravity: result, antigravityStatus: 'ready', antigravityError: null });
-      return result;
-    }),
-    addAntigravityAccount: (input: { providerId: string; label: string; homeDir?: string; proxy?: string }) => write(async () => {
-      const result = await client.rpc(antigravityAccountAdd, input);
-      emit({ antigravity: result, antigravityStatus: 'ready', antigravityError: null });
-      return result;
-    }),
     configureProviderQuotas: (input: ProviderQuotasConfigureInput) => write(async () => {
       const result = await client.rpc(providerQuotasConfigure, input);
       const { applied } = syncHideBuiltinUsage(result.hideBuiltin);
@@ -369,7 +338,6 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     }),
     configureEscalation: (input: {
       enabled?: boolean;
-      delivery?: 'shadow' | 'live';
       timezone?: string;
       immediate?: EscalationWindow[];
       delayMinutes?: number;

@@ -107,14 +107,10 @@ function ProvidersPage({
     defaults,
     defaultsError,
     providerInstance,
-    providerInstanceError,
     cloudSession,
     cloudSessionError,
     claudeAccounts,
     claudeAccountsStatus,
-    antigravity,
-    antigravityStatus,
-    antigravityError,
     machineSettings,
     machineSettingsError,
     modules,
@@ -150,7 +146,6 @@ function ProvidersPage({
     Boolean(claudeAccounts && !claudeAccounts.enabled);
   const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
   const defaultsModOff = isModuleOff('providers.defaults', machineSettings, modules);
-  const agModOff = isModuleOff('providers.antigravity', machineSettings, modules);
   const accounts = claudeAccounts?.accounts ?? [];
   const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
   const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
@@ -162,13 +157,6 @@ function ProvidersPage({
     ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
     : false;
   const resolvedCloud = cloudSession ?? providerInstance?.cloudSession ?? null;
-  const agCount = antigravity?.accounts.length ?? 0;
-  const agRunningSessions = antigravity?.runningSessionsCount ?? 0;
-  const showAntigravityCard =
-    agModOff ||
-    antigravityStatus === 'error' ||
-    Boolean(antigravityError) ||
-    (antigravityStatus === 'ready' && Boolean(antigravity?.enabled || agCount > 0));
 
   return (
     <View style={{ gap: 14 }}>
@@ -225,10 +213,7 @@ function ProvidersPage({
 
       {providerInstance && !instanceRunning ? (
         <Notice tone="danger">
-          <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
-            <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
-            <Btn small label="查看" onPress={() => onOpenDrawer('provider-instance')} />
-          </View>
+          <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
         </Notice>
       ) : null}
 
@@ -312,33 +297,6 @@ function ProvidersPage({
         />
 
         <FeatureCard
-          title="Provider 实例"
-          trailing={
-            providerInstanceError ? (
-              <Chip label="读取失败" tone="danger" />
-            ) : !providerInstance ? (
-              <Chip label="正在读取" tone="neutral" />
-            ) : (
-              <Chip
-                label={instanceRunning ? '运行中' : '未运行'}
-                tone={instanceRunning ? 'success' : 'danger'}
-              />
-            )
-          }
-          description="独立守护进程，重载本插件时不会中断正在运行的会话。"
-          kv={
-            providerInstanceError ? (
-              <Text style={s.small}>读取失败：{providerInstanceError}</Text>
-            ) : !providerInstance ? (
-              <Text style={s.small}>正在读取…</Text>
-            ) : (
-              <Text style={s.small}>{providerInstance.runningSessionsCount} 个会话正在运行</Text>
-            )
-          }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('provider-instance')} />}
-        />
-
-        <FeatureCard
           title="云端会话"
           description="把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。"
           kv={
@@ -363,41 +321,6 @@ function ProvidersPage({
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
         />
-
-        {showAntigravityCard ? (
-          <FeatureCard
-            title="Antigravity"
-            trailing={
-              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
-                <Chip label="读取失败" tone="danger" />
-              ) : agModOff ? (
-                <Chip label="未启用" tone="neutral" />
-              ) : (
-                <Chip
-                  label={antigravity?.reloadRequired ? '待重载' : '运行中'}
-                  tone={antigravity?.reloadRequired ? 'warning' : 'success'}
-                />
-              )
-            }
-            description="多个 Antigravity 账号分别作为 Provider。"
-            kv={
-              antigravityStatus === 'error' || antigravityError || antigravity?.error ? (
-                <>
-                  <Chip label="读取失败" tone="danger" />
-                  <Text style={s.small}>读取失败：{antigravityError ?? antigravity?.error}</Text>
-                </>
-              ) : agModOff ? (
-                <ModuleOffHint onOpenMachineConfig={() => onOpenDrawer('machine-config')} />
-              ) : (
-                <>
-                  <Text style={s.small}>{agCount} 个账号</Text>
-                  <Text style={s.small}>· {agRunningSessions} 个运行中会话</Text>
-                </>
-              )
-            }
-            actions={<Btn small label="编辑" onPress={() => onOpenDrawer('antigravity')} />}
-          />
-        ) : null}
 
         <FeatureCard
           title="本机配置"
@@ -462,7 +385,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
     ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
     : false;
 
-  const escState = !escalation?.enabled || escalation.status === 'stopped'
+  const escState = escalation?.blockedReason
+    ? { label: '旧插件仍启用', tone: 'danger' as const }
+    : !escalation?.enabled || escalation.status === 'stopped'
     ? { label: '未运行', tone: 'neutral' as const }
     : escalation.status === 'error'
       ? { label: '异常', tone: 'danger' as const }
@@ -610,7 +535,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
             ) : (
               <>
                 <Chip label={escState.label} tone={escState.tone} />
-                <Text style={s.small}>{escalation.delivery === 'shadow' ? '影子' : '实际发送'}</Text>
+                {escalation.blockedReason ? <Text style={s.small}>先停用旧插件“会话事件通知”，再重载本插件</Text> : null}
               </>
             )
           }
