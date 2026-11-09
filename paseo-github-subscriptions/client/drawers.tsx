@@ -1054,15 +1054,27 @@ function SpeechDrawer() {
         />
       </View>
       <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>播报主机</Text>
-        <Chip
-          label={presenceError ? '读取失败' : !presence ? '正在读取' : presence.hostName || '跟随在场主机'}
-          tone={presenceError ? 'danger' : 'neutral'}
+        <Text style={[s.text, { flexShrink: 1 }]}>{`在这台电脑播放（${presence?.hostName || '本机'}）`}</Text>
+        <Switch
+          accessibilityLabel={`在这台电脑播放（${presence?.hostName || '本机'}）`}
+          disabled={moduleReloading || !presence}
+          value={Boolean(presence?.localSpeechEnabled)}
+          onValueChange={enabled => {
+            if (!presence) return;
+            void control.configureLocalSpeech(enabled).catch(e => setErr(errorMessage(e)));
+          }}
+          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+          thumbColor={theme.colors.accentForeground}
         />
       </View>
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
+      {settings?.speechEnabled && presence?.hasSpeechTarget === false ? (
+        <Notice tone="warning">
+          <Text style={s.text}>当前没有主机会播放：请至少在一台在线电脑上开启“在这台电脑播放”。</Text>
+        </Notice>
+      ) : null}
       <RuleNote>
-        只在判定在线且有新提问或停滞会话时播报；优先使用专用晓晓语音环境，不可用时回退系统语音；你在任一端回答后立即停止播报。
+        只在判定在线且总开关开启时，向所有开启“在这台电脑播放”的主机播报新提问；本机开关只保存在当前电脑，不跨主机同步；你在任一端回答后立即停止播报。
       </RuleNote>
     </View>
   );

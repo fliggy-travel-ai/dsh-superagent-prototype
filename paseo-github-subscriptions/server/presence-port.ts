@@ -1,6 +1,6 @@
 import type { connectDaemon } from './daemon.ts';
-import type { PresencePort, QuestionAgent } from './presence.ts';
-import { PresenceObservationSchema } from '../shared/presence.ts';
+import { isMissingRpcMethodError, type PresencePort, type QuestionAgent } from './presence.ts';
+import { LocalSpeechStateSchema, PresenceObservationSchema } from '../shared/presence.ts';
 import { readGuardPresence } from './guard-presence.ts';
 import { GuardSpeech } from './speech.ts';
 import { SpeechResultSchema } from '../shared/speech.ts';
@@ -8,12 +8,14 @@ import { listBluetoothTargets, saveBluetoothTarget } from './bluetooth-target.ts
 import { BluetoothConfigSchema, BluetoothSnapshotSchema, type BluetoothTarget } from '../shared/bluetooth.ts';
 import { HostRouter } from './core/hosts.ts';
 
-const timeouts: Record<string, number> = { 'presence.speak': 100_000, 'bluetooth.local-list': 25_000 };
+const timeouts: Record<string, number> = { 'presence.speak': 100_000, 'bluetooth.local-list': 25_000, 'presence.local-speech': 3_000 };
+
+export { isMissingRpcMethodError };
 
 export class PresenceHosts extends HostRouter {
   private speech = new GuardSpeech();
   constructor(origin: Awaited<ReturnType<typeof connectDaemon>>['client']) { super(origin); }
-  async invoke(hostId: string, method: 'presence.local' | 'presence.speak' | 'presence.speak-cancel' | 'bluetooth.local-list' | 'bluetooth.local-select' | 'todo.local' | 'todo.act', input: unknown, onTimeout?: () => void) {
+  async invoke(hostId: string, method: 'presence.local' | 'presence.local-speech' | 'presence.speak' | 'presence.speak-cancel' | 'bluetooth.local-list' | 'bluetooth.local-select' | 'todo.local' | 'todo.act', input: unknown, onTimeout?: () => void) {
     return this.invokePlugin(hostId, method, input, timeouts[method] ?? 5000, onTimeout, true);
   }
   async localSpeech(id: string, text: string) {
@@ -21,13 +23,26 @@ export class PresenceHosts extends HostRouter {
   }
   localCancel(id: string) { return this.speech.cancel(id); }
   async cancelSpeech(hostId: string | null, id: string) {
-    const self = this.origin.getLastServerInfoMessage()?.serverId;
-    if (hostId && hostId !== self) await this.invoke(hostId, 'presence.speak-cancel', { id });
+    if (!this.sameHost(hostId, null)) await this.invoke(hostId!, 'presence.speak-cancel', { id });
     else this.localCancel(id);
   }
   async observe(hostId: string | null) {
-    const self = this.origin.getLastServerInfoMessage()?.serverId;
-    return hostId && hostId !== self ? PresenceObservationSchema.parse(await this.invoke(hostId, 'presence.local', {})) : readGuardPresence();
+    return !this.sameHost(hostId, null) ? PresenceObservationSchema.parse(await this.invoke(hostId!, 'presence.local', {})) : readGuardPresence();
+  }
+  async remoteSpeechState(hostId: string): Promise<{ enabled: boolean; configured: boolean }> {
+    if (this.sameHost(hostId, null)) return { enabled: true, configured: true };
+    try {
+      const parsed = LocalSpeechStateSchema.parse(await this.invoke(hostId, 'presence.local-speech', {}));
+      return { enabled: parsed.enabled, configured: parsed.configured ?? true };
+    } catch (error) {
+      if (isMissingRpcMethodError(error)) {
+        return { enabled: false, configured: false };
+      }
+      throw error;
+    }
+  }
+  async remoteSpeechEnabled(hostId: string): Promise<boolean> {
+    return (await this.remoteSpeechState(hostId)).enabled;
   }
   async bluetooth(hostId: string | null) {
     return this.sameHost(hostId, null) ? listBluetoothTargets() : BluetoothSnapshotSchema.parse(await this.invoke(hostId!, 'bluetooth.local-list', {}));
@@ -36,8 +51,7 @@ export class PresenceHosts extends HostRouter {
     return this.sameHost(hostId, null) ? saveBluetoothTarget(target) : BluetoothConfigSchema.parse(await this.invoke(hostId!, 'bluetooth.local-select', target));
   }
   async speak(hostId: string | null, id: string, text: string) {
-    const self = this.origin.getLastServerInfoMessage()?.serverId;
-    if (hostId && hostId !== self) return SpeechResultSchema.parse(await this.invoke(hostId, 'presence.speak', { id, text }, () => { void this.cancelSpeech(hostId, id).catch(() => {}); }));
+    if (!this.sameHost(hostId, null)) return SpeechResultSchema.parse(await this.invoke(hostId!, 'presence.speak', { id, text }, () => { void this.cancelSpeech(hostId, id).catch(() => {}); }));
     return this.localSpeech(id, text);
   }
   override async stop() { this.speech.stop(); await super.stop(); }
@@ -62,5 +76,11 @@ export function presencePort(connection: Awaited<ReturnType<typeof connectDaemon
     speak: (hostId, id, text) => hosts.speak(hostId, id, text),
     cancelSpeech: (hostId, id) => hosts.cancelSpeech(hostId, id),
     hosts: () => hosts.hosts(),
+    selfId: () => {
+      const id = hosts.selfId();
+      return id === 'local' ? null : id;
+    },
+    remoteSpeechEnabled: hostId => hosts.remoteSpeechEnabled(hostId),
+    remoteSpeechState: hostId => hosts.remoteSpeechState(hostId),
   };
 }

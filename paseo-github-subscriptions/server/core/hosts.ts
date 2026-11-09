@@ -209,7 +209,7 @@ export class HostRouter {
   }
 
   sameHost(left: string | null, right: string | null): boolean {
-    const local = this.origin.getLastServerInfoMessage()?.serverId;
+    const local = this.cachedSelf?.id ?? this.origin.getLastServerInfoMessage()?.serverId;
     return (left ?? local) === (right ?? local);
   }
 

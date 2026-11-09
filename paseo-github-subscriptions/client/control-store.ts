@@ -1,7 +1,7 @@
 import type { PluginClientContext } from '@getpaseo/plugin/client';
 import { browserSnapshot, browserConfigure, browserBind, browserPairing, browserUsageSnapshot, browserUsageSaveApiKey, browserUsageRemoveApiKey } from '../shared/browser-contracts.ts';
 import type { BrowserSnapshot, BrowserSettings, BrowserBindingInput } from '../shared/browser.ts';
-import { presenceSnapshot, presenceConfigure, presenceAnswer, presenceRead, type PresenceSnapshot, type PresenceSettings, type QuestionAnswer, type QuestionRead } from '../shared/presence.ts';
+import { presenceSnapshot, presenceConfigure, presenceConfigureLocalSpeech, presenceAnswer, presenceRead, type PresenceSnapshot, type PresenceSettings, type QuestionAnswer, type QuestionRead } from '../shared/presence.ts';
 import { bluetoothList, bluetoothSelect, type BluetoothTarget } from '../shared/bluetooth.ts';
 import { errorMessage, REFRESH_INTERVAL_MS } from './store.ts';
 import { stalledSnapshot, type StalledSnapshot } from '../shared/stalled.ts';
@@ -300,6 +300,7 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     saveAdsPowerApiKey: (apiKey: string) => write(() => client.rpc(browserUsageSaveApiKey, { apiKey })),
     removeAdsPowerApiKey: () => write(() => client.rpc(browserUsageRemoveApiKey, {})),
     configurePresence: (settings: PresenceSettings) => write(() => asking(() => client.rpc(presenceConfigure, settings))),
+    configureLocalSpeech: (enabled: boolean) => write(() => asking(() => client.rpc(presenceConfigureLocalSpeech, { enabled }))),
     answerQuestion: (answer: QuestionAnswer) => write(() => asking(() => client.rpc(presenceAnswer, answer))),
     markQuestionRead: (question: QuestionRead) => write(() => asking(() => client.rpc(presenceRead, question))),
     bluetoothDevices: (hostId: string | null) => client.rpc(bluetoothList, { hostId }),
