@@ -39,8 +39,8 @@
   - pace 收紧、预热减半照 `claude-capacity.py`。
 - **换号迁移**（雏形 E + Yang 决定 + 细化 E 部分）：
   - 触发：五小时剩余为 0（用尽即换，不等恢复）；或周剩余 ≤ 5%。只迁 `role=main` 且有 `need`/`issue` 的会话。被点名到具体账号的会话带 `dsh.lb=manual`，不迁，耗尽时发 `lb_exception`。
-  - 目标：档次已核实、`canAdd ≥ 1`、实时五小时 ≥ 30%、周 ≥ 20%；排序 canAdd → 周剩余 → Max 优先。目标只在 Mac mini 的 Claude 账号里选。无目标发 `lb_exception`。
-  - 步骤：内部迁移锁标签 `dsh.migration-lease`（释放写 `released:<时间>`）→ 停原会话（周额度场景发停止消息等确认，最多 10 分钟；五小时用尽场景 `cancelAgent` 并关自动继续）→ `createAgent` 同时传 `cwd`（原会话 cwd）与 `workspaceId`，沿用原单号标签键并加 `role=main`，不传父会话标签，不传 env → 交接词（模板见雏形 E3 第 4 步，禁止写作废审批禁令）→ 收尾复用上面的本机收尾 → 20–40 秒看首条输出，出现限额或付款提示就归档新会话、换下一个候选，最多 2 个 → 新会话正常后，本机子会话改挂新会话（同时写 `paseo.parent-agent-id` 和 `paseo.parent-server-id`），再归档原会话 → 发 `main_migrated`。
+  - 目标：档次已核实、`canAdd ≥ 1`、实时五小时 ≥ 30%、周 ≥ 20%；排序 canAdd → 周剩余 → Max 优先。目标只在 Mac mini 的 Claude 账号里选。无目标时（Yang 2026-11-10 改）：不发 `lb_exception`、不请示总控，默认等原账号额度恢复——五小时用尽时打开原会话自动继续，窗口重置后续跑；之后每轮照常重试换号，有账号腾出容量就换。审计记 `result=no_target, action=wait_for_reset`。
+  - 步骤：内部迁移锁标签 `dsh.migration-lease`（释放写 `released:<时间>`）→ 停原会话（周额度场景发停止消息等确认，最多 10 分钟；五小时用尽场景 `cancelAgent` 并关自动继续）→ `createAgent` 同时传 `cwd`（原会话 cwd）与 `workspaceId`，沿用原单号标签键并加 `role=main`，不传父会话标签，不传 env → 交接词（模板见雏形 E3 第 4 步，禁止写作废审批禁令）→ 收尾复用上面的本机收尾 → 20–40 秒看首条输出（正文、工具调用、思考、任务列表任一项都算开工；只要出现额度或付款报错就判限额），出现限额或付款提示就归档新会话、换下一个候选，最多 2 个 → 新会话正常后，本机子会话改挂新会话（同时写 `paseo.parent-agent-id` 和 `paseo.parent-server-id`），再归档原会话 → 发 `main_migrated`。
   - 失败回退：原会话不归档，恢复自动继续，释放锁，发 `lb_exception`。同一会话 30 分钟内不重复触发。审计 `capacity/migrations.jsonl`，不记邮箱、host、密钥。
   - 开关 `capacity.migration.mode`：`off`（代码默认）/ `shadow` / `live`。部署后 Mac mini 先用 `shadow`；负载均衡 bot 的换号职责移除后切 `live`。
 - **余量反馈**（雏形 F + 细化 F 部分）：webhook 新事件 `capacity`，签名含每账号 `canAdd` 与 `live`，变化且距上次 ≥ 5 分钟推送，6 小时心跳；附每账号 `fetchedAt`。

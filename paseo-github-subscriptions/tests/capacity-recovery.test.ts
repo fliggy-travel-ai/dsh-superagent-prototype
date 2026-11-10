@@ -31,6 +31,12 @@ test('助手正文不按限额关键词判错', () => {
   assert.equal(classifyOutput([{ type: 'assistant_message', text: 'usage_limit_reached' }]), 'quota');
   assert.equal(classifyOutput([{ type: 'assistant_message', text: '调查 usage_limit_reached 的原因。'.repeat(25) }]), 'ok');
   assert.equal(classifyOutput([{ type: 'notification', message: '需要付款' }]), 'quota');
+  // 1808：新会话先读需求单、查日志，只有工具调用没有正文，也算正常开工。
+  assert.equal(classifyOutput([{ type: 'user_message', text: '请接续原会话的工作' }, { type: 'tool_call' }]), 'ok');
+  assert.equal(classifyOutput([{ type: 'reasoning', text: '先读需求单' }]), 'ok');
+  assert.equal(classifyOutput([{ type: 'todo' }]), 'ok');
+  assert.equal(classifyOutput([{ type: 'tool_call' }, { type: 'error', message: 'usage limit reached' }]), 'quota', '额度报错优先于工具调用');
+  assert.equal(classifyOutput([{ type: 'user_message', text: '请接续' }]), 'unknown');
 });
 test('过期重置时间不触发五小时迁移，周额度仍独立触发', () => {
   const now = Date.parse('2026-01-01T02:30:00Z');
