@@ -44,19 +44,24 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   const lease = `plugin:${now + 30 * 60_000}:${randomUUID()}`;
   let acquired = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false;
   const moved: string[] = [];
+  const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+    const started = Date.now();
+    try { const value = await action(); await port.audit({ ...result, step: name, ok: true, elapsedMs: Date.now() - started }); return value; }
+    catch (error) { await port.audit({ ...result, step: name, ok: false, elapsedMs: Date.now() - started }).catch(() => {}); throw error; }
+  };
   try {
-    await port.update(agent.id, { 'dsh.migration-lease': lease });
+    await step('lease', () => port.update(agent.id, { 'dsh.migration-lease': lease }));
     await port.delay(2000);
     if ((await port.read(agent.id))?.labels['dsh.migration-lease'] !== lease) throw Error('lease_conflict');
     acquired = true;
-    oldResume = await port.autoResume(agent.id);
-    await port.setAutoResume(agent.id, false);
-    if (!await port.stop(agent, reason)) throw Error('stop_unconfirmed');
+    oldResume = await step('read_auto_resume', () => port.autoResume(agent.id));
+    await step('disable_auto_resume', () => port.setAutoResume(agent.id, false));
+    if (!await step('stop', () => port.stop(agent, reason))) throw Error('stop_unconfirmed');
     let chosen: Account | undefined;
     for (const candidate of candidates) {
-      newId = await port.create(agent, candidate.provider);
-      if (!await port.finalize(newId)) throw Error('finalize_failed');
-      const verification = await port.verify(newId);
+      newId = await step('create', () => port.create(agent, candidate.provider));
+      if (!await step('finalize', () => port.finalize(newId!))) throw Error('finalize_failed');
+      const verification = await step('verify', () => port.verify(newId!));
       if (verification === 'ok') { chosen = candidate; break; }
       await port.archive(newId); newId = undefined;
       if (verification !== 'quota') throw Error('output_unknown');
@@ -64,11 +69,11 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
     if (!newId || !chosen) throw Error('no_healthy_target');
     const serverId = port.serverId();
     for (const id of await port.children(agent.id)) {
-      moved.push(id); await port.update(id, { 'paseo.parent-agent-id': newId, 'paseo.parent-server-id': serverId });
+      moved.push(id); await step('reparent', () => port.update(id, { 'paseo.parent-agent-id': newId!, 'paseo.parent-server-id': serverId }));
       const child = await port.read(id);
       if (child?.labels['paseo.parent-agent-id'] !== newId || child.labels['paseo.parent-server-id'] !== serverId) throw Error('child_readback_failed');
     }
-    try { await port.archive(agent.id); archived = true; }
+    try { await step('archive_original', () => port.archive(agent.id)); archived = true; }
     catch {
       const original = await port.read(agent.id).catch(() => null);
       if (!original) { archiveUncertain = true; throw Error('archive_unknown'); }

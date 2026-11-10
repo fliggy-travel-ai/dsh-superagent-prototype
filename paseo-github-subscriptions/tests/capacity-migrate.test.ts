@@ -37,3 +37,20 @@ test('锁有效期和点名账号例外', async () => {
   const f = fixture(); f.agent.labels['dsh.lb'] = 'manual'; assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'manual');
   assert.deepEqual(f.calls, ['lb_exception']);
 });
+test('租约被覆盖时不停止或归档会话', async () => {
+  const f = fixture(); f.port.read = async () => ({ ...f.agent, labels: { ...f.agent.labels, 'dsh.migration-lease': 'plugin:1:other' } });
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'lease_conflict');
+  assert.equal(f.calls.includes('resume:false'), false); assert.equal(f.calls.includes('archive:old'), false);
+});
+test('改挂读回失败时恢复子会话和原会话的自动继续', async () => {
+  const f = fixture(); const read = f.port.read;
+  f.port.read = async id => id === 'child' ? { ...f.agents.get('child')!, labels: {} } : read(id);
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'child_readback_failed');
+  assert.equal(f.agents.get('child')!.labels['paseo.parent-agent-id'], 'old'); assert.equal(f.resume(), true);
+  assert.ok(f.calls.includes('archive:new')); assert.equal(f.calls.includes('archive:old'), false);
+});
+test('限额首条输出可尝试第二个目标', async () => {
+  const f = fixture(); let count = 0; f.port.verify = async () => ++count === 1 ? 'quota' : 'ok';
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100), account('claude-3', 100)], 'live', now), 'migrated');
+  assert.equal(f.calls.filter(c => c.startsWith('create:')).length, 2); assert.ok(f.calls.includes('archive:new'));
+});
