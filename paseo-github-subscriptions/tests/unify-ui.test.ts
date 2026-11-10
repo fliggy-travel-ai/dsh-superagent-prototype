@@ -1665,6 +1665,30 @@ test('1737-speech-one-switch：语音提醒卡片与抽屉只保留单个“语�
     const fallbackDrawerText = collectText(fallbackDrawerTree);
     assert.ok(fallbackDrawerText.includes('系统语音'), '编辑抽屉也应展示系统语音状态');
     assert.ok(fallbackDrawerText.includes('晓晓语音合成（内置）失败：超时'), '编辑抽屉也应展示回退原因');
+
+    // 验证首次停滞扫描尚未完成（scannedAt === null）时，待办总览显示“扫描中”而非“没有需要处理的插件待办项”
+    daemon.todo = { items: [], logs: [], hosts: [], warning: null };
+    daemon.stalled = { sessions: [], error: null, scannedAt: null };
+    await control.refresh();
+    await control.refreshUnify();
+    const todoRenderer = createTestRenderer();
+    const scanningTodoTree = todoRenderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'todo' } } as never),
+    );
+    const scanningTodoText = collectText(scanningTodoTree);
+    assert.ok(scanningTodoText.includes('停滞会话 扫描中'), '首次扫描完成前筛选按钮应显示“停滞会话 扫描中”');
+    assert.ok(scanningTodoText.includes('停滞会话扫描中…'), '首次扫描完成前空态卡片应显示“停滞会话扫描中…”');
+    assert.equal(scanningTodoText.includes('当前没有需要处理的插件待办项。'), false);
+
+    daemon.stalled = { sessions: [], error: null, scannedAt: '2026-11-10T07:00:00Z' };
+    await control.refresh();
+    todoRenderer.reset();
+    const scannedTodoTree = todoRenderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'todo' } } as never),
+    );
+    const scannedTodoText = collectText(scannedTodoTree);
+    assert.ok(scannedTodoText.includes('停滞会话 0'), '扫描完成后筛选按钮应显示“停滞会话 0”');
+    assert.ok(scannedTodoText.includes('当前没有需要处理的插件待办项。'), '扫描完成后无待办时应显示“当前没有需要处理的插件待办项。”');
   } finally {
     control.dispose();
   }

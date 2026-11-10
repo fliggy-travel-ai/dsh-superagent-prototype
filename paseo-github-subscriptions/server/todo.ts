@@ -50,15 +50,61 @@ function formatAge(prefix: string, iso: string, nowMs: number, suffix = ''): str
   return `${prefix} ${days} 天${suffix}`;
 }
 
+export const TODO_REMOTE_CACHE_TTL_MS = 10_000;
+/** 远端主机离线或暂时超时时，允许沿用最近一次 `todo.local` 快照的过期上限（60 秒）；超过上限仍无响应则提示未响应。 */
+export const TODO_REMOTE_OFFLINE_MAX_AGE_MS = 60_000;
+export const TODO_REMOTE_MAX_WAIT_MS = 150;
+
+export interface TodoRuntimeOptions {
+  remoteCacheTtlMs?: number;
+  remoteOfflineMaxAgeMs?: number;
+  remoteMaxWaitMs?: number;
+}
+
+const roundMs = (ms: number) => Math.round(ms * 10) / 10;
+
 export class TodoRuntime {
   private readonly port: TodoPort;
+  private readonly remoteCacheTtlMs: number;
+  private readonly remoteOfflineMaxAgeMs: number;
+  private readonly remoteMaxWaitMs: number;
+  private readonly remoteCache = new Map<string, { at: number; expired: boolean; snapshot: TodoLocalSnapshot }>();
+  private readonly remoteVersion = new Map<string, number>();
+  private readonly remoteInflight = new Map<string, { version: number; promise: Promise<TodoLocalSnapshot> }>();
 
-  constructor(port: TodoPort) {
+  constructor(port: TodoPort, options: TodoRuntimeOptions = {}) {
     this.port = port;
+    this.remoteCacheTtlMs = options.remoteCacheTtlMs ?? TODO_REMOTE_CACHE_TTL_MS;
+    this.remoteOfflineMaxAgeMs = options.remoteOfflineMaxAgeMs ?? TODO_REMOTE_OFFLINE_MAX_AGE_MS;
+    this.remoteMaxWaitMs = options.remoteMaxWaitMs ?? TODO_REMOTE_MAX_WAIT_MS;
   }
 
   private now(): number {
     return this.port.now?.() ?? Date.now();
+  }
+
+  private fetchRemote(hostId: string): { version: number; promise: Promise<TodoLocalSnapshot> } {
+    const currentVersion = this.remoteVersion.get(hostId) ?? 0;
+    const existing = this.remoteInflight.get(hostId);
+    if (existing && existing.version === currentVersion) {
+      return existing;
+    }
+    const startedAt = this.now();
+    const version = currentVersion;
+    const promise = (async () => {
+      const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
+      if ((this.remoteVersion.get(hostId) ?? 0) === version) {
+        this.remoteCache.set(hostId, { at: startedAt, expired: false, snapshot: remote });
+      }
+      return remote;
+    })().finally(() => {
+      if (this.remoteInflight.get(hostId)?.promise === promise) {
+        this.remoteInflight.delete(hostId);
+      }
+    });
+    const entry = { version, promise };
+    this.remoteInflight.set(hostId, entry);
+    return entry;
   }
 
   async local(): Promise<TodoLocalSnapshot> {
@@ -292,13 +338,28 @@ export class TodoRuntime {
   }
 
   async list(): Promise<TodoMergedSnapshot> {
-    const [local, allHosts] = await Promise.all([
-      this.local(),
-      this.port.hosts().catch(async () => {
+    const totalStart = performance.now();
+    let localMs = 0;
+    let hostsMs = 0;
+    const remoteMs: Record<string, number> = {};
+
+    const tLocal0 = performance.now();
+    const localTask = this.local().then(value => {
+      localMs = roundMs(performance.now() - tLocal0);
+      return value;
+    });
+    const tHosts0 = performance.now();
+    const hostsTask = this.port
+      .hosts()
+      .catch(async () => {
         const self = await this.port.selfHost();
         return [{ id: self.id, name: self.name, online: true }];
-      }),
-    ]);
+      })
+      .then(value => {
+        hostsMs = roundMs(performance.now() - tHosts0);
+        return value;
+      });
+    const [local, allHosts] = await Promise.all([localTask, hostsTask]);
 
     const items: TodoItem[] = [...local.items];
     const logs: TodoLogItem[] = [...local.logs];
@@ -317,12 +378,43 @@ export class TodoRuntime {
     ];
     const failedHostNames: string[] = [];
 
+    const mergeRemoteSnapshot = (host: { id: string; name: string; online: boolean }, remote: TodoLocalSnapshot) => {
+      if (remote.hostId === local.hostId) return;
+      for (const item of remote.items) {
+        if (seenItemIds.has(item.id)) continue;
+        seenItemIds.add(item.id);
+        items.push(item);
+      }
+      for (const log of remote.logs) {
+        if (seenLogIds.has(log.id)) continue;
+        seenLogIds.add(log.id);
+        logs.push(log);
+      }
+      hostStatuses.push({
+        hostId: host.id,
+        hostName: remote.hostName || host.name,
+        online: host.online,
+        responded: true,
+        error: null,
+        accountsNeedingAttention: remote.accountsNeedingAttention,
+      });
+    };
+
     const remoteHosts = allHosts.filter(h => h.id !== local.hostId);
     await Promise.all(
       remoteHosts.map(async host => {
         if (seenHostIds.has(host.id)) return;
         seenHostIds.add(host.id);
+        const nowMs = this.now();
+        const cached = this.remoteCache.get(host.id);
+        const validFallback = cached && nowMs - cached.at < this.remoteOfflineMaxAgeMs ? cached.snapshot : null;
+
         if (!host.online) {
+          remoteMs[host.id] = 0;
+          if (validFallback) {
+            mergeRemoteSnapshot(host, validFallback);
+            return;
+          }
           failedHostNames.push(host.name);
           hostStatuses.push({
             hostId: host.id,
@@ -334,38 +426,61 @@ export class TodoRuntime {
           });
           return;
         }
-        try {
-          const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(host.id));
-          if (remote.hostId === local.hostId) return;
-          for (const item of remote.items) {
-            if (seenItemIds.has(item.id)) continue;
-            seenItemIds.add(item.id);
-            items.push(item);
-          }
-          for (const log of remote.logs) {
-            if (seenLogIds.has(log.id)) continue;
-            seenLogIds.add(log.id);
-            logs.push(log);
-          }
-          hostStatuses.push({
-            hostId: host.id,
-            hostName: remote.hostName || host.name,
-            online: true,
-            responded: true,
-            error: null,
-            accountsNeedingAttention: remote.accountsNeedingAttention,
-          });
-        } catch (error) {
-          failedHostNames.push(host.name);
-          hostStatuses.push({
-            hostId: host.id,
-            hostName: host.name,
-            online: host.online,
-            responded: false,
-            error: error instanceof Error ? error.message : '未响应',
-            accountsNeedingAttention: 0,
-          });
+
+        if (cached && !cached.expired && nowMs - cached.at < this.remoteCacheTtlMs) {
+          remoteMs[host.id] = 0;
+          mergeRemoteSnapshot(host, cached.snapshot);
+          return;
         }
+
+        const tRemote0 = performance.now();
+        const { version: reqVersion, promise: inflight } = this.fetchRemote(host.id);
+        inflight.catch(() => {});
+
+        type RaceOutcome = { kind: 'ok'; value: TodoLocalSnapshot } | { kind: 'err'; error: unknown } | { kind: 'timeout' };
+        let outcome: RaceOutcome;
+        if (!validFallback) {
+          outcome = await inflight.then(
+            value => ({ kind: 'ok' as const, value }),
+            error => ({ kind: 'err' as const, error }),
+          );
+        } else {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          outcome = await Promise.race<RaceOutcome>([
+            inflight.then(
+              value => ({ kind: 'ok' as const, value }),
+              error => ({ kind: 'err' as const, error }),
+            ),
+            new Promise<RaceOutcome>(resolve => {
+              timer = setTimeout(() => resolve({ kind: 'timeout' }), this.remoteMaxWaitMs);
+              timer.unref?.();
+            }),
+          ]).finally(() => clearTimeout(timer));
+        }
+        remoteMs[host.id] = roundMs(performance.now() - tRemote0);
+
+        if (outcome.kind === 'ok' && (this.remoteVersion.get(host.id) ?? 0) === reqVersion) {
+          mergeRemoteSnapshot(host, outcome.value);
+          return;
+        }
+        const latestCached = this.remoteCache.get(host.id);
+        const fallback =
+          latestCached && this.now() - latestCached.at < this.remoteOfflineMaxAgeMs
+            ? latestCached.snapshot
+            : validFallback;
+        if (fallback) {
+          mergeRemoteSnapshot(host, fallback);
+          return;
+        }
+        failedHostNames.push(host.name);
+        hostStatuses.push({
+          hostId: host.id,
+          hostName: host.name,
+          online: host.online,
+          responded: false,
+          error: outcome.kind === 'err' && outcome.error instanceof Error ? outcome.error.message : '未响应',
+          accountsNeedingAttention: 0,
+        });
       }),
     );
 
@@ -381,6 +496,12 @@ export class TodoRuntime {
       logs: logs.slice(0, 150),
       hosts: hostStatuses,
       warning,
+      timings: {
+        localMs,
+        hostsMs,
+        remoteMs,
+        totalMs: roundMs(performance.now() - totalStart),
+      },
     };
   }
 
@@ -398,7 +519,18 @@ export class TodoRuntime {
         return { ok: false, message: `未知的目标主机：${input.hostId}` };
       }
       try {
-        return await this.port.remoteAct(input.hostId, input);
+        const res = await this.port.remoteAct(input.hostId, input);
+        if (res.ok) {
+          const nextVersion = (this.remoteVersion.get(input.hostId) ?? 0) + 1;
+          this.remoteVersion.set(input.hostId, nextVersion);
+          this.remoteInflight.delete(input.hostId);
+          const cached = this.remoteCache.get(input.hostId);
+          if (cached) {
+            cached.expired = true;
+          }
+          void this.fetchRemote(input.hostId).promise.catch(() => {});
+        }
+        return res;
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : '跨主机转发失败' };
       }

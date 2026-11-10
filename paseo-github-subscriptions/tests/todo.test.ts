@@ -1236,3 +1236,167 @@ test('自动结束的升级事件不在待办中，处理记录写明结束原�
     ['esc-closed:esc-9', '升级投递', '已自动结束（提问已回答或已取消） · 【插件整合】主会话 · 提问：是否合并？'],
   ]);
 });
+
+test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返回缓存待办并附带耗时统计，超过过期上限后降级告警', async () => {
+  const { port } = makeFixture();
+  let currentNow = Date.parse('2026-11-09T06:00:00Z');
+  let remoteOnline = true;
+  let remoteHang = false;
+  let remoteCalls = 0;
+
+  let releaseHang: (() => void) | undefined;
+
+  const runtime = new TodoRuntime({
+    ...port,
+    now: () => currentNow,
+    hosts: async () => [
+      { id: 'srv-mini', name: 'Mac mini', online: true },
+      { id: 'srv-book', name: 'MacBook', online: remoteOnline },
+    ],
+    remoteLocal: async hostId => {
+      remoteCalls += 1;
+      if (remoteHang) {
+        await new Promise<void>(resolve => { releaseHang = resolve; });
+      }
+      return port.remoteLocal(hostId);
+    },
+  });
+
+  // 1. 首次读取缓存远端待办，并附带 timings
+  const first = await runtime.list();
+  assert.equal(remoteCalls, 1);
+  assert.equal(first.items.length, 6);
+  assert.equal(typeof (first as any).timings?.localMs, 'number');
+  assert.equal(typeof (first as any).timings?.totalMs, 'number');
+
+  // 2. 缓存有效期内（+5 秒）再次调用 list，直接复用缓存不重复请求远端
+  currentNow += 5_000;
+  const cached = await runtime.list();
+  assert.equal(remoteCalls, 1, '缓存有效期内不应重复请求远端 todo.local');
+  assert.equal(cached.items.length, 6);
+
+  // 3. 超过常规缓存 TTL（+20 秒），但未超过 60 秒离线/慢响应上限，此时远端挂起 -> list 立即返回缓存结果
+  currentNow += 20_000;
+  remoteHang = true;
+  const t0 = Date.now();
+  const slowFallback = await runtime.list();
+  assert.ok(Date.now() - t0 < 400, '远端挂起时 todo.list 应立即返回缓存结果');
+  assert.equal(slowFallback.items.length, 6);
+  assert.equal(slowFallback.warning, null);
+
+  // 4. 远端主机短暂离线（仍未超 60 秒缓存上限） -> 沿用缓存不告警
+  remoteOnline = false;
+  const offlineFallback = await runtime.list();
+  assert.equal(offlineFallback.items.length, 6);
+  assert.equal(offlineFallback.warning, null);
+
+  // 5. 超过 60 秒缓存上限且远端仍离线 -> 丢弃过期缓存并提示未响应
+  currentNow += 45_000;
+  const expired = await runtime.list();
+  assert.equal(expired.items.length, 5);
+  assert.equal(expired.warning, 'MacBook 未响应，以下只含 Mac mini 的待办');
+  releaseHang?.();
+});
+
+test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不误报未响应；act 后保留过期缓存作回退且丢弃旧版本在途读取；缓存时间记读取开始时刻', async () => {
+  const { port } = makeFixture();
+  let currentNow = Date.parse('2026-11-09T06:00:00Z');
+  let remoteDelayMs = 220;
+  let remoteEscalationHandled = false;
+  let remoteCalls = 0;
+
+  let pendingOldReadResolve: (() => void) | null = null;
+
+  const runtime = new TodoRuntime(
+    {
+      ...port,
+      now: () => currentNow,
+      remoteLocal: async hostId => {
+        remoteCalls += 1;
+        if (pendingOldReadResolve) {
+          const waitOld = new Promise<void>(resolve => {
+            pendingOldReadResolve = resolve;
+          });
+          await waitOld;
+          // 旧读取返回处理前的数据（仍含 esc-remote-1）
+          return port.remoteLocal(hostId);
+        }
+        if (remoteDelayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, remoteDelayMs));
+          currentNow += remoteDelayMs;
+        }
+        const snap = await port.remoteLocal(hostId);
+        return remoteEscalationHandled
+          ? { ...snap, items: snap.items.filter(item => !item.id.includes('remote-stall-1')) }
+          : snap;
+      },
+    },
+    { remoteMaxWaitMs: 50, remoteCacheTtlMs: 10_000, remoteOfflineMaxAgeMs: 60_000 },
+  );
+
+  // 1. 冷启动无任何缓存，远端耗时 220ms (> 50ms 预算)：应等待远端完成，不误报“MacBook 未响应”
+  const cold = await runtime.list();
+  assert.equal(cold.warning, null, '冷启动无缓存时应等待远端返回，不应因 150ms/50ms 预算误报未响应');
+  assert.equal(cold.items.length, 6);
+  assert.equal(remoteCalls, 1);
+
+  // 2. 验证缓存时间记录的是读取开始时刻（t0），而非完成时刻（t0 + 220ms）：
+  // 推进 9_900ms 后距开始时刻已达 10_120ms (> 10_000ms TTL)，距完成时刻仅 9_900ms (< 10_000ms TTL)
+  currentNow += 9_900;
+  remoteDelayMs = 0;
+  await runtime.list();
+  assert.equal(remoteCalls, 2, '缓存时间应按读取开始时刻计算 TTL，10_120ms 时应已过期重读');
+
+  // 3. 发起一次在途慢读取（版本旧），在它返回前执行远端 act：
+  //    - act 后立即 list() 时即使远端慢（120ms > 50ms），也应回退到保留的旧缓存，不报“MacBook 未响应”
+  //    - 旧版本在途读取随后返回旧数据时，必须被丢弃，不能写入缓存覆盖新状态
+  currentNow += 15_000; // 让缓存超过 10s TTL 但仍在 60s 回退期内
+  let releaseOldRead!: () => void;
+  pendingOldReadResolve = () => {};
+  const origRemoteLocal = runtime['port'].remoteLocal;
+  let callIndex = 0;
+  runtime['port'].remoteLocal = async hostId => {
+    callIndex += 1;
+    remoteCalls += 1;
+    if (callIndex === 1) {
+      // 处理前已发出的旧读取：挂起直到 act 完成后才返回包含 remote-stall-1 的旧快照
+      await new Promise<void>(resolve => {
+        releaseOldRead = resolve;
+      });
+      return port.remoteLocal(hostId);
+    }
+    // 处理后发出的新读取：耗时 120ms (> 50ms 预算)，返回已移除 remote-stall-1 的新快照
+    await new Promise(resolve => setTimeout(resolve, 120));
+    const snap = await port.remoteLocal(hostId);
+    return { ...snap, items: snap.items.filter(item => !item.id.includes('remote-stall-1')) };
+  };
+
+  // 先触发处理前的慢读取（50ms 超时回退旧缓存，旧读取仍在后台在途）
+  const beforeAct = await runtime.list();
+  assert.equal(beforeAct.warning, null);
+  assert.equal(beforeAct.items.length, 6);
+
+  // 执行远端 act 成功
+  remoteEscalationHandled = true;
+  const actRes = await runtime.act({
+    hostId: 'srv-book',
+    action: { type: 'ack-escalation', escalationId: 'esc-remote-1' },
+  });
+  assert.equal(actRes.ok, true);
+
+  // 处理后立即刷新 list()：新读取需 120ms (> 50ms 预算)，此时必须有保留的过期缓存可回退，不能报“MacBook 未响应”
+  const rightAfterAct = await runtime.list();
+  assert.equal(rightAfterAct.warning, null, '远端 act 后立即刷新不应因无回退缓存而报 MacBook 未响应');
+  assert.ok(rightAfterAct.items.some(item => item.hostName === 'MacBook'), '回退期间不应丢失远端主机的待办');
+
+  // 让处理前的旧在途读取现在返回（含已处理的 esc-remote-1）：应因版本号过期被丢弃
+  releaseOldRead();
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  // 等待处理后的新读取（120ms）完成，再次 list() 应看到已移除 esc-remote-1 的新结果（5 条）
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const afterNewRead = await runtime.list();
+  assert.equal(afterNewRead.warning, null);
+  assert.equal(afterNewRead.items.length, 5, '旧版本在途读取应被丢弃，新读取完成后已处理待办应消失');
+  runtime['port'].remoteLocal = origRemoteLocal;
+});
