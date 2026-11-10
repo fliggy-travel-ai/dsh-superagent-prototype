@@ -4,14 +4,22 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import { atomicWrite } from '../storage.ts';
 
-const schema = z.object({ version: z.literal(1), contacts: z.record(z.string(), z.number().finite().nonnegative()) });
-export interface CloudContactStore { load(): Record<string, number>; save(contacts: Record<string, number>): Promise<void> }
+const timestamp = z.number().finite().nonnegative();
+const contact = z.object({ at: timestamp, heartbeat: z.boolean().default(false), ended: z.boolean().default(false) });
+const schema = z.object({ version: z.literal(1), contacts: z.record(z.string(), z.union([timestamp, contact])) });
+export type CloudContact = z.infer<typeof contact>;
+export interface CloudContactStore { load(): Record<string, CloudContact>; save(contacts: Record<string, CloudContact>): Promise<void> }
 export function fileContactStore(path: string): CloudContactStore {
   let writes: Promise<unknown> = Promise.resolve();
   return {
     load() {
-      try { return schema.parse(JSON.parse(readFileSync(path, 'utf8'))).contacts; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw Error('云端联系记录无法读取'); }
+      try {
+        const contacts = schema.parse(JSON.parse(readFileSync(path, 'utf8'))).contacts;
+        return Object.fromEntries(Object.entries(contacts).map(([id, value]) => [id, typeof value === 'number' ? { at: value, heartbeat: false, ended: false } : value]));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('云端联系记录损坏或无法读取，按空记录继续');
+        return {};
+      }
     },
     save(contacts) {
       const content = JSON.stringify({ version: 1, contacts });

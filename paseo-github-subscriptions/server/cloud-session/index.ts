@@ -10,7 +10,7 @@ import * as rpc from '../../shared/cloud-session.ts';
 import { cloudSessionStatus } from '../../shared/provider-instance.ts';
 import { webRequestDetailReason, type AnswerWebRequest, type ResolveWebRequest, type WebRequestAnswer, type WebRequestContext, type WebRequestResult } from '../../shared/web-request.ts';
 import { toWebAnswer } from '../web-request/normalize.ts';
-import type { CloudContactStore } from './contact-store.ts';
+import type { CloudContact, CloudContactStore } from './contact-store.ts';
 import { CLOSED_TTL_MS, STORED_REQUEST_MAX, type CloudRequestStore, type StoredRequest } from './request-store.ts';
 
 export type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult };
@@ -149,11 +149,21 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const now = options.now ?? Date.now;
   const epoch = randomUUID();
   const sessions = new Map<string, Session>();
-  const contacts: Record<string, number> = options.contactStore?.load() ?? {};
-  const lastSaved: Record<string, number> = { ...contacts };
+  const contacts: Record<string, CloudContact> = options.contactStore?.load() ?? {};
+  const lastSaved: Record<string, number> = Object.fromEntries(Object.entries(contacts).map(([id, contact]) => [id, contact.at]));
   let contactSaving: Promise<unknown> = Promise.resolve();
   const saveContacts = () => { if (options.contactStore) { contactSaving = options.contactStore.save({ ...contacts }).catch(() => { console.error('云端联系记录保存失败'); }); } };
-  const touch = (id: string) => { const t = now(); contacts[id] = t; const session = sessions.get(id); if (session) session.ended = false; if (lastSaved[id] === undefined || t - lastSaved[id]! >= 60_000) { lastSaved[id] = t; saveContacts(); } };
+  const touch = (id: string, heartbeat = false) => {
+    const t = now(); const previous = contacts[id];
+    const newlySupported = heartbeat && !previous?.heartbeat;
+    contacts[id] = { at: t, heartbeat: heartbeat || previous?.heartbeat === true, ended: previous?.ended === true };
+    if (newlySupported || lastSaved[id] === undefined || t - lastSaved[id]! >= 60_000) { lastSaved[id] = t; saveContacts(); }
+  };
+  const markEnded = (id: string, ended: boolean) => {
+    const previous = contacts[id] ?? { at: now(), heartbeat: false, ended: false };
+    if (previous.ended === ended) return;
+    contacts[id] = { ...previous, ended }; saveContacts();
+  };
   const turnVersions = new Map<string, number>();
   const changeTurn = (id: string) => turnVersions.set(id, (turnVersions.get(id) ?? 0) + 1);
   const importsByCloud = new Map<string, number>();
@@ -191,6 +201,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
     if (existing) { if (!existing.closed && !isDeepStrictEqual(existing.request, request)) console.error('云端请求编号重复且内容不同，已忽略'); return { shown: false }; }
     ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input } });
     const original = structuredClone(request);
+    if (s.ended) { s.ended = false; markEnded(cloudSessionId, false); if (!s.turn) start(s); }
     entries.set(request.toolUseId, { request: original, closed: false, delivered: false, openedAt: now() }); permissionEvent(s, original); persist(); return { shown: true };
   };
   const resolve = ({ cloudSessionId, toolUseId, outcome }: { cloudSessionId: string; toolUseId: string; outcome: 'answered' | 'denied' | 'canceled' }) => {
@@ -213,7 +224,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       if (importsByCloud.has(cloud)) continue;
       if (options.importFromDaemon && !importedClouds.has(cloud)) { importPending(cloud); continue; }
       const open = [...(requests.get(cloud)?.values() ?? [])].some(entry => !entry.closed);
-      if ((s.turn || open) && t - (contacts[cloud] ?? t) >= (options.offlineMs ?? 120 * 60_000)) { terminate(cloud, 'offline'); }
+      if (contacts[cloud]?.heartbeat && (s.turn || open) && t - (contacts[cloud]?.at ?? t) >= (options.offlineMs ?? 120 * 60_000)) { terminate(cloud, 'offline'); }
     }
     for (const [cloud, entries] of requests) {
       const openedAt = [...entries.values()].filter(entry => !entry.tombstone).map(entry => entry.openedAt);
@@ -221,7 +232,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       for (const [toolUseId, entry] of entries) {
         if (entry.closed) continue;
         const superseded = t - entry.openedAt >= SUPERSEDE_MS && openedAt.some(at => at >= entry.openedAt + NEWER_GAP_MS);
-        const expired = entry.imported && t - entry.openedAt >= EXPIRE_MS && t - (contacts[cloud] ?? t) >= (options.offlineMs ?? 120 * 60_000);
+        const expired = entry.imported && t - entry.openedAt >= EXPIRE_MS && (!contacts[cloud]?.heartbeat || t - (contacts[cloud]?.at ?? t) >= (options.offlineMs ?? 120 * 60_000));
         if (superseded || expired) { close(cloud, toolUseId, entry); stale.push(toolUseId); }
       }
       if (stale.length) {
@@ -294,7 +305,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const terminate = (cloud: string, reason: 'offline' | 'archived' | 'not_found') => {
     const s = find(cloud); let count = 0;
     if (s.ended) return { closedRequests: 0 };
-    s.ended = true;
+    s.ended = true; markEnded(cloud, true);
     for (const [id, entry] of requests.get(cloud) ?? []) if (!entry.closed) { close(cloud, id, entry); count++; }
     if (count) persist();
     const text = reason === 'offline' ? `云端已失联，已撤下 ${count} 条请求。如 claude.ai 仍在等待请在网页处理。` : reason === 'archived' ? `云端会话已归档，已撤下 ${count} 条请求。` : `云端会话不存在，已撤下 ${count} 条请求。`;
@@ -329,7 +340,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
             const url = new URL(server.url);
             if ((url.protocol === 'http:' || url.protocol === 'https:') && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) endpoint = { url: server.url, headers: { ...server.headers } };
           }
-          const s: Session = { id: input.sessionId, cloud, emit, cwd: input.config.cwd, model: input.config.model ?? 'cloud-session', mode: input.config.mode ?? 'default', turn: null, ...(endpoint ? { endpoint } : {}) };
+          const s: Session = { id: input.sessionId, cloud, emit, cwd: input.config.cwd, model: input.config.model ?? 'cloud-session', mode: input.config.mode ?? 'default', turn: null, ended: contacts[cloud]?.ended === true, ...(endpoint ? { endpoint } : {}) };
           sessions.set(cloud, s);
           importedClouds.delete(cloud);
           if (contacts[cloud] === undefined) touch(cloud);
@@ -346,6 +357,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
         }
         if (input.type === 'session.prompt') {
           const s = byId(input.sessionId); if (!s) { emit({ type: 'session.prompt_result', sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: 'failed', error: { message: 'Unknown session', code: 'UNKNOWN_SESSION' } } }); return; }
+          if (s.ended) { s.ended = false; markEnded(s.cloud, false); }
           const delivery = s.turn ? 'steer' : 'auto'; const turnId = s.turn ?? randomUUID();
           emit({ type: 'session.prompt_result', sessionId: s.id, clientMessageId: input.prompt.clientMessageId, result: { type: delivery === 'steer' ? 'steer' : 'turn', turnId } });
           if (!s.turn) { changeTurn(s.cloud); s.turn = turnId; emit({ type: 'session.turn', sessionId: s.id, turnId, state: 'started' }); }
@@ -409,8 +421,11 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       if (!result.success || result.data.type !== 'timeline.item') throw new Error('Invalid timeline item');
       return result.data.item;
     });
-    touch(input.cloudSessionId);
-    if (input.startTurn && !s.turn) start(s);
+    const heartbeat = !input.startTurn && items.length === 0 && !input.endTurn && !input.usage;
+    touch(input.cloudSessionId, heartbeat);
+    const resumed = s.ended && (input.startTurn || items.length > 0 || !!input.endTurn);
+    if (resumed) { s.ended = false; markEnded(input.cloudSessionId, false); }
+    if ((input.startTurn || resumed) && !s.turn) start(s);
     for (const item of items) s.emit({ type: 'timeline.item', sessionId: s.id, item: item as ProviderTimelineItem });
     // 工具调用已结束说明网页侧已处理了它的权限请求，不等云端 marker 和关闭请求。
     let closedAny = false;

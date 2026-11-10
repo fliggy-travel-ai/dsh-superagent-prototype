@@ -13,7 +13,7 @@ export function parseRpcArgs(args: string[]) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('输入必须是 JSON 对象');
   return { method: args[0]!, input };
 }
-const sensitive = /(?:host|machine|server.?id|address|secret|token|credential|password|authorization|auth|api.?key|access.?key|private.?key|(?:^|[_-])key$|url)/i;
+const sensitive = /(?:host|machine|server.?id|address|email|secret|token|credential|password|authorization|auth|api.?key|access.?key|private.?key|(?:^|[_-])key$|url)/i;
 export function safeOutput(value: unknown): unknown {
   if (typeof value === 'string') return value
     .replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, '[已隐藏地址]')

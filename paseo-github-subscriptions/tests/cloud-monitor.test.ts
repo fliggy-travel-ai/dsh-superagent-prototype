@@ -40,6 +40,7 @@ test('失联满阈值结束轮次并说明，不将失联称作归档', async ()
   const f = await fixture();
   try {
     f.cloud.push({ cloudSessionId: id, startTurn: true, items: [] }); f.cloud.notify({ cloudSessionId: id, request: request('one') });
+    f.cloud.push({ cloudSessionId: id, startTurn: false, items: [] });
     f.advance(119 * 60_000); f.cloud.sweep(); assert.deepEqual(resolved(f.events), []);
     f.advance(60_000); f.cloud.sweep(); assert.deepEqual(resolved(f.events), ['one']); assert.equal(ended(f.events).length, 1);
     assert.ok(messages(f.events).some(message => message.includes('云端已失联') && message.includes('仍在等待请在网页处理')));
@@ -57,13 +58,13 @@ test('正常长任务持续发送心跳时不结束轮次或撤下请求', async
 test('重载读回存量请求及运行轮次，按持久化联系时间结束', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cloud-monitor-'));
   try {
-    const first = await fixture({ directory: dir }); first.cloud.notify({ cloudSessionId: id, request: request('one') }); await first.cloud.flush(); const start = first.time(); first.close();
+    const first = await fixture({ directory: dir }); first.cloud.notify({ cloudSessionId: id, request: request('one') }); first.cloud.push({ cloudSessionId: id, startTurn: false, items: [] }); await first.cloud.flush(); const start = first.time(); first.close();
     const second = await fixture({ directory: dir, initial: start + 121 * 60_000, pending: ['one', 'two'], activeTurn: 'restored-turn' });
     try {
       second.cloud.sweep(); assert.deepEqual(resolved(second.events).sort(), ['one', 'two']);
       assert.equal((ended(second.events)[0] as Extract<ProviderEvent, { type: 'session.turn' }> | undefined)?.turnId, 'restored-turn');
       assert.ok(messages(second.events).some(message => message.includes('已撤下 2 条请求')));
-    } finally { second.close(); }
+    } finally { await second.cloud.flush(); second.close(); }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('读回失败时不假装清理完成，恢复连接后重试', async () => {
@@ -73,6 +74,7 @@ test('读回失败时不假装清理完成，恢复连接后重试', async () =>
   const connection = await cloud.provider.connect({ versions: [1], capabilities: [] }); connection.onEvent(event => events.push(event));
   try {
     await connection.send(input({ type: 'session.open', requestId: 'open', sessionId: 'agent', persistence: { version: 1, data: { cloudSessionId: id } }, config: { cwd: '/tmp', env: {}, persist: true, mcpServers: {} } }));
+    cloud.push({ cloudSessionId: id, startTurn: false, items: [] });
     await cloud.flush(); time += 121 * 60_000; cloud.sweep(); await cloud.flush();
     assert.deepEqual(resolved(events), []); assert.equal(ended(events).length, 0);
     available = true; cloud.sweep(); await cloud.flush(); cloud.sweep();
@@ -122,4 +124,76 @@ test('读回期间收到心跳仍可恢复运行轮次', async () => {
     time += 121 * 60_000; cloud.sweep();
     assert.equal((ended(events)[0] as Extract<ProviderEvent, { type: 'session.turn' }> | undefined)?.turnId, 'old');
   } finally { cloud.dispose(); }
+});
+test('旧程序没有心跳标记时，长时间无联系不撤下当前轮次或请求', async () => {
+  const f = await fixture();
+  try {
+    f.cloud.push({ cloudSessionId: id, startTurn: true, items: [] }); f.cloud.notify({ cloudSessionId: id, request: request('one') });
+    f.advance(240 * 60_000); f.cloud.sweep();
+    assert.deepEqual(resolved(f.events), []); assert.equal(ended(f.events).length, 0);
+  } finally { f.close(); }
+});
+test('失联后心跳不虚开轮次，收到正文和结束信号时补开并正常结束', async () => {
+  const f = await fixture();
+  try {
+    f.cloud.push({ cloudSessionId: id, startTurn: true, items: [] }); f.cloud.push({ cloudSessionId: id, startTurn: false, items: [] });
+    f.advance(121 * 60_000); f.cloud.sweep(); assert.equal(ended(f.events).length, 1);
+    const count = f.events.length;
+    assert.equal(f.cloud.push({ cloudSessionId: id, startTurn: false, items: [] }).turnRunning, false);
+    assert.equal(f.events.length, count);
+    const next = f.cloud.push({ cloudSessionId: id, startTurn: false, items: [{ type: 'assistant_message', id: 'm1', text: '继续处理' }], endTurn: 'completed' });
+    assert.equal(next.turnRunning, false);
+    const emitted = f.events.slice(count);
+    assert.deepEqual(emitted.map(e => e.type), ['session.turn', 'timeline.item', 'session.turn']);
+    assert.equal((emitted[0] as Extract<ProviderEvent, { type: 'session.turn' }>).state, 'started');
+    assert.equal((emitted[2] as Extract<ProviderEvent, { type: 'session.turn' }>).state, 'completed');
+  } finally { f.close(); }
+});
+test('心跳能力及失联状态重载后保留', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cloud-capability-'));
+  try {
+    const first = await fixture({ directory: dir });
+    first.cloud.push({ cloudSessionId: id, startTurn: true, items: [] }); first.cloud.push({ cloudSessionId: id, startTurn: false, items: [] });
+    first.advance(121 * 60_000); first.cloud.sweep(); await first.cloud.flush(); const time = first.time(); first.close();
+    const second = await fixture({ directory: dir, initial: time });
+    try {
+      second.cloud.push({ cloudSessionId: id, startTurn: false, items: [] });
+      const result = second.cloud.push({ cloudSessionId: id, startTurn: false, items: [{ type: 'assistant_message', id: 'next', text: '继续处理' }] });
+      assert.equal(result.turnRunning, true); assert.equal(second.events.filter(e => e.type === 'session.turn' && e.state === 'started').length, 1);
+    } finally { await second.cloud.flush(); second.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('联系记录损坏或旧格式时按安全默认值加载', async () => {
+  const { writeFile } = await import('node:fs/promises'); const dir = await mkdtemp(join(tmpdir(), 'cloud-contact-'));
+  try {
+    const path = join(dir, 'contacts.json'); const store = fileContactStore(path);
+    await writeFile(path, '{invalid'); assert.deepEqual(store.load(), {});
+    await writeFile(path, JSON.stringify({ version: 1, contacts: { [id]: 123 } }));
+    assert.deepEqual(store.load()[id], { at: 123, heartbeat: false, ended: false });
+    await writeFile(path, JSON.stringify({ version: 1, contacts: { [id]: { at: 'invalid', heartbeat: true } } })); assert.deepEqual(store.load(), {});
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('旧格式联系记录不会启用失联兜底；非心跳的空推送也不会启用', async () => {
+  const { writeFile } = await import('node:fs/promises'); const dir = await mkdtemp(join(tmpdir(), 'cloud-legacy-'));
+  try {
+    const start = 1_800_000_000_000;
+    await writeFile(join(dir, 'contacts.json'), JSON.stringify({ version: 1, contacts: { [id]: start - 3 * 60 * 60_000 } }));
+    const f = await fixture({ directory: dir, initial: start });
+    try {
+      f.cloud.push({ cloudSessionId: id, startTurn: true, items: [] });
+      f.cloud.push({ cloudSessionId: id, startTurn: false, items: [], usage: { inputTokens: 1 } });
+      f.cloud.notify({ cloudSessionId: id, request: request('one') }); f.advance(240 * 60_000); f.cloud.sweep();
+      assert.deepEqual(resolved(f.events), []); assert.equal(ended(f.events).length, 0);
+    } finally { await f.cloud.flush(); f.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('失联后新的云端提问也恢复会话，随后失联可再次清理', async () => {
+  const f = await fixture();
+  try {
+    f.cloud.push({ cloudSessionId: id, startTurn: true, items: [] }); f.cloud.push({ cloudSessionId: id, startTurn: false, items: [] });
+    f.advance(121 * 60_000); f.cloud.sweep(); assert.equal(ended(f.events).length, 1);
+    f.cloud.notify({ cloudSessionId: id, request: request('new') });
+    f.advance(121 * 60_000); f.cloud.sweep();
+    assert.deepEqual(resolved(f.events), ['new']); assert.equal(ended(f.events).length, 2);
+  } finally { f.close(); }
 });
