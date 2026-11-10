@@ -65,7 +65,7 @@ macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app
 - **两个实例**：角色由 `shared/instance.ts` 决定。仓库中为 `null`（兼容模式：按 main 处理并保留云端会话）。部署脚本在部署目录中写入 `'main'` 或 `'provider'`：
   - `main`（安装 ID `github-subscriptions`）：页面和除 Provider 以外的全部模块。云端程序写死调用这个 ID，所以主实例保留云端会话的 RPC 并转给 Provider 实例。
   - `provider`（安装 ID `dev-automation-providers`）：只注册 Provider 模块，状态写到 `~/.paseo/github-subscriptions/providers/`，不注册任何界面。
-- **部署**：`node --experimental-strip-types scripts/deploy.ts --role main|provider --ref <标签或提交> [--install] [--reload]`。重载前检查旧实例和新实例托管的 Provider 有没有运行中轮次，有就停止。
+- **部署**：`node --experimental-strip-types scripts/deploy.ts --role main|provider|compat --ref <标签或提交> [--install] [--reload]`。重载前检查旧实例和新实例托管的 Provider 有没有运行中轮次，有就停止。目标目录的现有角色与目标角色不同时停止；确认变更后可加 `--change-role`。`compat` 保持角色文件为 null。
 - **提交前扫描**：`npm run scan`（已包含在 `npm run check`），命中邮箱、Apple 隐藏邮箱、webhook 地址或令牌格式时失败。测试数据所在行写 `scan-allow`。
 
 ## 开发检查
@@ -105,7 +105,7 @@ npm run test:daemon
 
 ## 云端会话 Provider
 
-插件同时提供 `cloud-session` Provider：云端会话按稳定编号对应 Paseo agent，推送时间线，并接收面板消息和子会话通知。代理所有 Paseo MCP 工具；调用 `create_agent` 时调用方必须显式提供 `settings.modeId`。注册标题由云端提供，之后可由会话改名。不新增设置。
+插件同时提供 `cloud-session` Provider：云端会话按稳定编号对应 Paseo agent，推送时间线，并接收面板消息和子会话通知。代理所有 Paseo MCP 工具；调用 `create_agent` 时调用方必须显式提供 `settings.modeId`。注册标题由云端提供，之后可由会话改名。
 
 代理只使用 daemon 在会话打开时提供的本机 Paseo MCP 地址及请求头；注册和恢复通过本机 Paseo daemon 客户端完成。地址和凭据只保存在内存，不由云端选择。云端会话模块与 GitHub 订阅的初始化独立。 导入时按云端工作目录的最后一段匹配本机项目名称，优先选择有未归档工作区且目录存在的项目；没有匹配时使用存在的 `fallbackCwd`，否则使用本机用户主目录。
 
@@ -115,4 +115,8 @@ npm run test:daemon
 
 云端权限请求在 Paseo 里只作显示，不在 Paseo 侧点击网页；由浏览器扩展在 claude.ai 页面自动点击“Allow once”（含打开“More allow options”菜单点击“Allow once”，永不点击“Always allow”）。已知限制：经 Paseo 原生界面作答多选题时，若“其他”文本恰好等于某个选项标签，会被当作选中该选项（插件人工待办无此限制）。
 
-收件队列仅存于内存：插件或 daemon 重启后未确认消息丢失，不自动对账。云端离线时已开启的轮次保持运行中，直到云端推送结束；面板的停止按钮对 Paseo 开启的这轮不起作用。插件重启时，如果云端正在重试消息确认，序号可能错位并删除新到的消息。真机端到端验收需另行进行。
+收件队列仅存于内存：插件或 daemon 重启后未确认消息丢失，不自动对账。支持联系信号的云端会话在失联达到阈值后结束轮次；旧程序不使用该兜底。面板的停止按钮对 Paseo 开启的这轮不起作用。插件重启时，如果云端正在重试消息确认，序号可能错位并删除新到的消息。真机端到端验收需另行进行。
+
+本机可使用 `node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/rpc.ts capacity.snapshot '{}'` 调用主实例。脚本只允许 `capacity.clear-review`、`dispatch.finalize` 和已登记的只读快照方法；输出隐藏主机地址和凭据字段。
+
+`cloudSession.offlineMinutes` 默认 120，最少 60。新云端程序每分钟发送空时间线作为联系信号。插件只对收到该信号并持久化标记的会话执行失联兜底：两小时没有联系时结束运行中轮次并撤下待答请求，提醒在网页核对。现有浏览器扩展没有可靠的归档或不存在信号，不把页面关闭或读取失败视为归档。可信云端调用方可用 `cloud-session.ended` 明确报告归档或不存在。新心跳需要更新云端程序；旧程序没有周期联系，未收到信号的会话保留原有存量请求对账规则，不会因失联超时结束轮次。Mac mini 自身停机或断网超过两小时后，恢复时可能将已标记会话按云端失联处理。

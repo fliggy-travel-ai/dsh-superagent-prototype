@@ -247,3 +247,12 @@ test('权限钩子不为不符合注册条件的会话启动后台进程',()=>{
  for(const e of [{...env,PASEO_MINI_HOST:''},{...env,CLAUDE_CODE_REMOTE_SESSION_ID:''},{...env,PASEO_AGENT_ID:'other'}]) permissionHook(input,e,launch);
  permissionHook({...input,agent_id:'subagent'},env,launch); assert.equal(count,0);
 });
+
+test('forward 在无时间线变化时发送周期联系',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'paseo-beat-test-')); const path=join(dir,'transcript'); await writeFile(path,'');
+ const e={...env,CLAUDE_CODE_REMOTE_SESSION_ID:'cse_beat'+Date.now()}; const lock=join(tmpdir(),'paseo-cloud-session-'+createHash('sha256').update(e.CLAUDE_CODE_REMOTE_SESSION_ID).digest('hex'),'forward.pid');
+ const beats=[]; const rpc=async(c,v)=>{if(c.name.endsWith('ensure')) return {agentId:'a',epoch:'e'}; if(c.name.endsWith('timeline.push')) {beats.push(v); return {accepted:v.items.length,epoch:'e'};} throw Error(c.name);};
+ const task=forward(path,e,rpc,0,{remoteBeatMs:1});
+ try {await waitFor(()=>beats.length>=1); assert.equal(beats[0].startTurn,false); assert.deepEqual(beats[0].items,[]);}
+ finally {try {await writeFile(lock,JSON.stringify({pid:process.pid,path:'finished',token:'finished'}));} catch {} await task; await rm(dir,{recursive:true,force:true});}
+});
