@@ -233,16 +233,13 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 - 信息来源：本机总控不直接收 webhook。来源是 Grok 总控转达，或巡检时读 Mac mini 的 `~/.paseo/github-subscriptions/capacity/migrations.jsonl`（迁移审计）和 `capacity/migrations-state.json`（进行中和待审记录）。额度一律实时查（`paseo usage ls` 或插件 `capacity.snapshot`），不凭历史记录或旧报错判断。
 - 影子模式（`shadow=true`）的例外只记录，不处理。
 
-### 8.1 全部 Claude 无额度（reason=no_target）
+### 8.1 没有可接账号（插件不再发 no_target 异常）
 
-1. 读 `capacity.snapshot`，确认每个账号都不满足接手条件（`canAdd≥1`、五小时剩余 ≥30%、周剩余 ≥20%），记下最早的五小时 `resetsAt`。
-2. 最早恢复点在 1 小时以内：留守等待，插件的自动继续功能在窗口到期后续跑。
-3. 超过 1 小时：请示用户是否用 Codex 兜底。用户同意后：
-   - 给原会话发停止消息并等它回复确认（`agent stop` 只停当前一轮，子会话完成通知还会唤醒它）；确认未提交的工作已推送到需求分支。
-   - Codex 会话建在 MacBook（gpt-6.1-sol max），工作区检出原需求分支。交接词按 8.4 写，写死范围与不做清单，巡检发现越界立即 steer 拉回。
-   - 标签 `need`、`role=main`，手工收尾（解绑、置顶、打「主会话」标签；MacBook 不开插件收尾）。原 Claude 会话归档前给它打 `dsh.lb=manual`，防止插件在额度恢复后对它动作。
-   - issue 写迁移记录，notes/quota-log.md 追加一条。
-4. 回迁：capacity 显示 `totalCanAdd≥1`，且有在 Codex 上兜底的主会话时，请示用户回迁。用户同意后：停 Codex 会话并确认 → 在 Mac mini 原工作区按第 4 节派 Claude（`recommendedProvider`），交接词按 8.4 → 插件自动收尾，读回 → 新会话正常后归档 Codex 会话、子会话改挂 → issue 写记录。
+Yang 2026-11-10 口径：确实没有可接账号时，默认等原账号额度恢复，不请示用户。
+- 插件不发 `lb_exception`。五小时用尽时插件打开原会话的自动继续，窗口重置后原会话续跑；之后每 30 分钟照常重试换号，有账号腾出容量就自动换。周额度 ≤5% 但未用尽时原会话继续工作。
+- 总控不需要做任何事，也不通知用户。巡检时可从 `capacity/migrations.jsonl` 看到 `result=no_target, action=wait_for_reset` 记录。
+- “剩余百分比有余量”不等于“可接”：可接条件是 `canAdd≥1`（Max 4 个、Pro 2 个，消耗速度快时再收紧）、五小时剩余 ≥30%、周剩余 ≥20%。以 `capacity.snapshot` 为准，不凭百分比判断插件选错。
+- Codex 兜底只在用户主动要求时做，做法按 8.4 交接，Codex 会话建在 MacBook，原 Claude 会话归档前打 `dsh.lb=manual`。
 
 ### 8.2 被点名账号耗尽（reason=manual）
 
@@ -312,3 +309,4 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 - 20:03 SGT 插件主会话：Mac mini `machine.json` 备份后设 `escalation.quotaAlerts.enabled=false`、`capacity.migration.mode=live`，`capacity/migrations-state.json` 不存在（没有进行中或待审迁移），重载插件；读回 `INSTANCE_ROLE=null`、cloud-session available、新实例日志无错误、`capacity.snapshot` 正常。
 - 21:31 SGT 首次真实换号成功（第 4 部分第 5 步）：插件主会话 `64eb4b07` 在 claude-8 五小时额度用尽，插件自动换到 claude-4 新会话 `83157ab8`。步骤全部成功，没有回滚；`migrations-state.json` 收尾后为 `{}`，审计 `result=migrated`，`main_migrated` 已入队。
 - 21:40 SGT 经 Yang 同意应用第 3 部分（第 4 部分第 6 步，本机部分）：Mac mini 上 9 个账号目录的 `skills/super-agent/SKILL.md` 第 4、8 节已替换，其他章节不动，备份为同目录 `SKILL.md.bak-1808-20261110`。应用前对修改稿补两处：第 4 节加插件 RPC 调用命令（3.4 的前提已由 `scripts/rpc.ts` 满足，部署目录实测可调）；第 8 节“容量预算”改为“手工估算各账号能承接几个会话”，以满足读回标准。读回：9 个副本都不再含“容量预算”“通知负载均衡 bot”、手工 `agent detach` 和 daemon 置顶说明，第 8 节标题为“插件 lb_exception 的处理”。Grok 侧材料（`00-总控-SKILL.md` 第 4、8 节、`00-总控-profile.md`、`README.md`、`dsh-patrol.md` 第 5 条）由 Grok 总控同步。
+- 23:30 SGT 两次换号失败排查（需求 1233 主会话 `03946194`，claude-3 五小时用尽）：22:48 的 no_target 按容量规则计算正确；23:17 的 output_unknown 是验证只认正文的缺陷，PR #41 修复并部署（`bf54333`）。按 Yang 口径，没有可接账号时插件不再发 `lb_exception`，等原账号额度恢复；第 8.1 节随之改写，并已应用到 Mac mini 9 个账号的总控技能（备份 `SKILL.md.bak-1808-81-20261110`）。
