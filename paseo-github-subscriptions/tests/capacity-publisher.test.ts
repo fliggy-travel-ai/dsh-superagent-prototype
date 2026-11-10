@@ -11,3 +11,8 @@ test('签名含实时状态，变化间隔五分钟，六小时心跳', () => {
   assert.equal(shouldPublish(previous, first, 1000 + 6 * 3600_000 - 1), false);
   assert.equal(shouldPublish(previous, first, 1000 + 6 * 3600_000), true);
 });
+test('同一小时从原余量变化再变回时，使用不同投递键', async () => {
+  const { publicationKey } = await import('../server/modules/capacity/publisher.ts');
+  const value = signature([{ provider: 'claude-1', canAdd: 1, live: true }]);
+  assert.notEqual(publicationKey(value), publicationKey(value));
+});

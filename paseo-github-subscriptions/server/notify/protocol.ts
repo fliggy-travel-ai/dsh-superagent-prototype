@@ -11,6 +11,7 @@ export type EventName =
   | 'new_workspace'
   | 'capacity'
   | 'main_finalized'
+  | 'main_migration_planned'
   | 'main_migrated'
   | 'lb_exception'
   | 'test';

@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { Account } from './model.ts';
 import { targets } from './model.ts';
 
-export interface MigrationAgent { id: string; provider: string; cwd: string; workspaceId?: string; model: string | null; title: string | null; archivedAt?: string | null; labels: Record<string, string> }
+export interface MigrationAgent { id: string; provider: string; cwd: string; workspaceId?: string; model: string | null; currentModeId?: string | null; title: string | null; archivedAt?: string | null; labels: Record<string, string> }
 export interface MigrationPort {
   read(id: string): Promise<MigrationAgent | null>;
   update(id: string, labels: Record<string, string>): Promise<void>;
-  stop(agent: MigrationAgent, reason: 'five_hour' | 'weekly'): Promise<boolean>;
+  continueWork(id: string): Promise<void>;
+  journal: { begin(id: string): Promise<void>; saveResume(id: string, value: boolean): Promise<void>; review(id: string, reason: string): Promise<void>; finish(id: string): Promise<void> };
+  stop(agent: MigrationAgent, reason: 'five_hour' | 'weekly', markWeeklyStop: () => void): Promise<boolean>;
   autoResume(id: string): Promise<boolean>;
   setAutoResume(id: string, enabled: boolean): Promise<void>;
   create(agent: MigrationAgent, provider: string): Promise<string>;
@@ -16,7 +18,7 @@ export interface MigrationPort {
   serverId(): string;
   archive(id: string): Promise<void>;
   audit(entry: Record<string, unknown>): Promise<void>;
-  notify(event: 'main_migrated' | 'lb_exception', data: Record<string, unknown>): Promise<void>;
+  notify(event: 'main_migrated' | 'main_migration_planned' | 'lb_exception', data: Record<string, unknown>): Promise<void>;
   delay(ms: number): Promise<void>;
 }
 export function leaseActive(value: string | undefined, now: number): boolean {
@@ -24,11 +26,18 @@ export function leaseActive(value: string | undefined, now: number): boolean {
   const match = /^plugin:(\d+):/.exec(value);
   return !!match && Number(match[1]) > now;
 }
+export function triggerReason(account: Account, now: number): 'five_hour' | 'weekly' | null {
+  if (!account.live || !account.tier || !account.fiveHour || !account.weekly) return null;
+  const reset = Date.parse(account.fiveHour.resetsAt ?? '');
+  if (account.fiveHour.remainingPct <= 0 && Number.isFinite(reset) && reset > now) return 'five_hour';
+  return account.weekly.remainingPct <= 5 ? 'weekly' : null;
+}
 export async function migrate(port: MigrationPort, agent: MigrationAgent, accounts: Account[], mode: 'shadow' | 'live', now = Date.now()) {
   const source = accounts.find(a => a.provider === agent.provider.split('/')[0]);
   if (!source?.live || !source.tier || !source.fiveHour || !source.weekly || agent.labels.role !== 'main' || !(agent.labels.need || agent.labels.issue)) return 'ineligible';
-  const reason = source.fiveHour.remainingPct <= 0 ? 'five_hour' : source.weekly.remainingPct <= 5 ? 'weekly' : null;
+  const reason = triggerReason(source, now);
   if (!reason) return 'ineligible';
+  if (agent.labels['dsh.migration-state'] === 'needs_review') return 'needs_review';
   const candidates = targets(accounts, source.provider).slice(0, 2);
   const result = { oldAgentId: agent.id, fromProvider: source.provider, reason, needId: agent.labels.need || agent.labels.issue };
   if (agent.labels['dsh.lb'] === 'manual' || !candidates.length) {
@@ -38,11 +47,11 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   }
   if (mode === 'shadow') {
     await port.audit({ ...result, result: 'shadow', toProvider: candidates[0]!.provider });
-    await port.notify('main_migrated', { ...result, toProvider: candidates[0]!.provider, shadow: true }); return 'shadow';
+    await port.notify('main_migration_planned', { ...result, toProvider: candidates[0]!.provider, shadow: true }); return 'shadow';
   }
   if (leaseActive(agent.labels['dsh.migration-lease'], now)) return 'locked';
   const lease = `plugin:${now + 30 * 60_000}:${randomUUID()}`;
-  let acquired = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false;
+  let acquired = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false; let review = false; let begun = false; let weeklyStopIssued = false; let creating = false;
   const moved: string[] = [];
   const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
     const started = Date.now();
@@ -50,16 +59,20 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
     catch (error) { await port.audit({ ...result, step: name, ok: false, elapsedMs: Date.now() - started }).catch(() => {}); throw error; }
   };
   try {
+    await port.journal.begin(agent.id); begun = true;
     await step('lease', () => port.update(agent.id, { 'dsh.migration-lease': lease }));
     await port.delay(2000);
     if ((await port.read(agent.id))?.labels['dsh.migration-lease'] !== lease) throw Error('lease_conflict');
     acquired = true;
     oldResume = await step('read_auto_resume', () => port.autoResume(agent.id));
+    await port.journal.saveResume(agent.id, oldResume);
     await step('disable_auto_resume', () => port.setAutoResume(agent.id, false));
-    if (!await step('stop', () => port.stop(agent, reason))) throw Error('stop_unconfirmed');
+    if (!await step('stop', () => port.stop(agent, reason, () => { weeklyStopIssued = true; }))) throw Error('stop_unconfirmed');
     let chosen: Account | undefined;
     for (const candidate of candidates) {
+      creating = true;
       newId = await step('create', () => port.create(agent, candidate.provider));
+      creating = false;
       if (!await step('finalize', () => port.finalize(newId!))) throw Error('finalize_failed');
       const verification = await step('verify', () => port.verify(newId!));
       if (verification === 'ok') { chosen = candidate; break; }
@@ -96,12 +109,21 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
       }
       if (newId && !rollbackIncomplete) await port.archive(newId).catch(() => { rollbackIncomplete = true; });
       if (oldResume !== undefined) await port.setAutoResume(agent.id, oldResume).catch(() => { rollbackIncomplete = true; });
+      if (weeklyStopIssued) await port.continueWork(agent.id).catch(() => { rollbackIncomplete = true; });
     }
     const known = ['lease_conflict', 'stop_unconfirmed', 'finalize_failed', 'output_unknown', 'no_healthy_target', 'child_readback_failed', 'resume_unavailable', 'source_unavailable', 'server_unavailable', 'list_incomplete', 'stopped', 'archive_unknown', 'archive_failed'];
-    const failure = rollbackIncomplete ? 'rollback_incomplete' : error instanceof Error && known.includes(error.message) ? error.message : 'operation_failed';
+    const failure = rollbackIncomplete ? 'rollback_incomplete' : creating ? 'create_unknown' : error instanceof Error && known.includes(error.message) ? error.message : 'operation_failed';
+    review = archiveUncertain || rollbackIncomplete || creating;
+    if (review && begun) { await port.journal.review(agent.id, failure).catch(() => {}); await port.update(agent.id, { 'dsh.migration-state': 'needs_review' }).catch(() => {}); }
     await port.audit({ ...result, result: failure });
     await port.notify('lb_exception', { ...result, reason: failure }); return failure;
   } finally {
-    if (acquired) await port.update(agent.id, { 'dsh.migration-lease': `released:${Date.now()}` }).catch(() => {});
+    if (begun && !review) {
+      if (acquired) {
+        try { await port.update(agent.id, { 'dsh.migration-lease': `released:${Date.now()}` }); }
+        catch { review = true; await port.journal.review(agent.id, 'lease_release_failed').catch(() => {}); await port.update(agent.id, { 'dsh.migration-state': 'needs_review' }).catch(() => {}); await port.notify('lb_exception', { ...result, reason: 'lease_release_failed' }); }
+      }
+      if (!review) await port.journal.finish(agent.id);
+    }
   }
 }

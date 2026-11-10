@@ -1,11 +1,15 @@
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { MigrationWorker } from './worker.ts';
+import { MigrationJournal } from './journal.ts';
+import { recoverMigrations, pruneCooldown } from './recovery.ts';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { onCapacityChange, capacityChanged } from './changes.ts';
 import { createAuditWriter } from '../../notify/audit.ts';
-import { migrate } from './migrate.ts';
+import { migrate, triggerReason } from './migrate.ts';
 import { daemonMigrationPort } from './daemon-migration.ts';
 import { createNotifier } from '../dispatch-finalize/notifier.ts';
-import { signature, shouldPublish, type PublicationState } from './publisher.ts';
+import { signature, shouldPublish, publicationKey, type PublicationState } from './publisher.ts';
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client';
 import { capacitySnapshot } from '../../../shared/capacity.ts';
 import { ContinuousUsage } from '../usage-claude-accounts/continuous-usage.ts';
@@ -55,6 +59,8 @@ export const capacityModule: Module<CapacityConfig> = {
     const migrationPath = join(directory, 'migration-cooldown.json');
     const audit = createAuditWriter(join(directory, 'migrations.jsonl'));
     let cooldown: Record<string, number> = {};
+    const journal = new MigrationJournal(join(directory, 'migrations-state.json'));
+    let migrationWorker: MigrationWorker | null = null;
     let state: PublicationState = null;
     let current: Promise<void> | null = null;
     let pending = false;
@@ -67,37 +73,68 @@ export const capacityModule: Module<CapacityConfig> = {
     const start = (async () => {
       try { state = JSON.parse(await readFile(statePath, 'utf8')); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
       try { cooldown = JSON.parse(await readFile(migrationPath, 'utf8')); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+      await journal.load();
       notifier = await createNotifier(context.machine, directory);
+      const { client } = await context.services.daemon.ready();
+      const port = daemonMigrationPort(client, context.config.migration.handoffTemplate, audit,
+        (event, body) => notifier!.send(event, body, `${event}:${body.oldAgentId}:${body.reason ?? ''}:${event === 'lb_exception' && ['interrupted', 'needs_review'].includes(String(body.reason)) ? 'recovery' : randomUUID()}`), abort.signal, journal);
+      const agents = []; let cursor: string | undefined;
+      do {
+        const page: Awaited<ReturnType<DaemonClient['fetchAgents']>> = await client.fetchAgents({ includeBackground: true, filter: { includeArchived: true }, page: { limit: 100, cursor } });
+        agents.push(...page.entries.map(entry => entry.agent));
+        if (!page.pageInfo.hasMore) break;
+        if (!page.pageInfo.nextCursor || page.pageInfo.nextCursor === cursor) throw Error('会话列表不完整');
+        cursor = page.pageInfo.nextCursor;
+      } while (true);
+      await recoverMigrations(journal, agents, port.update, port.notify, context.config.migration.mode === 'live');
+      const saveCooldown = async () => {
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        await writeFile(`${migrationPath}.tmp`, JSON.stringify(cooldown), { mode: 0o600 });
+        await rename(`${migrationPath}.tmp`, migrationPath);
+      };
+      migrationWorker = new MigrationWorker(async () => {
+          const before = Object.keys(cooldown).length;
+          cooldown = pruneCooldown(cooldown, Date.now());
+          if (Object.keys(cooldown).length !== before) await saveCooldown();
+          const mode = context.config.migration.mode;
+          if (mode === 'off') return;
+          const data = await readSnapshot();
+          for (const account of data.accounts) {
+            if (!triggerReason(account, Date.now())) continue;
+            for (const id of account.load.agentIds) {
+              if (stopped || cooldown[id] || journal.get(id)) continue;
+              const agent = await port.read(id);
+              if (!agent || agent.labels.role !== 'main' || !(agent.labels.need || agent.labels.issue)) continue;
+              if (agent.labels['dsh.migration-state'] === 'needs_review') {
+                await journal.review(id, 'needs_review');
+                await port.notify('lb_exception', { oldAgentId: id, reason: 'needs_review' });
+                continue;
+              }
+              const lease = agent.labels['dsh.migration-lease'];
+              if (lease && !lease.startsWith('released:')) {
+                await journal.review(id, 'interrupted');
+                if (context.config.migration.mode === 'live') await port.update(id, { 'dsh.migration-state': 'needs_review' });
+                await port.notify('lb_exception', { oldAgentId: id, reason: 'interrupted' });
+                continue;
+              }
+              cooldown[id] = Date.now(); await saveCooldown();
+              if (await migrate(port, agent, data.accounts, mode) === 'migrated') { capacityChanged(); return; }
+            }
+          }
+      });
       const publish = () => {
         if (stopped) return;
         if (current) { pending = true; return; }
         current = (async () => {
           const data = await readSnapshot(); const now = Date.now(); const next = signature(data.accounts);
           if (shouldPublish(state, next, now)) {
-          await notifier!.send('capacity', data, `capacity:${next}:${Math.floor(now / 3600_000)}`);
-          state = { signature: next, sentAt: now };
-          await mkdir(directory, { recursive: true, mode: 0o700 });
-          await writeFile(`${statePath}.tmp`, JSON.stringify(state), { mode: 0o600 });
-          await rename(`${statePath}.tmp`, statePath);
+            await notifier!.send('capacity', data, publicationKey(next));
+            state = { signature: next, sentAt: now };
+            await mkdir(directory, { recursive: true, mode: 0o700 });
+            await writeFile(`${statePath}.tmp`, JSON.stringify(state), { mode: 0o600 });
+            await rename(`${statePath}.tmp`, statePath);
           }
-          if (context.config.migration.mode !== 'off') {
-            const { client } = await context.services.daemon.ready();
-            const port = daemonMigrationPort(client, context.config.migration.handoffTemplate, audit,
-              (event, body) => notifier!.send(event, body, `${event}:${body.oldAgentId}:${Date.now()}`), abort.signal);
-            for (const account of data.accounts) {
-              if (!account.live || !account.tier || !account.fiveHour || !account.weekly || (account.fiveHour.remainingPct > 0 && account.weekly.remainingPct > 5)) continue;
-              for (const id of account.load.agentIds) {
-                if (stopped || (cooldown[id] ?? 0) + 30 * 60_000 > Date.now()) continue;
-                const agent = await port.read(id);
-                if (!agent || agent.labels.role !== 'main' || !(agent.labels.need || agent.labels.issue)) continue;
-                cooldown[id] = Date.now();
-                await mkdir(directory, { recursive: true, mode: 0o700 });
-                await writeFile(`${migrationPath}.tmp`, JSON.stringify(cooldown), { mode: 0o600 });
-                await rename(`${migrationPath}.tmp`, migrationPath);
-                if (await migrate(port, agent, data.accounts, context.config.migration.mode) === 'migrated') { capacityChanged(); return; }
-              }
-            }
-          }
+          migrationWorker!.request();
         })().catch(() => {}).finally(() => { current = null; if (pending && !stopped) { pending = false; publish(); } });
       };
       const unsubscribe = onCapacityChange(publish);
@@ -106,6 +143,6 @@ export const capacityModule: Module<CapacityConfig> = {
       return () => { clearInterval(timer); unsubscribe(); };
     })();
     void start.catch(error => context.fail(error));
-    return async () => { stopped = true; abort.abort(); const stop = await start.catch(() => null); stop?.(); await current; notifier?.stop(); };
+    return async () => { stopped = true; abort.abort(); const stop = await start.catch(() => null); stop?.(); await current; await migrationWorker?.stop(); notifier?.stop(); };
   },
 };
