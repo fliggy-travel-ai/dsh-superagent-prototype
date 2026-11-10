@@ -473,9 +473,10 @@ function QaModeDrawer() {
             { value: 'auto', label: '自动' },
           ]}
           value={settings.mode}
-          onChange={mode =>
-            void control.configurePresence({ ...settings, mode }).catch(e => setErr(errorMessage(e)))
-          }
+          onChange={mode => {
+            setErr(null);
+            void control.configurePresence({ ...settings, mode }).catch(e => setErr(errorMessage(e)));
+          }}
         />
       ) : (
         <Text style={s.muted}>{presenceError ? `读取失败：${presenceError}` : '正在读取问答设置…'}</Text>
@@ -488,6 +489,7 @@ function QaModeDrawer() {
           value={settings?.paused ?? false}
           onValueChange={paused => {
             if (!settings) return;
+            setErr(null);
             void control.configurePresence({ ...settings, paused }).catch(e => setErr(errorMessage(e)));
           }}
           trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
@@ -589,7 +591,8 @@ function BluetoothDrawer() {
             label="自动（任一主机在场即在线）"
             onPress={() => {
               if (!settings) return;
-              void control.configurePresence({ ...settings, sourceHostId: null });
+              setError(null);
+              void control.configurePresence({ ...settings, sourceHostId: null }).catch(e => setError(errorMessage(e)));
             }}
           />
           {hosts.map(h => (
@@ -601,7 +604,8 @@ function BluetoothDrawer() {
               label={h.name}
               onPress={() => {
                 if (!settings) return;
-                void control.configurePresence({ ...settings, sourceHostId: h.id });
+                setError(null);
+                void control.configurePresence({ ...settings, sourceHostId: h.id }).catch(e => setError(errorMessage(e)));
               }}
             />
           ))}

@@ -369,3 +369,59 @@ test('paseoSessions 单独查询不过滤状态的未归档会话，保留 runni
     assert.equal(listCalls, 1, '单次刷新只应查询一遍未归档会话清单');
   } finally { store.dispose(); }
 });
+
+test('1737-presence-fast-switch：configurePresence 点击后立即乐观更新模式与在场描述，失败时回滚到已确认快照并提示错误', async () => {
+  const initial = makePresence();
+  let nextConfigure!: { promise: Promise<PresenceSnapshot>; resolve: (v: PresenceSnapshot) => void; reject: (e: Error) => void };
+  const makePending = () => {
+    let resolve!: (v: PresenceSnapshot) => void;
+    let reject!: (e: Error) => void;
+    const promise = new Promise<PresenceSnapshot>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+
+  const store = createControlStore({
+    rpc: (async (contract: { name: string }) => {
+      if (contract.name === 'presence.snapshot') return initial;
+      if (contract.name === 'presence.configure') return nextConfigure.promise;
+      if (contract.name === 'browser.snapshot') return makeBrowser();
+      return { sessions: [], error: null };
+    }) as Parameters<typeof createControlStore>[0]['rpc'],
+  });
+
+  try {
+    await store.refresh();
+    assert.equal(store.getState().presence?.settings.mode, 'auto');
+
+    // 1. 切到离线：不等 RPC 返回，状态已同步更新为手动离线
+    nextConfigure = makePending();
+    const saveOffline = store.configurePresence({ ...initial.settings, mode: 'offline' });
+    assert.equal(store.getState().presence?.settings.mode, 'offline', '点击离线后分段控件状态应立即变为 offline');
+    assert.equal(store.getState().presence?.observation.mode, 'offline', '点击离线后判定状态应立即变为 offline');
+    assert.equal(store.getState().presence?.observation.source, 'manual');
+
+    const confirmedOffline: PresenceSnapshot = {
+      ...initial,
+      settings: { ...initial.settings, mode: 'offline' },
+      observation: { mode: 'offline', observedAt: new Date().toISOString(), source: 'manual', reason: '手动离线：选择明确推荐项' },
+    };
+    nextConfigure.resolve(confirmedOffline);
+    await saveOffline;
+    assert.equal(store.getState().presence?.settings.mode, 'offline');
+    assert.equal(store.getState().presenceError, null);
+
+    // 2. 切到自动但 RPC 失败：点击瞬间先乐观显示 auto，失败后回滚为已确认的 offline 并记录错误
+    nextConfigure = makePending();
+    const saveAutoFail = store.configurePresence({ ...confirmedOffline.settings, mode: 'auto' });
+    assert.equal(store.getState().presence?.settings.mode, 'auto', '点击自动后分段控件应立即乐观显示 auto');
+    assert.equal(store.getState().presence?.observation.reason, '正在读取来源主机在场状态');
+
+    nextConfigure.reject(new Error('设置正在保存，请稍后重试'));
+    await assert.rejects(saveAutoFail, /设置正在保存/);
+    assert.equal(store.getState().presence?.settings.mode, 'offline', 'RPC 失败后应回滚到上次确认的 offline 模式');
+    assert.equal(store.getState().presence?.observation.mode, 'offline');
+    assert.match(store.getState().presenceError ?? '', /设置正在保存/);
+  } finally {
+    store.dispose();
+  }
+});
