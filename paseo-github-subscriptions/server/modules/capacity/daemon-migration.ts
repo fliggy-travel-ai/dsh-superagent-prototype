@@ -19,6 +19,7 @@ export function classifyOutput(items: Array<{ type: string; text?: string; messa
       const text = item.text.trim();
       if ((text.length <= 240 || providerPrefix.test(text)) && shortLimit.test(text)) return 'quota';
     }
+    if (item.type === 'error') return 'unknown';
   }
   const working = items.some(item => (item.type === 'assistant_message' || item.type === 'reasoning') ? !!item.text?.trim() : item.type === 'tool_call' || item.type === 'todo');
   return working ? 'ok' : 'unknown';
@@ -70,6 +71,9 @@ export function daemonMigrationPort(client: DaemonClient, templatePath: string |
     verify: async id => {
       await delay(20_000);
       for (let i = 0; i <= 4; i++) {
+        const agent = await read(id);
+        // 新会话启动失败（如账号只能在专用目录运行，进程退出）时状态为 error 或 closed，不能算正常。
+        if (!agent || agent.archivedAt || agent.status === 'error' || agent.status === 'closed') return 'unknown';
         const items = await timeline(id);
         const result = classifyOutput(items);
         if (result !== 'unknown') return result;

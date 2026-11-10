@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Account } from './model.ts';
 import { targets } from './model.ts';
 
-export interface MigrationAgent { id: string; provider: string; cwd: string; workspaceId?: string; model: string | null; currentModeId?: string | null; title: string | null; archivedAt?: string | null; labels: Record<string, string> }
+export interface MigrationAgent { id: string; provider: string; cwd: string; workspaceId?: string; model: string | null; currentModeId?: string | null; title: string | null; archivedAt?: string | null; status?: string; labels: Record<string, string> }
 export interface MigrationPort {
   read(id: string): Promise<MigrationAgent | null>;
   update(id: string, labels: Record<string, string>): Promise<void>;
@@ -107,6 +107,9 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
       const child = await port.read(id);
       if (child?.labels['paseo.parent-agent-id'] !== newId || child.labels['paseo.parent-server-id'] !== serverId) throw Error('child_readback_failed');
     }
+    // 归档原会话前再确认新会话仍在：出错、已关闭或已归档就回滚，不归档原会话。
+    const fresh = await port.read(newId);
+    if (!fresh || fresh.archivedAt || fresh.status === 'error' || fresh.status === 'closed') throw Error('new_agent_failed');
     try { await step('release_lease', releaseOwn); } catch { releaseUncertain = true; throw Error('lease_release_failed'); }
     try { await step('archive_original', () => port.archive(agent.id)); archived = true; }
     catch {

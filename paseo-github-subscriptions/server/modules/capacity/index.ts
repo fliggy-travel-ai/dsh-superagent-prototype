@@ -42,7 +42,7 @@ export async function snapshot(client: DaemonClient, home: string, config: Capac
   const accounts = (deps?.providers ?? [...providerEnvs(home).keys()]).map(provider => {
     const key = mapping.get(provider);
     const report = key ? reports.reports.filter(r => (r.sourceId === sourceId || r.sourceId === 'claude') && r.id === `${r.sourceId}:${key}`).sort((a, b) => Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt))[0] : undefined;
-    return calculate({ provider, report: report as Report | undefined, configuredTier: config.accounts[provider]?.tier, warmup: config.warmup.includes(provider), now, liveMaxAgeMinutes: config.liveMaxAgeMinutes, paceEnabled: config.pace,
+    return calculate({ provider, report: report as Report | undefined, configuredTier: config.accounts[provider]?.tier, warmup: config.warmup.includes(provider), excluded: config.exclude.includes(provider), now, liveMaxAgeMinutes: config.liveMaxAgeMinutes, paceEnabled: config.pace,
       agents: agents.filter(a => !a.archivedAt && a.status !== 'closed' && !!a.workspaceId && workspaces.has(a.workspaceId) && a.provider.split('/')[0] === provider) });
   });
   const eligible = targets(accounts, '');

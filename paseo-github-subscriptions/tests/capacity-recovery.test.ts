@@ -37,6 +37,7 @@ test('助手正文不按限额关键词判错', () => {
   assert.equal(classifyOutput([{ type: 'todo' }]), 'ok');
   assert.equal(classifyOutput([{ type: 'tool_call' }, { type: 'error', message: 'usage limit reached' }]), 'quota', '额度报错优先于工具调用');
   assert.equal(classifyOutput([{ type: 'user_message', text: '请接续' }]), 'unknown');
+  assert.equal(classifyOutput([{ type: 'user_message', text: '请接续' }, { type: 'error', message: 'Claude Code process exited with code 77' }, { type: 'assistant_message', text: '独立用户仅支持专用工作目录' }]), 'unknown', '启动报错不能算正常');
 });
 test('过期重置时间不触发五小时迁移，周额度仍独立触发', () => {
   const now = Date.parse('2026-01-01T02:30:00Z');

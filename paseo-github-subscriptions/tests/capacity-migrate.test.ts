@@ -165,3 +165,12 @@ test('1808 没有可接账号：不发异常，打开原会话自动继续，等
   const shadow = fixture(); assert.equal(await migrate(shadow.port, shadow.agent, [account('claude-1', 0)], 'shadow', now), 'no_target');
   assert.deepEqual(shadow.calls, [], '影子模式不改会话、不发异常');
 });
+test('1808 新会话在归档原会话前已出错：不归档原会话，回滚并发异常', async () => {
+  const f = fixture();
+  const create = f.port.create;
+  f.port.create = async (a, p, mark) => { const id = await create(a, p, mark); f.agents.get(id)!.status = 'error'; return id; };
+  const result = await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now);
+  assert.equal(result, 'operation_failed');
+  assert.equal(f.calls.includes('archive:old'), false); assert.ok(f.calls.includes('archive:new')); assert.ok(f.calls.includes('lb_exception')); assert.equal(f.resume(), true);
+  assert.equal(f.agents.get('child')!.labels['paseo.parent-agent-id'], 'old', '子会话改挂已回滚');
+});
