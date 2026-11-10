@@ -45,7 +45,9 @@ export const dispatchFinalizeModule: Module = {
     const start = (async () => {
       try { done = JSON.parse(await readFile(path, 'utf8')); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
       notifier = await createNotifier(context.machine, directory);
+      if (abort.signal.aborted) throw Error('模块已停止');
       const { client, paseo } = await context.services.daemon.ready();
+      if (abort.signal.aborted) throw Error('模块已停止');
       const port = finalizePort(client);
       const run = (id: string, manual = false) => {
         const existing = running.get(id); if (existing) return existing;
@@ -94,8 +96,10 @@ export const dispatchFinalizeModule: Module = {
       };
       const list = await paseo.agents.list({ subscribe: {}, signal: abort.signal });
       subscription = list.subscription;
+      if (abort.signal.aborted) throw Error('模块已停止');
       list.subscription.subscribe({ snapshot: ({ entries }) => { for (const { agent } of entries) if (agent.labels?.role === 'main' && issueOf(agent)) schedule(agent.id); }, update: message => { if (message.type === 'agent_update' && message.payload.kind === 'upsert') { const a = message.payload.agent; if (a.labels?.role === 'main' && issueOf(a)) schedule(a.id); } } });
       await scan();
+      if (abort.signal.aborted) throw Error('模块已停止');
       const timer = setInterval(() => { void scan().catch(() => {}); }, 300_000); timer.unref?.();
       abort.signal.addEventListener('abort', () => clearInterval(timer), { once: true });
       return run;
