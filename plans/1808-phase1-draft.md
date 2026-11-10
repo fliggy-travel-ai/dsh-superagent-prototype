@@ -351,3 +351,11 @@
 - H6、H7（改总控 routine 和负载均衡 bot）属于提示词修改，须 Yang 授权，已提问。授权前迁移只跑影子模式。
 - H8 由细化会话从本机历史会话日志里找「来源主机」「仍要运行」弹窗原文。
 - F 节预筛待核实项已核实：`Macmini/dsh-webhook-filter/prefilter.py` 只会 suppress 已登记项目的 `new_workspace`，其他事件一律 push，新事件不会被拦。
+
+## Yang 决定（2026-11-10，AskUserQuestion）
+
+1. 插件迁移能力完成后，**移除**「主会话账号负载均衡」bot 的负载均衡职责，避免一件事两边处理。因此 E5 的双方租约协议与对 bot 的要求清单作废；插件只保留自身的单会话迁移锁（同一会话同一时刻只有一个迁移），租约标签只用于插件内部防重入与审计。原 bot 处理的例外（无可用目标、需非 Claude 兜底）改为插件发 `lb_exception` 给总控，由总控向 Yang 请示。
+2. bot 负载均衡职责移除后，插件自动换号**立即开启**（`capacity.migration.mode=live`），不再设影子观察期。开发与联调期间默认 `shadow`，避免与仍在运行的 bot 重叠。
+3. 换号后：新会话跑起来（首条输出正常）后**归档旧会话**（H4 定稿）。
+
+切换顺序：插件迁移 PR 合并并部署 → 通知总控移除负载均衡 bot 的换号职责（并停止其 quota-watch 换号相关告警）→ 确认 bot 已停 → Mac mini `machine.json` 切 `live` → 需求单记录。总控 routine 的配套修改（识别 ownerOnly、接收 capacity、请示后派发）由主会话起草，经总控更新。
