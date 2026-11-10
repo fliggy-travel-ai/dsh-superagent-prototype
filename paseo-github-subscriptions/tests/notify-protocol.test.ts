@@ -50,6 +50,10 @@ test('投递类别：主会话提问和错误、新项目新工作区走 Grok；
   assert.equal(deliveryClass('asked', true, false), 'grok');
   assert.equal(deliveryClass('error', true, false), 'grok');
   assert.equal(deliveryClass('new_project', false, false), 'grok');
+  for (const event of ['capacity', 'main_finalized', 'main_migrated', 'lb_exception']) {
+    assert.equal(deliveryClass(event, false, false), 'grok');
+    assert.equal(deliveryClass(event, false, true), 'grok');
+  }
   assert.equal(deliveryClass('asked', false, false), 'record');
   assert.equal(deliveryClass('asked', false, true), 'parent');
   assert.equal(deliveryClass('idle', true, false), 'record');

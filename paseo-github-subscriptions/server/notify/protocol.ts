@@ -9,6 +9,10 @@ export type EventName =
   | 'subagent_done'
   | 'new_project'
   | 'new_workspace'
+  | 'capacity'
+  | 'main_finalized'
+  | 'main_migrated'
+  | 'lb_exception'
   | 'test';
 export type Actor = 'user' | 'assistant' | 'automation';
 export interface AgentInfo {
