@@ -296,8 +296,11 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const effectiveOnline = settings
     ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
     : false;
+  const localHostId = presence?.hosts[0]?.id ?? null;
   const lastPlayedSpeech = presence?.speech
-    ? [...presence.speech].reverse().find(item => item.played && item.engine)
+    ? [...presence.speech]
+        .reverse()
+        .find(item => item.played && item.engine && (item.hostId === null || (localHostId !== null && item.hostId === localHostId)))
     : undefined;
 
   const escState = escalation?.blockedReason
@@ -538,7 +541,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                     label={lastPlayedSpeech.engine === 'neural' ? '最近：神经语音' : '最近：系统语音'}
                     tone={lastPlayedSpeech.engine === 'neural' ? 'neutral' : 'warning'}
                   />
-                ) : null}
+                ) : (
+                  <Chip label="尚未播放" tone="neutral" />
+                )}
                 <Text style={s.small}>{presence.hostName || '本机'}</Text>
                 {lastPlayedSpeech?.engine === 'system' && lastPlayedSpeech.detail ? (
                   <Text style={[s.small, { color: theme.colors.statusWarning }]}>

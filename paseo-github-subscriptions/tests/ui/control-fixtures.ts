@@ -15,7 +15,7 @@ export const makePresence = (): PresenceSnapshot => ({
   hasSpeechTarget: true,
   observation: { mode: 'online', observedAt: new Date(0).toISOString(), reason: '已连接随身手机', source: 'bluetooth' },
   hostName: 'Mac Mini（演示）',
-  hosts: [],
+  hosts: [{ id: 'srv_mini', name: 'Mac Mini（演示）', online: true }],
   error: null,
   questions: [
     {

@@ -1031,8 +1031,11 @@ function SpeechDrawer() {
   const { presence, presenceError, moduleReloading } = useControlState();
   const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
+  const localHostId = presence?.hosts[0]?.id ?? null;
   const lastPlayedSpeech = presence?.speech
-    ? [...presence.speech].reverse().find(item => item.played && item.engine)
+    ? [...presence.speech]
+        .reverse()
+        .find(item => item.played && item.engine && (item.hostId === null || (localHostId !== null && item.hostId === localHostId)))
     : undefined;
 
   return (
@@ -1088,6 +1091,8 @@ function SpeechDrawer() {
             {`最近一次播放：神经语音${lastPlayedSpeech.detail ? `（${lastPlayedSpeech.detail}）` : ''}`}
           </Text>
         )
+      ) : presence ? (
+        <Text style={s.small}>最近一次播放：尚未播放</Text>
       ) : null}
       <RuleNote>
         只在判定在线且总开关开启时，向所有开启“在这台电脑播放”的主机播报新提问；本机开关只保存在当前电脑，不跨主机同步；你在任一端回答后立即停止播报。
