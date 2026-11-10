@@ -12,6 +12,7 @@ import { escalationModule } from './answer-escalation/index.ts';
 import { claudeAccountsModule } from './usage-claude-accounts/index.ts';
 import { providerQuotasModule } from './usage-provider-quotas/index.ts';
 import { todoModule } from './todo/index.ts';
+import { capacityModule } from './capacity/index.ts';
 import { dispatchFinalizeModule } from './dispatch-finalize/index.ts';
 
 /**
@@ -33,4 +34,5 @@ export const MODULES: readonly Module<any>[] = [
   providerQuotasModule,
   todoModule,
   dispatchFinalizeModule,
+  capacityModule,
 ];

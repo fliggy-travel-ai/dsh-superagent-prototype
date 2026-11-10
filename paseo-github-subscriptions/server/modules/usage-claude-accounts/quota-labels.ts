@@ -1,7 +1,8 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { accountQuota, applyQuotaLabels, DEFAULT_CLAUDE_SOURCES, type Quota, type Report } from "./labels.ts";
-import { configDirProviders, paseoHome } from "./providers.ts";
+import { paseoHome } from "./providers.ts";
+import { providerEnvs } from './account-map.ts';
 import { cli } from "./resume.ts";
 import type { discover } from "../../vendor/paseo-0.15.0/claude-usage-source/server/usage.ts";
 import type { UsageReport } from "@getpaseo/plugin/server/usage";
@@ -58,17 +59,6 @@ export class QuotaLabelService {
     this.timer.unref?.();
   }
 
-  /** Provider ID to launch environment for the default login and each CLAUDE_CONFIG_DIR login. */
-  private providerEnvs(): Map<string, Record<string, string>> {
-    const base: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (typeof value === "string" && key !== "CLAUDE_CONFIG_DIR") base[key] = value;
-    }
-    const envs = new Map([["claude", base]]);
-    for (const [id, env] of configDirProviders({ ...process.env, PASEO_HOME: this.home })) envs.set(id, { ...base, ...env });
-    return envs;
-  }
-
   /** Switch the feature at run time. Turning it off restores the original display names. */
   async setEnabled(enabled: boolean) {
     if (enabled === this.enabled) return;
@@ -87,7 +77,7 @@ export class QuotaLabelService {
     if (!this.enabled) return;
     const reports = JSON.parse(await cli(["usage", "ls", "--json"])) as Report[];
     const quotas = new Map<string, Quota | null>();
-    for (const [id, env] of this.providerEnvs()) {
+    for (const [id, env] of providerEnvs(this.home)) {
       try {
         const [account] = await this.discover({ kind: "session", provider: "claude", env });
         let quota = account ? accountQuota(reports, account.key, Date.now(), this.sources) : null;
