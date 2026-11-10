@@ -13,7 +13,8 @@ export async function createNotifier(machine: LoadedMachineConfig, directory: st
   const section = machine.section<EscalationSection>('escalation');
   if (!section.ok) throw Error(section.error);
   const path = join(directory, 'notification-state.json');
-  const audit = createAuditWriter(join(directory, 'notification-events.jsonl'));
+  const writeAudit = createAuditWriter(join(directory, 'notification-events.jsonl'));
+  const audit = (entry: Record<string, unknown>) => writeAudit({ phase: entry.phase, event: (entry.notice as { event?: string } | undefined)?.event });
   const state = await loadState(path);
   const abort = new AbortController();
   const engine = new Engine({ hostId: machine.machine ?? 'local', machine: machine.machine ?? 'local', delivery: 'live', mains: [], children: {}, coalesceWindowSeconds: 0 }, state, s => saveState(path, s), async notice => {

@@ -6,6 +6,7 @@ import { dispatchFinalize } from '../../../shared/dispatch.ts';
 import { createAuditWriter } from '../../notify/audit.ts';
 import { isMainInstance, type Module } from '../types.ts';
 import { finalize, issueOf, type FinalizePort } from './finalize.ts';
+import { capacityChanged } from '../capacity/changes.ts';
 import { createNotifier } from './notifier.ts';
 
 export async function workspaceById(client: DaemonClient, id: string) {
@@ -67,6 +68,7 @@ export const dispatchFinalizeModule: Module = {
             });
             await saveChain;
             retries.delete(id);
+            capacityChanged();
           }
           else {
             const attempts = (retries.get(id)?.attempts ?? 0) + 1;
