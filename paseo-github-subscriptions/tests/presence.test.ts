@@ -1743,7 +1743,8 @@ test('1808 自动模式：任一主机识别到设备即在线，其余情况一
     await runtime.configure({ mode: 'auto', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
     await runtime.refresh(); await runtime.refresh();
     assert.equal(runtime.snapshot().observation.mode, 'online');
-    assert.match(runtime.snapshot().observation.reason, /MacBook识别到设备/);
+    assert.match(runtime.snapshot().observation.reason, /MacBook识别到锚定设备/);
+    assert.deepEqual(runtime.snapshot().observation.hosts?.map(host => [host.name, host.mode]), [['Mac Mini', 'unknown'], ['MacBook', 'online']], '自动模式列出每台主机的识别结果');
 
     readings.srv_macbook = async () => { throw new Error('host_offline'); };
     await runtime.refresh();
@@ -1755,6 +1756,7 @@ test('1808 自动模式：任一主机识别到设备即在线，其余情况一
     readings.srv_mini = async () => ({ mode: 'online', observedAt: fresh(), reason: '蓝牙采样状态', source: 'bluetooth' });
     await runtime.refresh();
     assert.equal(runtime.snapshot().observation.mode, 'online', '任一主机识别到即在线');
+    assert.match(runtime.snapshot().observation.reason, /^Mac Mini识别到锚定设备$/);
 
     hostList = [{ id: 'srv_mini', name: 'Mac Mini', online: true }, { id: 'srv_macbook', name: 'MacBook', online: false }];
     readings.srv_mini = async () => ({ mode: 'unknown', observedAt: fresh(), reason: '设备未发现或蓝牙信号不可用', source: 'bluetooth' });

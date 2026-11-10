@@ -620,6 +620,20 @@ function BluetoothDrawer() {
         <Text style={s.strong}>当前锚定设备：{target?.name ?? (loading ? '读取中…' : '暂未读取')}</Text>
         {snapshot ? <Chip label={detected ? '已发现' : '未发现'} tone={detected ? 'success' : 'warning'} /> : null}
       </View>
+      {presence?.observation.hosts?.length ? (
+        <View style={{ gap: 4 }}>
+          <Text style={s.strong}>各主机识别情况</Text>
+          {presence.observation.hosts.map(host => (
+            <View key={host.name} style={[s.row, { justifyContent: 'space-between' }]}>
+              <Text style={s.text}>{host.name}</Text>
+              <Chip label={host.mode === 'online' ? '已识别' : '未识别'} tone={host.mode === 'online' ? 'success' : 'warning'} />
+            </View>
+          ))}
+          {presence.observation.hosts.filter(host => host.mode !== 'online').map(host => (
+            <Text key={`${host.name}-reason`} style={s.small}>{host.name}：{host.reason}</Text>
+          ))}
+        </View>
+      ) : null}
       {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
       {message ? <Text style={{ color: theme.colors.statusSuccess, fontSize: 13 }}>{message}</Text> : null}
       {devices.length === 0 ? (
