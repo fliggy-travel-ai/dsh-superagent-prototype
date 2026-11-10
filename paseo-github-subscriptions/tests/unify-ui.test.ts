@@ -1560,6 +1560,89 @@ test('1737-speech-local：语音提醒卡片与抽屉展示“在这台电脑播
     const drawerSwitch = findNodes(drawerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
     assert.ok(drawerSwitch, '语音提醒编辑抽屉也应展示本机播放开关');
     assert.equal(Boolean(drawerSwitch.props.value), !initialVal);
+
+    // 1737-speech-node-tts：只取本机 hostId 的已播放记录；无本机记录（或仅有远端主机记录）时显示“尚未播放”
+    daemon.presence = {
+      ...daemon.presence,
+      localSpeechEnabled: true,
+      hasSpeechTarget: true,
+      hosts: [
+        { id: 'srv_mini', name: daemon.presence.hostName, online: true },
+        { id: 'srv_macbook', name: 'MacBook', online: true },
+      ],
+      speech: [
+        {
+          id: 'q-remote',
+          at: new Date().toISOString(),
+          hostId: 'srv_macbook',
+          played: true,
+          engine: 'neural',
+          detail: '提示音成功；晓晓语音合成（内置）成功；神经语音播放成功',
+        },
+      ],
+    };
+    await control.refresh();
+    renderer.reset();
+    const unplayedLocalTree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
+    );
+    const unplayedText = collectText(unplayedLocalTree);
+    assert.ok(unplayedText.includes('尚未播放'), '本机尚未播放（仅有远端主机记录）时卡片应显示“尚未播放”');
+    assert.equal(unplayedText.includes('神经语音'), false, '不应把远端主机的播放记录当作本机显示');
+
+    daemon.presence = {
+      ...daemon.presence,
+      speech: [
+        ...(daemon.presence.speech ?? []),
+        {
+          id: 'q-1',
+          at: new Date().toISOString(),
+          hostId: 'srv_mini',
+          played: true,
+          engine: 'neural',
+          detail: '提示音成功；晓晓语音合成（内置）成功；神经语音播放成功',
+        },
+      ],
+    };
+    await control.refresh();
+    renderer.reset();
+    const neuralCardTree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
+    );
+    const neuralCardText = collectText(neuralCardTree);
+    assert.ok(neuralCardText.includes('神经语音'), '最近一次本机为神经语音时卡片应展示引擎类型');
+    assert.equal(neuralCardText.includes('尚未播放'), false);
+
+    daemon.presence = {
+      ...daemon.presence,
+      speech: [
+        ...(daemon.presence.speech ?? []),
+        {
+          id: 'q-2',
+          at: new Date().toISOString(),
+          hostId: 'srv_mini',
+          played: true,
+          engine: 'system',
+          detail: '提示音成功；晓晓语音合成（内置）失败：超时；系统语音回退成功',
+        },
+      ],
+    };
+    await control.refresh();
+    renderer.reset();
+    const fallbackCardTree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
+    );
+    const fallbackCardText = collectText(fallbackCardTree);
+    assert.ok(fallbackCardText.includes('系统语音'), '系统回退时卡片应展示系统语音状态');
+    assert.ok(fallbackCardText.includes('晓晓语音合成（内置）失败：超时'), '系统回退时卡片应提示回退原因');
+
+    renderer.reset();
+    const fallbackDrawerTree = renderer.render(() =>
+      React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer', drawer: 'speech' } } as never),
+    );
+    const fallbackDrawerText = collectText(fallbackDrawerTree);
+    assert.ok(fallbackDrawerText.includes('系统语音'), '编辑抽屉也应展示系统语音状态');
+    assert.ok(fallbackDrawerText.includes('晓晓语音合成（内置）失败：超时'), '编辑抽屉也应展示回退原因');
   } finally {
     control.dispose();
   }

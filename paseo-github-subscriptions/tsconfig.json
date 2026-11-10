@@ -9,7 +9,10 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "node-edge-tts": ["./server/node-edge-tts.d.ts"]
+    }
   },
   "include": ["**/*.ts", "**/*.tsx"]
 }
