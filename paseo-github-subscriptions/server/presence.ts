@@ -158,7 +158,7 @@ export class PresenceRuntime {
     const settings = this.state.settings;
     for (const current of this.speaking) {
       const question = this.state.questions.find(item => item.id === current.id);
-      const globallyWanted = !this.stopped && settings.speechEnabled && !settings.paused
+      const globallyWanted = !this.stopped && !settings.paused
         && settings.mode === current.mode && settings.sourceHostId === current.sourceHostId
         && question?.state === 'pending' && !question.delegatedTo;
       for (const [hostId, state] of current.targets) {
@@ -403,12 +403,12 @@ export class PresenceRuntime {
     const reason = (cloudBrowser ? '云端会话提问，等待同步到 Paseo；只接受人工回答' : automaticAnswerBlockReason(question.prompts)) ?? (this.observation.mode === 'offline' ? '没有唯一明确的推荐项，请人工选择' : this.observation.mode === 'unknown' ? '在场状态未知，等待用户回答' : '在线：等待用户回答');
     if (question.reason !== reason) await this.persist(next => { const item = next.questions.find(item => item.id === question.id); if (item) item.reason = reason; });
     const alreadySpeaking = [...this.speaking].some(item => item.id === question.id);
-    if (this.observation.mode === 'online' && this.state.settings.speechEnabled && !this.state.notified.includes(question.id) && !alreadySpeaking && !this.blockingNotifications.size && this.clock() >= this.state.speechRetryAt) {
+    if (this.observation.mode === 'online' && !this.state.notified.includes(question.id) && !alreadySpeaking && !this.blockingNotifications.size && this.clock() >= this.state.speechRetryAt) {
       const mode = this.state.settings.mode;
       const sourceHostId = this.state.settings.sourceHostId;
       const isGlobalCurrent = () =>
         !this.stopped && generation === this.generation && this.state.settings.sourceHostId === sourceHostId
-        && this.state.settings.speechEnabled && !this.state.settings.paused;
+        && !this.state.settings.paused;
       const gateToken = {};
       this.blockingNotifications.add(gateToken);
       let activeSpeaking: {
@@ -419,11 +419,11 @@ export class PresenceRuntime {
       } | null = null;
       const notification = Promise.resolve()
         .then(async () => {
-          if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused || !this.state.settings.speechEnabled) return;
+          if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused) return;
           const qBefore = this.state.questions.find(item => item.id === question.id);
           if (qBefore?.state !== 'pending' || qBefore.delegatedTo) return;
           const rawTargets = await this.resolveSpeechTargets();
-          if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused || !this.state.settings.speechEnabled) return;
+          if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused) return;
           const qReady = this.state.questions.find(item => item.id === question.id);
           if (qReady?.state !== 'pending' || qReady.delegatedTo) return;
           const finalTargets = rawTargets.filter(hostId => !this.isSelfHost(hostId) || this.localSpeechEnabled());

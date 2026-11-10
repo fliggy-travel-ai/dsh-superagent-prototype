@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentPermissionRequest } from '@getpaseo/protocol/agent-types';
@@ -325,12 +325,12 @@ test('关闭语音或问题结束时取消当前语音，取消回执不计失�
     await setup.runtime.browserSync('browser-one', [webpage()], [], sessions);
     const id = setup.runtime.snapshot().questions[0].id;
     assert.deepEqual(spoken, [id]);
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, speechEnabled: false });
+    await setup.runtime.configureLocalSpeech(false);
     await eventually(() => setup.runtime.snapshot().speech?.length === 1);
     assert.deepEqual(cancels, [[null, id]]);
     assert.equal(setup.runtime.snapshot().speech?.[0]?.cancelled, true);
     assert.equal(setup.runtime.snapshot().error, null);
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, speechEnabled: true });
+    await setup.runtime.configureLocalSpeech(true);
     await eventually(() => spoken.length === 2);
     await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_one']);
     await eventually(() => setup.runtime.snapshot().speech?.length === 2);
@@ -1091,6 +1091,75 @@ test('1737-speech-local 审阅项 3 & 4：任一台 played 立即落盘 notified
     const allOffSnap = await runtime.configureLocalSpeech(false);
     assert.equal((allOffSnap as { hasSpeechTarget?: boolean }).hasSpeechTarget, false, '所有主机播放开关均关闭时 hasSpeechTarget 应为 false');
   } finally {
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-one-switch：speechEnabled=false 兼容忽略且不再阻止或取消播报；本机播放开关关闭时本机不播', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-one-switch-'));
+  let now = 8_000_000;
+  const spoken: Array<[string | null, string]> = [];
+  const cancels: Array<[string | null, string]> = [];
+  const questionsList: QuestionAgent[] = [agent()];
+  let holdMini: ((res: SpeechResult) => void) | null = null;
+
+  // 旧 presence.json 里 speechEnabled 为 false
+  await writeFile(
+    join(dir, 'presence.json'),
+    JSON.stringify({
+      settings: { mode: 'online', paused: false, speechEnabled: false, sourceHostId: null },
+      questions: [],
+      notified: [],
+    }),
+  );
+
+  const port: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async (hostId, id) => {
+      spoken.push([hostId, id]);
+      if (holdMini) return new Promise<SpeechResult>(r => { holdMini = r; });
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async (hostId, id) => {
+      cancels.push([hostId, id]);
+      holdMini?.({ played: false, cancelled: true, detail: '语音播放已取消' });
+    },
+    hosts: async () => [{ id: 'srv_mini', name: 'Mac Mini', online: true }],
+    selfId: () => 'srv_mini',
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    // 1. 旧配置 speechEnabled=false 读取不报错，且只要本机播放开即正常播报
+    await eventually(() => spoken.length === 1);
+    assert.equal(spoken[0]![0], 'srv_mini', '旧配置 speechEnabled=false 不应再阻止播报');
+
+    // 2. 通过 configure 传入 speechEnabled=false 不报错，也不取消正在播放的语音
+    now += 180_001;
+    holdMini = () => {};
+    questionsList.push({ ...agent(), id: 'agent-2', pendingPermissions: [{ ...request(), id: 'req-2' }] });
+    await runtime.refresh();
+    await eventually(() => spoken.length === 2);
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: false, sourceHostId: null });
+    assert.equal(cancels.length, 0, 'configure 传入 speechEnabled=false 不应取消在播语音');
+
+    // 3. 关闭本机播放开关时立即取消在播语音，且之后新提问本机不再播放
+    await runtime.configureLocalSpeech(false);
+    await eventually(() => cancels.length === 1);
+    assert.equal(cancels[0]![0], 'srv_mini');
+    holdMini = null;
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-3', pendingPermissions: [{ ...request(), id: 'req-3' }] });
+    await runtime.refresh();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(spoken.length, 2, '本机播放开关关闭后不应再在本机播报');
+  } finally {
+    holdMini?.({ played: false, cancelled: true });
     await runtime.stop();
     await rm(dir, { recursive: true, force: true });
   }

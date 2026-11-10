@@ -1029,7 +1029,6 @@ function QuietChildrenDrawer() {
 function SpeechDrawer() {
   const { s, control, theme } = useUi();
   const { presence, presenceError, moduleReloading } = useControlState();
-  const settings = presence?.settings ?? null;
   const [err, setErr] = useState<string | null>(null);
   const localHostId = presence?.hosts[0]?.id ?? null;
   const lastPlayedSpeech = presence?.speech
@@ -1049,20 +1048,6 @@ function SpeechDrawer() {
         <Text style={s.text}>开启语音提醒</Text>
         <Switch
           accessibilityLabel="开启语音提醒"
-          disabled={moduleReloading || !settings}
-          value={settings?.speechEnabled ?? false}
-          onValueChange={speechEnabled => {
-            if (!settings) return;
-            void control.configurePresence({ ...settings, speechEnabled }).catch(e => setErr(errorMessage(e)));
-          }}
-          trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-          thumbColor={theme.colors.accentForeground}
-        />
-      </View>
-      <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={[s.text, { flexShrink: 1 }]}>{`在这台电脑播放（${presence?.hostName || '本机'}）`}</Text>
-        <Switch
-          accessibilityLabel={`在这台电脑播放（${presence?.hostName || '本机'}）`}
           disabled={moduleReloading || !presence}
           value={Boolean(presence?.localSpeechEnabled)}
           onValueChange={enabled => {
@@ -1074,9 +1059,9 @@ function SpeechDrawer() {
         />
       </View>
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
-      {settings?.speechEnabled && presence?.hasSpeechTarget === false ? (
+      {presence?.hasSpeechTarget === false ? (
         <Notice tone="warning">
-          <Text style={s.text}>当前没有主机会播放：请至少在一台在线电脑上开启“在这台电脑播放”。</Text>
+          <Text style={s.text}>当前没有主机会播放：所有在线电脑的语音提醒均已关闭。</Text>
         </Notice>
       ) : null}
       {lastPlayedSpeech ? (
@@ -1095,7 +1080,7 @@ function SpeechDrawer() {
         <Text style={s.small}>最近一次播放：尚未播放</Text>
       ) : null}
       <RuleNote>
-        只在判定在线且总开关开启时，向所有开启“在这台电脑播放”的主机播报新提问；本机开关只保存在当前电脑，不跨主机同步；你在任一端回答后立即停止播报。
+        {`开启后，判定在线时这台电脑（${presence?.hostName || '本机'}）会播报所有电脑上会话的新提问；开关只保存在当前电脑，不跨主机同步；你在任一端回答后立即停止播报。`}
       </RuleNote>
     </View>
   );

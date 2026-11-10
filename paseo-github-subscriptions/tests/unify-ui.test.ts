@@ -1502,7 +1502,7 @@ test('1737-remove-automation：删除精确授权卡片与模块后，问答与�
   );
 });
 
-test('1737-speech-local：语音提醒卡片与抽屉展示“在这台电脑播放（主机名）”开关，切换立即保存且不触发重载', async () => {
+test('1737-speech-one-switch：语音提醒卡片与抽屉只保留单个“语音提醒”本机开关（无“在这台电脑播放”按钮），切换写本机设置且不触发重载', async () => {
   const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
   installTsxAndReactNativeHooks();
   const { FakeDaemon } = await import('./ui/fake-daemon.ts');
@@ -1518,6 +1518,11 @@ test('1737-speech-local：语音提醒卡片与抽屉展示“在这台电脑播
   };
   const daemon = new FakeDaemon('shadow');
   daemon.latencyMs = 0;
+  // 即使旧 presence.settings.speechEnabled 为 false，界面开关仍只反映 localSpeechEnabled，且全关仍显示“当前没有主机会播放”
+  daemon.presence = {
+    ...daemon.presence,
+    settings: { ...daemon.presence.settings, speechEnabled: false },
+  };
   const control = createControlStore(
     daemon as never,
     (async () => ({ entries: [], pageInfo: { hasMore: false } })) as never,
@@ -1532,34 +1537,51 @@ test('1737-speech-local：语音提醒卡片与抽屉展示“在这台电脑播
     let tree = renderer.render(() =>
       React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
     );
-    const expectedLabel = `在这台电脑播放（${daemon.presence.hostName}）`;
-    assert.ok(collectText(tree).includes(expectedLabel), `语音提醒卡片应显示“${expectedLabel}”`);
+    const cardText = collectText(tree);
+    const expectedDesc = `判定在线时，这台电脑（${daemon.presence.hostName}）播报所有电脑上会话的新提问。`;
+    assert.ok(cardText.includes(expectedDesc), `语音提醒卡片说明应包含“${expectedDesc}”`);
+    assert.equal(cardText.includes('在这台电脑播放'), false, '卡片上不应再出现“在这台电脑播放”字样的开关');
 
-    const localSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
-    assert.ok(localSwitch, '应找到“在这台电脑播放”开关');
-    const initialVal = Boolean(localSwitch.props.value);
-    (localSwitch.props.onValueChange as (v: boolean) => void)(!initialVal);
+    const speechSwitches = findNodes(tree, n => n.type === 'Switch' && String(n.props.accessibilityLabel ?? '').includes('语音提醒') && !String(n.props.accessibilityLabel ?? '').includes('蓝牙'));
+    assert.equal(speechSwitches.length, 1, '语音提醒卡片只应保留一个“语音提醒”开关');
+    assert.equal(
+      findNodes(tree, n => n.type === 'Switch' && String(n.props.accessibilityLabel ?? '').includes('在这台电脑播放')).length,
+      0,
+      '不应存在“在这台电脑播放”开关',
+    );
+    const speechSwitch = speechSwitches[0]!;
+    assert.equal(Boolean(speechSwitch.props.value), true, '即使旧 speechEnabled=false，只要 localSpeechEnabled=true 开关应为开');
+
+    (speechSwitch.props.onValueChange as (v: boolean) => void)(false);
     await tick();
 
-    assert.equal(control.getState().moduleReloading, false, '切换本机播放开关不应触发插件重载');
+    assert.equal(control.getState().moduleReloading, false, '切换语音提醒本机开关不应触发插件重载');
+    assert.equal(daemon.presence.localSpeechEnabled, false, '切换开关应写入本机 localSpeechEnabled');
+    assert.equal(daemon.presence.settings.speechEnabled, false, '不应写入旧的 speechEnabled 字段');
+
     tree = renderer.render(() =>
       React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer' } } as never),
     );
-    const updatedSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
-    assert.equal(Boolean(updatedSwitch?.props.value), !initialVal, '切换后本机播放开关状态应立即更新');
+    const updatedSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '语音提醒')[0];
+    assert.equal(Boolean(updatedSwitch?.props.value), false, '切换后语音提醒开关状态应立即更新为关');
     assert.ok(
       collectText(tree).includes('当前没有主机会播放'),
-      '所有主机播放开关都关闭且总开关开启时，语音提醒卡片应提示“当前没有主机会播放”',
+      '所有主机播放开关都关闭时（无论旧 speechEnabled 值如何），语音提醒卡片应提示“当前没有主机会播放”',
     );
 
-    // 打开语音提醒编辑面板，同样展示并可切换本机播放开关
+    // 打开语音提醒编辑面板：同样只有一个开关且无“在这台电脑播放”开关
     renderer.reset();
     const drawerTree = renderer.render(() =>
       React.createElement(Bound, { theme: mockTheme, host: { id: 'h1', label: 'Host' }, layout: { compact: false, platform: 'web' }, params: { page: 'answer', drawer: 'speech' } } as never),
     );
-    const drawerSwitch = findNodes(drawerTree, n => n.type === 'Switch' && n.props.accessibilityLabel === expectedLabel)[0];
-    assert.ok(drawerSwitch, '语音提醒编辑抽屉也应展示本机播放开关');
-    assert.equal(Boolean(drawerSwitch.props.value), !initialVal);
+    const drawerText = collectText(drawerTree);
+    assert.equal(drawerText.includes('在这台电脑播放'), false, '编辑抽屉不应再出现“在这台电脑播放”开关');
+    const drawerSwitches = findNodes(
+      drawerTree,
+      n => n.type === 'Switch' && !['启用问答模式、蓝牙和语音提醒', '升级通知', '子会话免提醒', '语音提醒'].includes(String(n.props.accessibilityLabel ?? '')),
+    );
+    assert.equal(drawerSwitches.length, 1, '语音提醒编辑抽屉只应保留一个开关');
+    assert.equal(Boolean(drawerSwitches[0]!.props.value), false);
 
     // 1737-speech-node-tts：只取本机 hostId 的已播放记录；无本机记录（或仅有远端主机记录）时显示“尚未播放”
     daemon.presence = {

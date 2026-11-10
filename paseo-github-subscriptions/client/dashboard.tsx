@@ -472,54 +472,19 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           trailing={
             <Switch
               accessibilityLabel="语音提醒"
-              disabled={moduleReloading || !settings || presenceModOff}
-              value={!presenceModOff && (settings?.speechEnabled ?? false)}
-              onValueChange={speechEnabled => {
-                if (!settings || presenceModOff) return;
+              disabled={moduleReloading || !presence || presenceModOff}
+              value={!presenceModOff && Boolean(presence?.localSpeechEnabled)}
+              onValueChange={enabled => {
+                if (!presence || presenceModOff) return;
                 void control
-                  .configurePresence({ ...settings, speechEnabled })
+                  .configureLocalSpeech(enabled)
                   .catch(e => setActionError(errorMessage(e)));
               }}
               trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
               thumbColor={theme.colors.accentForeground}
             />
           }
-          belowTitle={
-            presenceModOff || !presence ? null : (
-              <View
-                style={[
-                  s.row,
-                  {
-                    justifyContent: 'space-between',
-                    backgroundColor: theme.colors.surface2,
-                    borderRadius: 8,
-                    borderWidth: 1,
-                    borderColor: theme.colors.border,
-                    paddingHorizontal: 10,
-                    paddingVertical: 6,
-                  },
-                ]}
-              >
-                <Text style={[s.small, { color: theme.colors.foreground, flexShrink: 1 }]}>
-                  {`在这台电脑播放（${presence.hostName || '本机'}）`}
-                </Text>
-                <Switch
-                  accessibilityLabel={`在这台电脑播放（${presence.hostName || '本机'}）`}
-                  disabled={moduleReloading || presenceModOff}
-                  value={Boolean(presence.localSpeechEnabled)}
-                  onValueChange={enabled => {
-                    if (presenceModOff) return;
-                    void control
-                      .configureLocalSpeech(enabled)
-                      .catch(e => setActionError(errorMessage(e)));
-                  }}
-                  trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
-                  thumbColor={theme.colors.accentForeground}
-                />
-              </View>
-            )
-          }
-          description="判定在线时，向开启“在这台电脑播放”的主机播报新提问。"
+          description={`判定在线时，这台电脑（${presence?.hostName || '本机'}）播报所有电脑上会话的新提问。`}
           kv={
             presenceModOff ? (
               <ModuleOffHint />
@@ -533,7 +498,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                   label={presence.localSpeechEnabled ? '本机播放开启' : '本机不播放'}
                   tone={presence.localSpeechEnabled ? 'success' : 'neutral'}
                 />
-                {settings?.speechEnabled && presence.hasSpeechTarget === false ? (
+                {presence.hasSpeechTarget === false ? (
                   <Chip label="当前没有主机会播放" tone="warning" />
                 ) : null}
                 {lastPlayedSpeech ? (
