@@ -272,6 +272,7 @@ export class FakeDaemon {
     ],
     warning: null,
   };
+  stalled: { sessions: never[]; error: string | null; scannedAt?: string | null } = { sessions: [], error: null };
   readonly log: RpcLogEntry[] = [];
   latencyMs = 30;
   /** 为 true 时所有调用失败，模拟插件服务不可用。 */
@@ -491,7 +492,7 @@ export class FakeDaemon {
         return this.bluetoothTarget;
       }
       case 'todos.stalled':
-        return { sessions: [], error: null };
+        return this.stalled;
       case 'browser.snapshot':
         return this.browser;
       case 'browser.configure':

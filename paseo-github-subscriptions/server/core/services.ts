@@ -31,6 +31,7 @@ export class MainServices {
   quiet: QuietRuntime | null = null;
   stalledPaused = false;
   private stalled: StalledRuntime | null = null;
+  private stalledGeneration = 0;
   private readonly directory: string;
   private readonly daemon: SharedDaemon;
   private readonly home: string;
@@ -79,6 +80,7 @@ export class MainServices {
   }
 
   invalidateStalledCache(): void {
+    this.stalledGeneration += 1;
     this.stalled?.stop();
     this.stalled?.invalidate();
   }
@@ -90,23 +92,33 @@ export class MainServices {
     machine?: { modules?: Record<string, boolean> },
     homeOverride?: string,
   ): Promise<StalledSnapshot> {
-    if (this.stalledPaused || !this.isModuleRunning('todo.stalled', machine, true)) {
+    if (this.stopped || this.stalledPaused || !this.isModuleRunning('todo.stalled', machine, true)) {
       this.stalled?.stop();
-      return { sessions: [], error: null, scannedAt: null };
+      return { sessions: [], error: null };
     }
+    const generation = this.stalledGeneration;
     const githubRunning = this.isModuleRunning('github', machine, true);
     const [hosts, connection] = await Promise.all([
       this.readyHosts(),
       this.daemon.ready(),
       ...(githubRunning ? [this.github().catch(() => null)] : []),
     ]);
+    if (
+      this.stopped ||
+      this.stalledPaused ||
+      !this.isModuleRunning('todo.stalled', machine, true) ||
+      generation !== this.stalledGeneration
+    ) {
+      this.stalled?.stop();
+      return { sessions: [], error: null };
+    }
     if (!this.stalled) {
       this.stalled = new StalledRuntime(
         stalledPort(
           connection.client,
           hosts,
           () =>
-            githubRunning &&
+            this.isModuleRunning('github', machine, true) &&
             this.runtime?.storage.state.preferences.enabled &&
             !this.runtime.storage.state.preferences.shadow
               ? this.runtime.storage.state.subscriptions
@@ -118,10 +130,13 @@ export class MainServices {
         { cacheTtlMs: STALLED_CACHE_MS, scanIntervalMs: STALLED_SCAN_INTERVAL_MS },
       );
     }
-    if (!this.stopped) {
-      this.stalled.start();
+    this.stalled.start();
+    const snapshot = await this.stalled.snapshot();
+    if (this.stopped || this.stalledPaused || !this.isModuleRunning('todo.stalled', machine, true)) {
+      this.stalled.stop();
+      return { sessions: [], error: null };
     }
-    return this.stalled.snapshot();
+    return snapshot;
   }
 
   /** GitHub 订阅运行时。 */

@@ -3,6 +3,7 @@ import { isMainSession, type WorkspaceRoles } from './core/session-roles.ts';
 
 export const STALLED_SCAN_INTERVAL_MS = 10_000;
 export const STALLED_MAX_WAIT_MS = 50;
+export const STALLED_IDLE_PAUSE_MS = 60_000;
 
 export interface StalledAgent {
   id: string;
@@ -37,6 +38,7 @@ export interface StalledRuntimeOptions {
   maxWaitMs?: number;
   cacheTtlMs?: number;
   scanIntervalMs?: number;
+  idlePauseMs?: number;
 }
 
 const roundMs = (ms: number) => Math.round(ms * 10) / 10;
@@ -66,9 +68,12 @@ export class StalledRuntime {
   private maxWaitMs: number;
   private cacheTtlMs: number;
   private scanIntervalMs: number;
+  private idlePauseMs: number;
   private inflight: Promise<StalledSnapshot> | null = null;
   private lastSnapshot: StalledSnapshot | null = null;
   private lastScannedAtMs = 0;
+  private lastRequestedAtMs = 0;
+  private autoStarted = false;
   private lastHostId = 'local';
   private lastRoles: WorkspaceRoles | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -80,11 +85,24 @@ export class StalledRuntime {
     this.maxWaitMs = options.maxWaitMs ?? STALLED_MAX_WAIT_MS;
     this.cacheTtlMs = options.cacheTtlMs ?? 0;
     this.scanIntervalMs = options.scanIntervalMs ?? STALLED_SCAN_INTERVAL_MS;
+    this.idlePauseMs = options.idlePauseMs ?? STALLED_IDLE_PAUSE_MS;
   }
 
   start(intervalMs = this.scanIntervalMs): void {
+    this.autoStarted = true;
+    this.scanIntervalMs = intervalMs;
+    if (this.lastRequestedAtMs === 0) {
+      this.lastRequestedAtMs = this.now();
+    }
     if (this.timer || intervalMs <= 0) return;
     this.timer = setInterval(() => {
+      if (this.idlePauseMs > 0 && this.lastRequestedAtMs > 0 && this.now() - this.lastRequestedAtMs >= this.idlePauseMs) {
+        if (this.timer) {
+          clearInterval(this.timer);
+          this.timer = null;
+        }
+        return;
+      }
       if (!this.inflight) {
         this.inflight = this.scan().finally(() => {
           this.inflight = null;
@@ -95,6 +113,7 @@ export class StalledRuntime {
   }
 
   stop(): void {
+    this.autoStarted = false;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -143,10 +162,14 @@ export class StalledRuntime {
   }
 
   async snapshot(): Promise<StalledSnapshot> {
+    const nowMs = this.now();
+    this.lastRequestedAtMs = nowMs;
+    if (this.autoStarted && !this.timer) {
+      this.start(this.scanIntervalMs);
+    }
     if (this.lastSnapshot && this.lastSnapshot.sessions.length > 0) {
       await this.filterLocalActive(this.lastSnapshot);
     }
-    const nowMs = this.now();
     const hadInflight = Boolean(this.inflight);
     const cacheFresh =
       this.lastSnapshot !== null &&

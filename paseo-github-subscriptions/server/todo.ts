@@ -68,8 +68,9 @@ export class TodoRuntime {
   private readonly remoteCacheTtlMs: number;
   private readonly remoteOfflineMaxAgeMs: number;
   private readonly remoteMaxWaitMs: number;
-  private readonly remoteCache = new Map<string, { at: number; snapshot: TodoLocalSnapshot }>();
-  private readonly remoteInflight = new Map<string, Promise<TodoLocalSnapshot>>();
+  private readonly remoteCache = new Map<string, { at: number; expired: boolean; snapshot: TodoLocalSnapshot }>();
+  private readonly remoteVersion = new Map<string, number>();
+  private readonly remoteInflight = new Map<string, { version: number; promise: Promise<TodoLocalSnapshot> }>();
 
   constructor(port: TodoPort, options: TodoRuntimeOptions = {}) {
     this.port = port;
@@ -82,21 +83,28 @@ export class TodoRuntime {
     return this.port.now?.() ?? Date.now();
   }
 
-  private fetchRemote(hostId: string): Promise<TodoLocalSnapshot> {
-    let inflight = this.remoteInflight.get(hostId);
-    if (!inflight) {
-      inflight = (async () => {
-        const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
-        this.remoteCache.set(hostId, { at: this.now(), snapshot: remote });
-        return remote;
-      })().finally(() => {
-        if (this.remoteInflight.get(hostId) === inflight) {
-          this.remoteInflight.delete(hostId);
-        }
-      });
-      this.remoteInflight.set(hostId, inflight);
+  private fetchRemote(hostId: string): { version: number; promise: Promise<TodoLocalSnapshot> } {
+    const currentVersion = this.remoteVersion.get(hostId) ?? 0;
+    const existing = this.remoteInflight.get(hostId);
+    if (existing && existing.version === currentVersion) {
+      return existing;
     }
-    return inflight;
+    const startedAt = this.now();
+    const version = currentVersion;
+    const promise = (async () => {
+      const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
+      if ((this.remoteVersion.get(hostId) ?? 0) === version) {
+        this.remoteCache.set(hostId, { at: startedAt, expired: false, snapshot: remote });
+      }
+      return remote;
+    })().finally(() => {
+      if (this.remoteInflight.get(hostId)?.promise === promise) {
+        this.remoteInflight.delete(hostId);
+      }
+    });
+    const entry = { version, promise };
+    this.remoteInflight.set(hostId, entry);
+    return entry;
   }
 
   async local(): Promise<TodoLocalSnapshot> {
@@ -419,38 +427,39 @@ export class TodoRuntime {
           return;
         }
 
-        if (cached && nowMs - cached.at < this.remoteCacheTtlMs) {
+        if (cached && !cached.expired && nowMs - cached.at < this.remoteCacheTtlMs) {
           remoteMs[host.id] = 0;
           mergeRemoteSnapshot(host, cached.snapshot);
           return;
         }
 
         const tRemote0 = performance.now();
-        const hadInflight = this.remoteInflight.has(host.id);
-        const inflight = this.fetchRemote(host.id);
+        const { version: reqVersion, promise: inflight } = this.fetchRemote(host.id);
         inflight.catch(() => {});
 
-        if (hadInflight && validFallback) {
-          remoteMs[host.id] = 0;
-          mergeRemoteSnapshot(host, validFallback);
-          return;
-        }
-
-        let timer: ReturnType<typeof setTimeout> | undefined;
         type RaceOutcome = { kind: 'ok'; value: TodoLocalSnapshot } | { kind: 'err'; error: unknown } | { kind: 'timeout' };
-        const outcome = await Promise.race<RaceOutcome>([
-          inflight.then(
+        let outcome: RaceOutcome;
+        if (!validFallback) {
+          outcome = await inflight.then(
             value => ({ kind: 'ok' as const, value }),
             error => ({ kind: 'err' as const, error }),
-          ),
-          new Promise<RaceOutcome>(resolve => {
-            timer = setTimeout(() => resolve({ kind: 'timeout' }), this.remoteMaxWaitMs);
-            timer.unref?.();
-          }),
-        ]).finally(() => clearTimeout(timer));
+          );
+        } else {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          outcome = await Promise.race<RaceOutcome>([
+            inflight.then(
+              value => ({ kind: 'ok' as const, value }),
+              error => ({ kind: 'err' as const, error }),
+            ),
+            new Promise<RaceOutcome>(resolve => {
+              timer = setTimeout(() => resolve({ kind: 'timeout' }), this.remoteMaxWaitMs);
+              timer.unref?.();
+            }),
+          ]).finally(() => clearTimeout(timer));
+        }
         remoteMs[host.id] = roundMs(performance.now() - tRemote0);
 
-        if (outcome.kind === 'ok') {
+        if (outcome.kind === 'ok' && (this.remoteVersion.get(host.id) ?? 0) === reqVersion) {
           mergeRemoteSnapshot(host, outcome.value);
           return;
         }
@@ -458,7 +467,7 @@ export class TodoRuntime {
         const fallback =
           latestCached && this.now() - latestCached.at < this.remoteOfflineMaxAgeMs
             ? latestCached.snapshot
-            : null;
+            : validFallback;
         if (fallback) {
           mergeRemoteSnapshot(host, fallback);
           return;
@@ -512,8 +521,14 @@ export class TodoRuntime {
       try {
         const res = await this.port.remoteAct(input.hostId, input);
         if (res.ok) {
-          this.remoteCache.delete(input.hostId);
-          void this.fetchRemote(input.hostId).catch(() => {});
+          const nextVersion = (this.remoteVersion.get(input.hostId) ?? 0) + 1;
+          this.remoteVersion.set(input.hostId, nextVersion);
+          this.remoteInflight.delete(input.hostId);
+          const cached = this.remoteCache.get(input.hostId);
+          if (cached) {
+            cached.expired = true;
+          }
+          void this.fetchRemote(input.hostId).promise.catch(() => {});
         }
         return res;
       } catch (error) {

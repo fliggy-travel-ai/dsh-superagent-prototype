@@ -182,3 +182,77 @@ test('1737-todo-latency：本机会话变为 running、activeTurn 或有待批�
   assert.deepEqual((await runtime.snapshot()).sessions, []);
   await unblock();
 });
+
+test('1737-todo-latency 审阅修复：超过 60 秒无 snapshot 请求自动暂停后台扫描，下次请求恢复；MainServices 异步等待期间暂停不会重新挂上定时器', async () => {
+  const { port } = fixture();
+  let nowMs = 1_000;
+  let collectCount = 0;
+  const origCollect = port.collect;
+  port.collect = async () => {
+    collectCount += 1;
+    return origCollect();
+  };
+
+  const runtime = new StalledRuntime(port, {
+    now: () => nowMs,
+    scanIntervalMs: 25,
+    idlePauseMs: 60_000,
+    cacheTtlMs: 10,
+  } as any);
+
+  runtime.start();
+  await runtime.snapshot();
+  const afterInitial = collectCount;
+  assert.ok(afterInitial >= 1);
+
+  // 推进时间超过 60 秒空闲阈值，不再调用 snapshot：定时器下一次触发时应自动暂停，不再持续扫描
+  nowMs += 65_000;
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const countAfterIdlePause = collectCount;
+  await new Promise(resolve => setTimeout(resolve, 70));
+  assert.equal(collectCount, countAfterIdlePause, '超过 60 秒无 snapshot 请求后后台定时扫描应自动暂停');
+
+  // 再次请求 snapshot 时应恢复扫描并重挂后台定时器
+  nowMs += 1_000;
+  await runtime.snapshot();
+  assert.ok(collectCount > countAfterIdlePause, '再次调用 snapshot 时应恢复扫描');
+  runtime.stop();
+
+  // 验证 MainServices.stalledSnapshot 在异步等待 ready 期间遭遇暂停（stalledPaused = true）时，不会在等待结束后重新启动定时器或执行扫描
+  const { MainServices } = await import('../server/core/services.ts');
+  let releaseReady!: () => void;
+  const readyPromise = new Promise<void>(resolve => {
+    releaseReady = resolve;
+  });
+  let readyFetchCalls = 0;
+  const fakeClient = {
+    getLastServerInfoMessage: () => ({ serverId: 'mini' }),
+    listHosts: async () => ({ self: { serverId: 'mini', label: 'Mini' }, hosts: [] }),
+    fetchAgents: async () => {
+      readyFetchCalls += 1;
+      return { entries: [], pageInfo: { hasMore: false } };
+    },
+    scheduleList: async () => ({ schedules: [] }),
+  };
+  const fakeDaemon = {
+    ready: async () => {
+      await readyPromise;
+      return { client: fakeClient, paseo: {} };
+    },
+  };
+  const services = new MainServices('/tmp', fakeDaemon as any, '/tmp');
+  const pendingSnap = services.stalledSnapshot({ modules: { 'todo.stalled': true, github: false } });
+  await new Promise(resolve => setImmediate(resolve));
+
+  // 在 daemon.ready() 尚未完成时触发暂停
+  services.stalledPaused = true;
+  services.invalidateStalledCache();
+  releaseReady();
+
+  const pausedSnap = await pendingSnap;
+  assert.deepEqual(pausedSnap.sessions, []);
+  assert.equal(readyFetchCalls, 0, '异步等待期间已暂停时不应再启动扫描');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal((services as any).stalled?.timer ?? null, null, '异步等待期间已暂停时不应遗留运行中的后台定时器');
+  await services.stop();
+});

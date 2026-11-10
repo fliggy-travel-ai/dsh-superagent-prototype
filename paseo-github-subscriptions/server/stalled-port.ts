@@ -154,7 +154,7 @@ export function stalledPort(
           const nowMs = now();
 
           if (host.status !== 'online') {
-            if (cached && nowMs - cached.at < remoteOfflineMaxAgeMs) {
+            if (cached && nowMs - cached.at < remoteOfflineMaxAgeMs && latestCandidateUpdateMs <= cached.at) {
               applyListeners(id, cached.schedules, cached.subscriptions, nowMs, listeners);
               hostTimings.push({
                 hostId: id,
@@ -182,6 +182,7 @@ export function stalledPort(
             return cached.agents;
           }
 
+          const fetchStartedAt = nowMs;
           const remoteStart = performance.now();
           let listMs = 0;
           let scheduleListMs = 0;
@@ -208,7 +209,7 @@ export function stalledPort(
               const [agents, schedules, subscriptions] = await Promise.all([listTask, schedTask, subTask]);
               const fetchedAt = now();
               remoteCache.set(id, {
-                at: fetchedAt,
+                at: fetchStartedAt,
                 agents,
                 schedules: schedules.schedules,
                 subscriptions,
@@ -226,7 +227,7 @@ export function stalledPort(
             });
           } catch (error) {
             const fallbackNow = now();
-            if (cached && fallbackNow - cached.at < remoteOfflineMaxAgeMs) {
+            if (cached && fallbackNow - cached.at < remoteOfflineMaxAgeMs && latestCandidateUpdateMs <= cached.at) {
               applyListeners(id, cached.schedules, cached.subscriptions, fallbackNow, listeners);
               hostTimings.push({
                 hostId: id,

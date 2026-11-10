@@ -858,13 +858,14 @@ export function TodoItemCard({ item }: { item: TodoItem }) {
 
 function TodoPage() {
   const { s, now, theme } = useUi();
-  const { todo, todoError } = useControlState();
+  const { todo, todoError, stalled } = useControlState();
   const [subtab, setSubtab] = useState<'list' | 'log'>('list');
   const [filter, setFilter] = useState<'all' | TodoType>('all');
 
   const items = todo?.items ?? [];
   const logs = todo?.logs ?? [];
   const countByType = (t: TodoType) => items.filter(i => i.type === t).length;
+  const stalledScanning = stalled !== null && stalled.scannedAt === null;
 
   const visibleItems = filter === 'all' ? items : items.filter(item => item.type === filter);
 
@@ -902,7 +903,7 @@ function TodoPage() {
                 ['all', `全部 ${items.length}`],
                 ['ask', `网页提问 ${countByType('ask')}`],
                 ['web', `网页等待 ${countByType('web')}`],
-                ['stall', `停滞会话 ${countByType('stall')}`],
+                ['stall', `停滞会话 ${stalledScanning && countByType('stall') === 0 ? '扫描中' : countByType('stall')}`],
                 ['esc', `升级事件 ${countByType('esc')}`],
                 ['read', `代答未读 ${countByType('read')}`],
               ] as const
@@ -920,7 +921,11 @@ function TodoPage() {
           <View style={{ gap: 8 }}>
             {visibleItems.length === 0 ? (
               <Card>
-                <Text style={s.muted}>当前没有需要处理的插件待办项。</Text>
+                <Text style={s.muted}>
+                  {stalledScanning && (filter === 'all' || filter === 'stall')
+                    ? '停滞会话扫描中…'
+                    : '当前没有需要处理的插件待办项。'}
+                </Text>
               </Card>
             ) : (
               visibleItems.map(item => <TodoItemCard key={item.id} item={item} />)
