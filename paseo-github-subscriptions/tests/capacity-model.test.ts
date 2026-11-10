@@ -30,3 +30,8 @@ test('目标按余量、周额度、Max 排序并排除不合格账号', () => {
   assert.deepEqual(targets([calculate(b), calculate(a)], '').map(x => x.provider), ['claude-1', 'claude-2']);
   a.report!.report!.windows![0]!.remainingPct = 29; assert.deepEqual(targets([calculate(a)], ''), []);
 });
+test('1808 排除账号：容量为 0、写明原因、不会成为目标', () => {
+  const excluded = calculate({ ...base(), provider: 'claude-x', excluded: true, paceEnabled: false });
+  assert.equal(excluded.canAdd, 0); assert.equal(excluded.reason, '已排除：不能用于主会话');
+  assert.deepEqual(targets([excluded], ''), []);
+});

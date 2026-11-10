@@ -134,6 +134,7 @@
   "capacity": {
     "accounts": {},
     "warmup": [],
+    "exclude": [],
     "liveMaxAgeMinutes": 10,
     "pace": true,
     "migration": {
