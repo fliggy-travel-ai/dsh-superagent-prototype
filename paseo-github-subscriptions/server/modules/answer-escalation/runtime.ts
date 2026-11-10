@@ -68,7 +68,6 @@ export class EscalationRuntime {
   private attempt: Attempt | null = null;
   private engine: Engine | null = null;
   private reconciler: EscalationReconciler | null = null;
-  private enrichNoticeFn: ((notice: Notice) => void) | null = null;
   private readonly openExternal = new Map<string, Question>();
   private readonly statePath: string;
   private quotaAlerts: QuotaAlerts | null = null;
@@ -140,6 +139,15 @@ export class EscalationRuntime {
         for (const member of notice.events) enrichNotice(member);
       }
       if (notice.event !== 'asked') return;
+      const d = notice.data as { source?: string; title?: string; id?: string } | null;
+      if (!notice.agentId && d?.source === 'browser') {
+        if (typeof d.title === 'string' && d.title) notice.title = d.title;
+        else if (!notice.title) notice.title = '网页会话提问';
+        if (typeof d.id === 'string' && d.id) {
+          notice.requestId ??= d.id;
+          notice.permissionId ??= d.id;
+        }
+      }
       const agent = notice.agentId ? engine.state.agents?.[notice.agentId] : undefined;
       const parent = agent?.parentAgentId ? engine.state.agents?.[agent.parentAgentId] : undefined;
       const serverId = (client as { getLastServerInfoMessage?: () => { serverId?: string } | null }).getLastServerInfoMessage?.()?.serverId ?? null;
@@ -158,7 +166,6 @@ export class EscalationRuntime {
         }),
       };
     };
-    this.enrichNoticeFn = enrichNotice;
 
     const rawSend = createSender({
       audit,
@@ -172,6 +179,10 @@ export class EscalationRuntime {
     const send = async (notice: Notice) => {
       enrichNotice(notice);
       await rawSend(notice);
+      const d = notice.data as { source?: string; id?: string; fingerprint?: string } | null;
+      if (notice.event === 'asked' && !notice.agentId && d?.source === 'browser' && d.id && d.fingerprint) {
+        engine.state.seen[`browser:${d.id}:${d.fingerprint}`] = Date.now();
+      }
     };
     const engine = new Engine(config, state, next => saveState(this.statePath, next), send, async (id, request) => {
       if (!id) return this.openExternal.has(request);
@@ -376,9 +387,22 @@ export class EscalationRuntime {
   private async enqueueExternalInEngine(question: Question) {
     const engine = this.engine;
     if (!engine || question.source !== 'browser' || question.delegatedTo) return;
-    const key = `browser:${question.id}:${question.fingerprint}`;
-    if (engine.state.seen[key] !== undefined || engine.state.outbox.some(item => item.notice.key === key)) return;
+    const browserKey = `browser:${question.id}:${question.fingerprint}`;
+    const pendingKey = JSON.stringify(['', question.id]);
+    const askedKey = `asked:${pendingKey}`;
+    if (
+      engine.state.seen[browserKey] !== undefined ||
+      engine.state.outbox.some(item => item.notice.key === askedKey && (item.notice.data as { fingerprint?: string } | null)?.fingerprint === question.fingerprint)
+    ) {
+      return;
+    }
+    const existingPending = engine.state.pending[pendingKey];
+    if (existingPending && (existingPending.data as { fingerprint?: string } | null)?.fingerprint === question.fingerprint) {
+      return;
+    }
+    delete engine.state.seen[askedKey];
     delete engine.state.seen[`permission:${question.id}`];
+    delete engine.state.pending[pendingKey];
     const data = {
       kind: 'question',
       name: 'AskUserQuestion',
@@ -392,22 +416,16 @@ export class EscalationRuntime {
       input: { questions: question.prompts },
     };
     const firstSeen = Date.parse(question.at) || Date.now();
-    await engine.enqueue('asked', '', data, key, undefined, undefined, Date.now(), null, firstSeen);
-    const job = engine.state.outbox.find(item => item.notice.key === key);
-    if (job) {
-      job.notice.title = question.title || '网页会话提问';
-      job.notice.requestId = question.id;
-      job.notice.permissionId = question.id;
-      this.enrichNoticeFn?.(job.notice);
-      await saveState(this.statePath, engine.state);
-    }
+    await engine.asked('', question.id, data, firstSeen);
   }
 
-  /** 将非委托的网页提问（source === 'browser' 且无 delegatedTo）送入升级通道。 */
+  /** 将非委托的网页提问（source === 'browser' 且无 delegatedTo）送入升级通道，按与原生提问相同的待答与时段规则处理。 */
   enqueueExternal(question: Question): void {
     if (this.stopped || question.source !== 'browser' || question.delegatedTo) return;
+    const existing = this.openExternal.get(question.id);
     const snapshot = structuredClone(question);
     this.openExternal.set(snapshot.id, snapshot);
+    if (existing && existing.fingerprint === snapshot.fingerprint) return;
     const engine = this.engine;
     if (!engine) return;
     void engine.serial(async () => {
@@ -416,17 +434,32 @@ export class EscalationRuntime {
     }).catch(error => this.log(`网页提问升级入队失败：${summarizeError(error)}`));
   }
 
-  /** 网页提问结束或被关联到云端原生提问时，结束对应的升级记录。 */
+  /** 网页提问结束或被关联到云端原生提问时，结束对应的升级记录（仅在未结束状态转为结束时落盘）。 */
   closeExternal(questionId: string): void {
-    this.openExternal.delete(questionId);
-    if (this.reconciler) {
-      void this.reconciler.closeRequest('', questionId).catch(() => {});
-    } else {
-      this.records.closeRequest('', questionId, 'resolved');
+    const hadOpen = this.openExternal.delete(questionId);
+    const hasRecordOpen = this.records.pending().some(r => r.agentId === '' && r.requests?.some(req => req.requestId === questionId && !req.done));
+    if (hasRecordOpen) {
+      if (this.reconciler) {
+        void this.reconciler.closeRequest('', questionId).catch(() => {});
+      } else {
+        this.records.closeRequest('', questionId, 'resolved');
+      }
     }
     const engine = this.engine;
     if (!engine) return;
+    const pendingKey = JSON.stringify(['', questionId]);
+    const hasEngineState = Boolean(
+      engine.state.pending[pendingKey] ||
+      engine.state.outbox.some(x => x.notice.agentId === '' && x.notice.requestId === questionId && x.notice.event === 'asked'),
+    );
+    if (!hadOpen && !hasEngineState) return;
     void engine.serial(async () => {
+      if (
+        !engine.state.pending[pendingKey] &&
+        !engine.state.outbox.some(x => x.notice.agentId === '' && x.notice.requestId === questionId && x.notice.event === 'asked')
+      ) {
+        return;
+      }
       await engine.resolved('', questionId, undefined, false);
     }).catch(() => {});
   }

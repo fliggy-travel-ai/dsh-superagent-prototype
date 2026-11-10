@@ -36,6 +36,7 @@ const TYPE_ORDER: Record<TodoType, number> = {
   esc: 2,
   web: 3,
   stall: 4,
+  read: 5,
 };
 
 const NATIVE_QUESTION_TEXT_MAX_LEN = 120;
@@ -115,7 +116,13 @@ export class TodoRuntime {
     const startedAt = this.now();
     const version = currentVersion;
     const promise = (async () => {
-      const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
+      const parsed = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
+      // 丢弃旧版远端主机发来的已废弃代答未读条目与离线代答日志，保留其余有效条目。
+      const remote: TodoLocalSnapshot = {
+        ...parsed,
+        items: parsed.items.filter(item => item.type !== 'read' && item.label !== '代答未读'),
+        logs: parsed.logs.filter(log => log.kind !== 'auto-answer' && log.label !== '离线代答'),
+      };
       if ((this.remoteVersion.get(hostId) ?? 0) === version) {
         this.remoteCache.set(hostId, { at: startedAt, expired: false, snapshot: remote });
       }
@@ -403,11 +410,13 @@ export class TodoRuntime {
     const mergeRemoteSnapshot = (host: { id: string; name: string; online: boolean }, remote: TodoLocalSnapshot) => {
       if (remote.hostId === local.hostId) return;
       for (const item of remote.items) {
+        if (item.type === 'read' || item.label === '代答未读') continue;
         if (seenItemIds.has(item.id)) continue;
         seenItemIds.add(item.id);
         items.push(item);
       }
       for (const log of remote.logs) {
+        if (log.kind === 'auto-answer' || log.label === '离线代答') continue;
         if (seenLogIds.has(log.id)) continue;
         seenLogIds.add(log.id);
         logs.push(log);

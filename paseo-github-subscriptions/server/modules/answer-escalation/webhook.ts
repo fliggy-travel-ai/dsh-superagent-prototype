@@ -81,6 +81,9 @@ export function buildAskedExtra(notice: Notice, context?: AskedExtraContext): Re
           ...(d.instanceId !== undefined ? { instanceId: d.instanceId } : {}),
           ...(d.sessionId !== undefined ? { sessionId: d.sessionId } : {}),
           ...(d.url !== undefined ? { url: d.url } : {}),
+          ...(typeof d.id === 'string' && typeof d.fingerprint === 'string'
+            ? { correlationKey: `browser:${d.id}:${d.fingerprint}` }
+            : {}),
         }
       : {}),
   };
@@ -89,6 +92,10 @@ export function buildAskedExtra(notice: Notice, context?: AskedExtraContext): Re
 export function webhookPayload(notice: Notice): Record<string, unknown> {
   const { target, requestId, key, extra, ...event } = notice;
   const askedDefaults = notice.event === 'asked' ? buildAskedExtra(notice) : undefined;
+  const correlationKey =
+    (typeof extra?.correlationKey === 'string' ? extra.correlationKey : undefined) ??
+    (typeof askedDefaults?.correlationKey === 'string' ? askedDefaults.correlationKey : undefined) ??
+    key;
   return {
     schemaVersion: 1,
     source: 'paseo-event-notifications',
@@ -97,7 +104,7 @@ export function webhookPayload(notice: Notice): Record<string, unknown> {
     ...(extra ?? {}),
     agentId: notice.agentId || null,
     paseo_agent_id: notice.agentId || null,
-    correlationKey: key,
+    correlationKey,
     ...(notice.events ? { events: notice.events.map(webhookPayload) } : {}),
   };
 }

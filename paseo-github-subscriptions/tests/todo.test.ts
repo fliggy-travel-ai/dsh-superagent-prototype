@@ -1561,3 +1561,56 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   assert.equal(afterNewRead.items.length, 5, '旧版本在途读取应被丢弃，新读取完成后已处理待办应消失');
   runtime['port'].remoteLocal = origRemoteLocal;
 });
+
+test('远端旧版待办含 read/代答未读 与 auto-answer/离线代答 时仍能解析其余有效条目，旧条目自动丢弃', async () => {
+  const { port } = makeFixture();
+  const baseRemote = await port.remoteLocal('srv-book');
+  port.remoteLocal = async hostId => {
+    const snap = await (hostId === 'srv-book' ? Promise.resolve(baseRemote) : Promise.reject(new Error('unknown')));
+    return {
+      ...snap,
+      items: [
+        ...snap.items,
+        {
+          id: 'read:srv-book:legacy-q-1:fp-1',
+          type: 'read' as const,
+          label: '代答未读' as const,
+          hostId: 'srv-book',
+          hostName: 'MacBook',
+          sourceLabel: 'Paseo · MacBook',
+          sessionTitle: '旧版自动代答会话',
+          at: '2026-11-10T09:50:00.000Z',
+          ageText: '5 分钟前已代答',
+          text: '旧版已代答未读条目',
+          readReceipt: {
+            questionId: 'legacy-q-1',
+            fingerprint: 'fp-1',
+          },
+        },
+      ],
+      logs: [
+        ...snap.logs,
+        {
+          id: 'auto-answer:srv-book:legacy-q-1:fp-1',
+          at: '2026-11-10T09:50:00.000Z',
+          kind: 'auto-answer' as const,
+          label: '离线代答' as const,
+          hostId: 'srv-book',
+          hostName: 'MacBook',
+          detail: '旧版自动代答日志',
+        },
+      ],
+    };
+  };
+
+  const runtime = new TodoRuntime(port);
+  const merged = await runtime.list();
+  assert.equal(merged.warning, null, '远端快照含旧版枚举值时不应整包拒收报错');
+  const bookStatus = merged.hosts.find(h => h.hostId === 'srv-book');
+  assert.equal(bookStatus?.responded, true);
+  assert.equal(bookStatus?.error, null);
+  assert.ok(merged.items.some(i => i.hostId === 'srv-book'), '远端其余有效待办条目应正常保留');
+  assert.equal(merged.items.some(i => i.type === 'read' || i.label === '代答未读'), false, '远端旧版 read 条目应被丢弃');
+  assert.ok(merged.logs.some(l => l.hostId === 'srv-book'), '远端其余有效日志应正常保留');
+  assert.equal(merged.logs.some(l => l.kind === 'auto-answer' || l.label === '离线代答'), false, '远端旧版 auto-answer 日志应被丢弃');
+});

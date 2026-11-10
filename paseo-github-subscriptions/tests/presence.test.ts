@@ -174,7 +174,7 @@ test('网页点击提交仍保留，只有完整读取同一会话且问题消�
   } finally { await setup.close(); }
 });
 
-test('独立网页提问通过 enqueueExternal 接入升级通道，问题结束或转交原生提问时调用 closeExternal', async () => {
+test('独立网页提问通过 enqueueExternal 接入升级通道，问题结束或转交原生提问时仅在状态转变时调用一次 closeExternal', async () => {
   const enqueued: Question[] = [];
   const closed: string[] = [];
   const setup = await fixture({
@@ -188,7 +188,14 @@ test('独立网页提问通过 enqueueExternal 接入升级通道，问题结束
     assert.equal(enqueued[0]!.source, 'browser');
     assert.equal(closed.length, 0);
 
-    // 同一网页提问被完整扫描确认消失后，触发 closeExternal
+    // 同一网页提问持续存在且 fingerprint 不变时，后续同步不重复调用 enqueueExternal 或 closeExternal
+    await setup.runtime.browserSync('browser-one', [webpage()], [], sessions, ['session_one']);
+    assert.equal(enqueued.length, 1);
+    assert.equal(closed.length, 0);
+
+    // 同一网页提问被完整扫描确认消失后，触发一次 closeExternal；再次同步不再重复调用
+    await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_one']);
+    assert.deepEqual(closed, [enqueued[0]!.id]);
     await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_one']);
     assert.deepEqual(closed, [enqueued[0]!.id]);
 

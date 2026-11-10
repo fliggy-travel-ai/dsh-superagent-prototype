@@ -140,7 +140,7 @@ test("保存 webhook 失败时只抛通用提示，不带地址、鉴权头或�
   await assert.rejects(storeWebhookCredentials(undefined, { url: SECRET_URL, auth: SECRET_AUTH }, async () => {}), /Keychain/);
 });
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAskedExtra } from "../server/modules/answer-escalation/webhook.ts";
@@ -344,7 +344,7 @@ test("EscalationRuntime：独立网页提问 enqueueExternal 与 closeExternal �
     };
 
     const fakeRoles = {
-      read: async () => ({ pinnedIds: new Set(["ws-pinned"]), activeIds: new Set(["ws-pinned"]) }),
+      read: async () => ({ pinned: new Set(["ws-pinned"]), archived: new Set<string>() }),
     };
 
     const runtimeSettings = {
@@ -434,10 +434,57 @@ test("EscalationRuntime：独立网页提问 enqueueExternal 与 closeExternal �
       const snapBefore = await runtime.snapshot();
       assert.equal(snapBefore.pendingEvents.length, 1);
       assert.equal(snapBefore.pendingEvents[0]!.agentId, "");
+      assert.equal(extPayload.correlationKey, "browser:browser:q-ext-1:fp-ext-1");
       runtime.closeExternal("browser:q-ext-1");
+      await new Promise((r) => setTimeout(r, 30));
       const snapAfter = await runtime.snapshot();
       assert.equal(snapAfter.pendingEvents.length, 0, "closeExternal 应结束对应的升级待办记录");
       assert.equal(snapAfter.recentClosures?.[0]?.reason, "提问已回答或已取消");
+
+      // 已结束的外部提问重复调用 closeExternal 时不再重复写 state.json
+      const stateStat1 = await stat(join(dir, "state.json"));
+      await new Promise((r) => setTimeout(r, 30));
+      runtime.closeExternal("browser:q-ext-1");
+      runtime.closeExternal("browser:never-opened");
+      await new Promise((r) => setTimeout(r, 30));
+      const stateStat2 = await stat(join(dir, "state.json"));
+      assert.equal(stateStat2.mtimeMs, stateStat1.mtimeMs, "重复调用 closeExternal 不应重写 state.json");
+
+      // 3. 验证网页提问同样遵循时段规则：非立即时段且 delayMinutes > 0 时先入 pending 等待，不立即发送
+      runtimeSettings.immediate = [];
+      runtimeSettings.delayMinutes = 30;
+      runtime.enqueueExternal({
+        id: "browser:q-ext-2",
+        sessionId: "sess_ext_2",
+        instanceId: "env-27",
+        fingerprint: "fp-ext-2",
+        source: "browser",
+        title: "网页延迟时段会话",
+        url: "https://claude.ai/code/session_sess_ext_2",
+        at: new Date().toISOString(),
+        state: "pending",
+        reason: "等待回答",
+        prompts: [
+          {
+            question: "非立即时段的网页提问是否先等待？",
+            header: "时段",
+            multiSelect: false,
+            allowOther: true,
+            options: [{ label: "是", description: "", recommended: true }],
+          },
+        ],
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(receivedPayloads.length, 1, "时段外且未满 delayMinutes 时网页提问不应立即发送");
+
+      // 切入立即时段后，等待中的网页提问在下一次 tick 立即升级发出
+      runtimeSettings.immediate = [{ days: "daily", from: "00:00", to: "23:59" }];
+      runtimeSettings.delayMinutes = 0;
+      for (let i = 0; i < 60 && receivedPayloads.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      assert.equal(receivedPayloads.length, 2, "进入立即时段后待答网页提问应升级发送");
+      assert.equal(receivedPayloads[1]!.requestId, "browser:q-ext-2");
     } finally {
       await runtime.stop();
     }

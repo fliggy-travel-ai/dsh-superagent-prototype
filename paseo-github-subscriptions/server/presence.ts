@@ -457,7 +457,7 @@ export class PresenceRuntime {
           const match = this.findMatchingCloudNativeId(question, next.questions);
           if (match) {
             question.delegatedTo = match;
-            newlyDelegatedBrowserIds.push(question.id);
+            if (question.state !== 'resolved') newlyDelegatedBrowserIds.push(question.id);
           }
         }
         if (question.source === 'browser' && question.state === 'submitted' && Date.now() - Date.parse(question.at) > 30_000) { question.state = 'unknown'; question.reason = '网页未确认提交结果，请在原网页检查'; }
@@ -693,6 +693,9 @@ export class PresenceRuntime {
     for (const question of questions) {
       const session = sessions.find(session => session.sessionId === question.sessionId); if (!session) continue;
       const id = browserKey(instanceId, question); this.browser.set(id, { question, seen: Date.now() });
+      const prev = this.state.questions.find(item => item.id === id);
+      const prevOpenExternal = Boolean(prev && prev.state !== 'resolved' && !prev.delegatedTo);
+      const prevSamePending = Boolean(prev && prev.state === 'pending' && prev.fingerprint === question.fingerprint && !prev.delegatedTo);
       const delegatedTo = this.findMatchingCloudNativeId(question);
       await this.upsert({
         ...question, id, instanceId, source: 'browser', title: session.title, url: session.url,
@@ -701,8 +704,8 @@ export class PresenceRuntime {
       });
       const stored = this.state.questions.find(item => item.id === id);
       if (stored?.delegatedTo) {
-        this.port.closeExternal?.(id);
-      } else if (stored && stored.state === 'pending') {
+        if (prevOpenExternal) this.port.closeExternal?.(id);
+      } else if (stored && stored.state === 'pending' && !prevSamePending) {
         this.port.enqueueExternal?.(stored);
       }
     }
@@ -717,9 +720,10 @@ export class PresenceRuntime {
       }
       const observed = observedSessionIds.includes(question.sessionId) && sessions.some(session => session.sessionId === question.sessionId);
       if (observed && !current.has(question.id) && question.state !== 'resolved') {
+        const wasExternal = !question.delegatedTo;
         question.reason = question.state === 'unknown' ? '网页已结束此提问，回答是否生效未确认' : '网页已结束此提问';
         question.state = 'resolved';
-        closedExternalIds.push(question.id);
+        if (wasExternal) closedExternalIds.push(question.id);
       }
     }
     for (const question of next.questions) {
