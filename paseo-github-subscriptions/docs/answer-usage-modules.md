@@ -93,3 +93,5 @@
 `capacity.snapshot` 返回各账号的实时额度、档次、置顶工作区负载和可承接数。仅使用十分钟内的可用额度报告做决策；档次由实时 `planLabel` 判断，`capacity.accounts` 的档次配置用于核对。预热账号在 `capacity.warmup` 中列出。五小时额度用尽或周额度不超过 5% 时，符合条件的主会话可迁移到有余量的 Claude 账号。点名账号的会话设置 `dsh.lb=manual`，耗尽时发例外事件。
 
 余量变化至少间隔五分钟通知总控，每六小时发送一次心跳。收尾、迁移及异常事件使用现有升级通知 webhook。影子模式发送 `main_migration_planned`。迁移失败会保留原会话，恢复自动继续设置并发出异常；周额度迁移回退时通知原会话继续工作。中途退出、归档结果无法确认或回退不完整时，持久标记为待审并停止再次迁移，需人工核查。真实 daemon 联调须核对收尾结果、逐账号容量和影子迁移记录。
+
+人工核查待审迁移后，可调用 `capacity.clear-review {agentId}`。该操作将会话的 `dsh.migration-state` 改为 `cleared:<时间>`，将 `dsh.migration-lease` 改为 `released:<时间>`，读回两个标签，再删除并读回 `capacity/migrations-state.json` 中该会话的记录。返回值包含记录中的自动继续原值；解除待审不会改变当前自动继续设置。调用前应核查原会话、新会话及子会话的实际状态。

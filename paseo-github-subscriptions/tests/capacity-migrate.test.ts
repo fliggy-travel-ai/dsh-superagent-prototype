@@ -10,9 +10,9 @@ function fixture() {
   const calls: string[] = []; let resume = true;
   const port: MigrationPort = {
     read: async id => agents.get(id) ?? null, update: async (id, labels) => { calls.push(`update:${id}`); Object.assign(agents.get(id)!.labels, labels); },
-    journal: { begin: async () => {}, saveResume: async () => {}, review: async () => {}, finish: async () => {} }, continueWork: async () => { calls.push('continue'); },
+    journal: { begin: async () => {}, markStarted: async () => {}, saveResume: async () => {}, review: async () => {}, finish: async () => {} }, continueWork: async () => { calls.push('continue'); },
     delay: async () => {}, autoResume: async () => resume, setAutoResume: async (_, value) => { resume = value; calls.push(`resume:${value}`); },
-    stop: async (_agent, reason, mark) => { if (reason === 'weekly') mark(); return true; }, create: async (_, provider) => { calls.push(`create:${provider}`); agents.set('new', { ...agent, id: 'new', labels: { role: 'main', need: '1' } }); return 'new'; },
+    stop: async (_agent, reason, mark) => { if (reason === 'weekly') mark(); return true; }, create: async (_, provider, mark) => { mark(); calls.push(`create:${provider}`); agents.set('new', { ...agent, id: 'new', labels: { role: 'main', need: '1' } }); return 'new'; },
     finalize: async () => true, verify: async () => 'ok', children: async () => ['child'], serverId: () => 'server',
     archive: async id => { calls.push(`archive:${id}`); }, audit: async () => {}, notify: async event => { calls.push(event); },
   };
@@ -28,7 +28,7 @@ test('迁移先改挂子会话，再归档原会话', async () => {
 });
 test('迁移中每步失败时保留原会话并恢复自动继续', async () => {
   for (const step of ['stop', 'create', 'finalize', 'verify', 'children'] as const) {
-    const f = fixture(); (f.port[step] as unknown) = async () => { throw Error('failure'); };
+    const f = fixture(); (f.port[step] as unknown) = async (...args: unknown[]) => { if (step === 'create') (args[2] as () => void)(); throw Error('failure'); };
     assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), step === 'create' ? 'create_unknown' : 'operation_failed');
     assert.equal(f.calls.includes('archive:old'), false); assert.equal(f.resume(), true); assert.ok(f.calls.includes('lb_exception'));
   }
@@ -57,7 +57,7 @@ test('限额首条输出可尝试第二个目标', async () => {
 });
 
 test('周额度迁移失败后通知原会话继续工作，保留原自动继续值', async () => {
-  const f = fixture(); f.port.create = async () => { throw Error('failure'); };
+  const f = fixture(); f.port.create = async (_a, _p, mark) => { mark(); throw Error('failure'); };
   const source = account('claude-1', 50); source.weekly!.remainingPct = 5;
   assert.equal(await migrate(f.port, f.agent, [source, account('claude-2', 100)], 'live', now), 'create_unknown');
   assert.equal(f.resume(), true); assert.ok(f.calls.includes('continue'));
@@ -79,7 +79,7 @@ test('归档结果未知及回退不完整时保留待审记录和租约', async
     assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), scenario);
     assert.equal(marked, scenario); assert.equal(finished, false);
     assert.equal(f.agent.labels['dsh.migration-state'], 'needs_review');
-    assert.ok(f.agent.labels['dsh.migration-lease']?.startsWith('plugin:'));
+    assert.ok(f.agent.labels['dsh.migration-lease']?.startsWith(scenario === 'archive_unknown' ? 'released:' : 'plugin:'));
     assert.ok(f.calls.includes('lb_exception'));
   }
 });
@@ -91,4 +91,48 @@ test('关闭自动继续前已持久保存原值，失败时按保存值恢复',
   f.port.stop = async () => false;
   assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'stop_unconfirmed');
   assert.equal(f.resume(), true);
+});
+test('锁写入后停止：可读回时释放锁，不可读回时保留未开始记录', async () => {
+  for (const readable of [true, false]) {
+    const f = fixture(); let finished = false; let began = false; let review = false;
+    f.port.journal.begin = async () => { began = true; };
+    f.port.journal.finish = async () => { finished = true; };
+    f.port.journal.review = async () => { review = true; };
+    f.port.delay = async () => { throw Error('stopped'); };
+    if (!readable) f.port.read = async () => { throw Error('offline'); };
+    const outcome = await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now);
+    assert.equal(began, true); assert.equal(review, false);
+    assert.equal(outcome, readable ? 'stopped' : 'lock_unverified');
+    assert.equal(finished, readable);
+    assert.ok(f.agent.labels['dsh.migration-lease']?.startsWith(readable ? 'released:' : 'plugin:'));
+  }
+});
+test('创建前失败安全回退；请求发出后的失败保留待审', async () => {
+  for (const issued of [false, true]) {
+    const f = fixture(); let reviewed = false;
+    f.port.journal.review = async () => { reviewed = true; };
+    f.port.create = async (_agent, _provider, mark) => { if (issued) mark(); throw Error('source_unavailable'); };
+    const outcome = await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now);
+    assert.equal(outcome, issued ? 'create_unknown' : 'create_failed'); assert.equal(reviewed, issued);
+    assert.equal(f.calls.includes('archive:old'), false); assert.equal(f.resume(), true);
+  }
+});
+test('成功迁移在归档原会话前释放锁', async () => {
+  const f = fixture(); const archive = f.port.archive;
+  f.port.archive = async id => { if (id === 'old') assert.ok(f.agent.labels['dsh.migration-lease']?.startsWith('released:')); await archive(id); };
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'migrated');
+});
+test('待审异常包含原自动继续值和失败原因', async () => {
+  const f = fixture(); let detail: Record<string, unknown> | undefined;
+  f.port.notify = async (event, data) => { if (event === 'lb_exception') detail = data; };
+  f.port.create = async (_agent, _provider, mark) => { mark(); throw Error('network'); };
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'create_unknown');
+  assert.equal(detail?.reason, 'create_unknown'); assert.equal(detail?.autoResume, true); assert.equal(detail?.trigger, 'five_hour');
+});
+test('归档前释放锁失败时原会话不归档并转待审', async () => {
+  const f = fixture(); const update = f.port.update;
+  f.port.update = async (id, labels) => { if (labels['dsh.migration-lease']?.startsWith('released:')) throw Error('offline'); await update(id, labels); };
+  let reason = ''; f.port.journal.review = async (_id, value) => { reason = value; };
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'lease_release_failed');
+  assert.equal(reason, 'lease_release_failed'); assert.equal(f.calls.includes('archive:old'), false);
 });

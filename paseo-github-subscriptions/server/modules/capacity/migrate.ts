@@ -7,11 +7,11 @@ export interface MigrationPort {
   read(id: string): Promise<MigrationAgent | null>;
   update(id: string, labels: Record<string, string>): Promise<void>;
   continueWork(id: string): Promise<void>;
-  journal: { begin(id: string): Promise<void>; saveResume(id: string, value: boolean): Promise<void>; review(id: string, reason: string): Promise<void>; finish(id: string): Promise<void> };
+  journal: { begin(id: string, lease: string, trigger: string): Promise<void>; markStarted(id: string): Promise<void>; saveResume(id: string, value: boolean): Promise<void>; review(id: string, reason: string): Promise<void>; finish(id: string): Promise<void> };
   stop(agent: MigrationAgent, reason: 'five_hour' | 'weekly', markWeeklyStop: () => void): Promise<boolean>;
   autoResume(id: string): Promise<boolean>;
   setAutoResume(id: string, enabled: boolean): Promise<void>;
-  create(agent: MigrationAgent, provider: string): Promise<string>;
+  create(agent: MigrationAgent, provider: string, markRequest: () => void): Promise<string>;
   finalize(id: string): Promise<boolean>;
   verify(id: string): Promise<'ok' | 'quota' | 'unknown'>;
   children(id: string): Promise<string[]>;
@@ -43,7 +43,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   if (agent.labels['dsh.lb'] === 'manual' || !candidates.length) {
     const why = agent.labels['dsh.lb'] === 'manual' ? 'manual' : 'no_target';
     await port.audit({ ...result, result: why, shadow: mode === 'shadow' });
-    await port.notify('lb_exception', { ...result, reason: why, shadow: mode === 'shadow' }); return why;
+    await port.notify('lb_exception', { ...result, reason: why, trigger: reason, autoResume: null, shadow: mode === 'shadow' }); return why;
   }
   if (mode === 'shadow') {
     await port.audit({ ...result, result: 'shadow', toProvider: candidates[0]!.provider });
@@ -51,28 +51,40 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   }
   if (leaseActive(agent.labels['dsh.migration-lease'], now)) return 'locked';
   const lease = `plugin:${now + 30 * 60_000}:${randomUUID()}`;
-  let acquired = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false; let review = false; let begun = false; let weeklyStopIssued = false; let creating = false;
+  let acquired = false; let leaseAttempted = false; let lockReleased = false; let started = false; let releaseUncertain = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false; let review = false; let begun = false; let weeklyStopIssued = false; let creating = false; let inCreate = false;
   const moved: string[] = [];
   const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
     const started = Date.now();
     try { const value = await action(); await port.audit({ ...result, step: name, ok: true, elapsedMs: Date.now() - started }).catch(() => {}); return value; }
     catch (error) { await port.audit({ ...result, step: name, ok: false, elapsedMs: Date.now() - started }).catch(() => {}); throw error; }
   };
+  const releaseOwn = async () => {
+    const current = await port.read(agent.id);
+    if (!current) throw Error('lease_unverified');
+    if (current.labels['dsh.migration-lease'] !== lease) throw Error('lease_conflict');
+    const released = `released:${Date.now()}`;
+    await port.update(agent.id, { 'dsh.migration-lease': released });
+    const confirmed = await port.read(agent.id);
+    if (!confirmed || confirmed.labels['dsh.migration-lease'] !== released) throw Error('lease_unverified');
+    lockReleased = true;
+  };
   try {
-    await port.journal.begin(agent.id); begun = true;
+    await port.journal.begin(agent.id, lease, reason); begun = true;
+    leaseAttempted = true;
     await step('lease', () => port.update(agent.id, { 'dsh.migration-lease': lease }));
     await port.delay(2000);
     if ((await port.read(agent.id))?.labels['dsh.migration-lease'] !== lease) throw Error('lease_conflict');
     acquired = true;
     oldResume = await step('read_auto_resume', () => port.autoResume(agent.id));
     await port.journal.saveResume(agent.id, oldResume);
+    await port.journal.markStarted(agent.id); started = true;
     await step('disable_auto_resume', () => port.setAutoResume(agent.id, false));
     if (!await step('stop', () => port.stop(agent, reason, () => { weeklyStopIssued = true; }))) throw Error('stop_unconfirmed');
     let chosen: Account | undefined;
     for (const candidate of candidates) {
-      creating = true;
-      newId = await step('create', () => port.create(agent, candidate.provider));
-      creating = false;
+      creating = false; inCreate = true;
+      newId = await step('create', () => port.create(agent, candidate.provider, () => { creating = true; }));
+      creating = false; inCreate = false;
       if (!await step('finalize', () => port.finalize(newId!))) throw Error('finalize_failed');
       const verification = await step('verify', () => port.verify(newId!));
       if (verification === 'ok') { chosen = candidate; break; }
@@ -86,6 +98,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
       const child = await port.read(id);
       if (child?.labels['paseo.parent-agent-id'] !== newId || child.labels['paseo.parent-server-id'] !== serverId) throw Error('child_readback_failed');
     }
+    try { await step('release_lease', releaseOwn); } catch { releaseUncertain = true; throw Error('lease_release_failed'); }
     try { await step('archive_original', () => port.archive(agent.id)); archived = true; }
     catch {
       const original = await port.read(agent.id).catch(() => null);
@@ -111,17 +124,32 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
       if (oldResume !== undefined) await port.setAutoResume(agent.id, oldResume).catch(() => { rollbackIncomplete = true; });
       if (weeklyStopIssued) await port.continueWork(agent.id).catch(() => { rollbackIncomplete = true; });
     }
-    const known = ['lease_conflict', 'stop_unconfirmed', 'finalize_failed', 'output_unknown', 'no_healthy_target', 'child_readback_failed', 'resume_unavailable', 'source_unavailable', 'server_unavailable', 'list_incomplete', 'stopped', 'archive_unknown', 'archive_failed'];
-    const failure = rollbackIncomplete ? 'rollback_incomplete' : creating ? 'create_unknown' : error instanceof Error && known.includes(error.message) ? error.message : 'operation_failed';
-    review = archiveUncertain || rollbackIncomplete || creating;
+    const known = ['lease_conflict', 'stop_unconfirmed', 'finalize_failed', 'output_unknown', 'no_healthy_target', 'child_readback_failed', 'resume_unavailable', 'source_unavailable', 'server_unavailable', 'list_incomplete', 'stopped', 'archive_unknown', 'archive_failed', 'lease_release_failed'];
+    const failure = rollbackIncomplete ? 'rollback_incomplete' : creating ? 'create_unknown' : inCreate ? 'create_failed' : error instanceof Error && known.includes(error.message) ? error.message : 'operation_failed';
+    review = archiveUncertain || rollbackIncomplete || creating || releaseUncertain;
     if (review && begun) { await port.journal.review(agent.id, failure).catch(() => {}); await port.update(agent.id, { 'dsh.migration-state': 'needs_review' }).catch(() => {}); }
     await port.audit({ ...result, result: failure });
-    await port.notify('lb_exception', { ...result, reason: failure }); return failure;
+    await port.notify('lb_exception', { ...result, reason: failure, trigger: reason, autoResume: oldResume ?? null }); return failure;
   } finally {
     if (begun && !review) {
-      if (acquired) {
-        try { await port.update(agent.id, { 'dsh.migration-lease': `released:${Date.now()}` }); }
-        catch { review = true; await port.journal.review(agent.id, 'lease_release_failed').catch(() => {}); await port.update(agent.id, { 'dsh.migration-state': 'needs_review' }).catch(() => {}); await port.notify('lb_exception', { ...result, reason: 'lease_release_failed' }); }
+      if (!started && leaseAttempted && !lockReleased) {
+        try {
+          const current = await port.read(agent.id);
+          if (!current) throw Error('lease_unverified');
+          if (current.labels['dsh.migration-lease'] === lease) await releaseOwn();
+        } catch {
+          // 锁尚未确认，保留 locking 记录；恢复时只清理自己的锁。
+          await port.notify('lb_exception', { ...result, reason: 'lock_unverified', trigger: reason, autoResume: oldResume ?? null }).catch(() => {});
+          return 'lock_unverified';
+        }
+      } else if (started && acquired && !lockReleased) {
+        try { await releaseOwn(); }
+        catch {
+          review = true;
+          await port.journal.review(agent.id, 'lease_release_failed').catch(() => {});
+          await port.update(agent.id, { 'dsh.migration-state': 'needs_review' }).catch(() => {});
+          await port.notify('lb_exception', { ...result, reason: 'lease_release_failed', trigger: reason, autoResume: oldResume ?? null });
+        }
       }
       if (!review) await port.journal.finish(agent.id);
     }

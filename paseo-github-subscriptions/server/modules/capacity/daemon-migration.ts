@@ -5,12 +5,14 @@ import { issueOf } from '../dispatch-finalize/finalize.ts';
 import type { MigrationAgent, MigrationPort } from './migrate.ts';
 
 const quota = /(?:usage.?limit|quota (?:reached|exceeded)|hit your.{0,30}limit|payment required|billing (?:issue|error)|额度(?:不足|耗尽)|达到限额|需要付款)/i;
-const providerLimit = /^(?:you(?:'|’)ve hit your (?:session |usage |5.hour )?limit|usage_limit_reached)[.!]?$/i;
+const providerPrefix = /^(?:you(?:'|’)ve hit your|usage_limit_reached|payment required|billing (?:issue|error))/i;
+const shortLimit = /(?:you(?:'|’)ve hit your (?:(?:session|usage|5.hour) )?limit|(?:session|5.hour|usage) (?:limit|quota) (?:reached|exceeded)|usage_limit_reached|payment required|billing (?:issue|error)|额度(?:不足|耗尽)|达到限额|需要付款)/i;
 export function classifyOutput(items: Array<{ type: string; text?: string; message?: string }>): 'ok' | 'quota' | 'unknown' {
   for (const item of items) {
     if ((item.type === 'error' || item.type === 'notification') && quota.test(item.message ?? '')) return 'quota';
     if (item.type === 'assistant_message' && item.text?.trim()) {
-      if (providerLimit.test(item.text.trim())) return 'quota';
+      const text = item.text.trim();
+      if ((text.length <= 240 || providerPrefix.test(text)) && shortLimit.test(text)) return 'quota';
       return 'ok';
     }
   }
@@ -49,12 +51,13 @@ export function daemonMigrationPort(client: DaemonClient, templatePath: string |
       }
       return false;
     },
-    create: async (agent, provider) => {
+    create: async (agent, provider, markRequest) => {
       const current = await read(agent.id); if (!current || !agent.workspaceId || !agent.model) throw Error('source_unavailable');
       const handoff = handoffs.get(agent.id); if (!handoff) throw Error('source_unavailable');
       const template = templatePath ? await readFile(templatePath, 'utf8') : '请接续原会话的工作。先读需求单及全部评论，再运行 paseo logs 查看原会话最近 150 条记录，核对工作区现状后继续。遵守现行常设授权。';
       const prompt = `${template}\n\n需求单号：${issueOf(agent)}\n工作区：${agent.workspaceId}\n原会话：${agent.id}\n原会话最后一条用户消息：\n${handoff.lastUser}\n原会话待答请求：\n${JSON.stringify(handoff.pending)}\n`;
       const issueKey = agent.labels.need ? 'need' : 'issue';
+      markRequest();
       const created = await client.createAgent({ cwd: agent.cwd, workspaceId: agent.workspaceId, provider, model: agent.model, modeId: current.currentModeId || 'bypassPermissions', title: agent.title ?? undefined, labels: { [issueKey]: agent.labels[issueKey]!, role: 'main' }, initialPrompt: prompt });
       return created.id;
     },

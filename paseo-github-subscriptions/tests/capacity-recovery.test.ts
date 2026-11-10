@@ -13,23 +13,23 @@ test('重启恢复进行中记录与未释放锁，并保留自动继续原值',
   const dir = await mkdtemp(join(tmpdir(), 'migration-test-'));
   try {
     const path = join(dir, 'state.json'); const first = new MigrationJournal(path);
-    await first.begin('old'); await first.saveResume('old', true);
+    await first.begin('old', 'plugin:1:nonce', 'five_hour'); await first.saveResume('old', true); await first.markStarted('old');
     const journal = new MigrationJournal(path); await journal.load();
     const updates: string[] = []; const notices: string[] = [];
     const agent = { id: 'old', provider: 'claude-1', cwd: '/work', model: 'model', title: null, labels: { 'dsh.migration-lease': 'plugin:1:nonce' } };
     const stale = { ...agent, id: 'stale', labels: { 'dsh.migration-lease': 'plugin:1:nonce' } };
-    await recoverMigrations(journal, [agent, stale], async id => { updates.push(id); }, async (_, data) => { notices.push(String(data.oldAgentId)); }, true);
+    await recoverMigrations(journal, [agent, stale], async id => { updates.push(id); }, async (_, data) => { notices.push(String(data.oldAgentId)); }, true, async id => id === 'old' ? agent : stale);
     assert.deepEqual(updates.sort(), ['old', 'stale']); assert.deepEqual(notices.sort(), ['old', 'stale']);
     const reopened = new MigrationJournal(path); await reopened.load();
     assert.equal(reopened.get('old')?.state, 'needs_review'); assert.equal(reopened.get('old')?.autoResume, true);
-    assert.equal(reopened.get('stale')?.state, 'needs_review'); await assert.rejects(reopened.begin('old'));
+    assert.equal(reopened.get('stale')?.state, 'needs_review'); await assert.rejects(reopened.begin('old', 'lease', 'five_hour'));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('助手正文不按限额关键词判错', () => {
   assert.equal(classifyOutput([{ type: 'assistant_message', text: '正在检查额度和付款配置' }]), 'ok');
   assert.equal(classifyOutput([{ type: 'error', message: 'usage limit reached' }]), 'quota');
   assert.equal(classifyOutput([{ type: 'assistant_message', text: 'usage_limit_reached' }]), 'quota');
-  assert.equal(classifyOutput([{ type: 'assistant_message', text: '调查 usage_limit_reached 的原因' }]), 'ok');
+  assert.equal(classifyOutput([{ type: 'assistant_message', text: '调查 usage_limit_reached 的原因。'.repeat(25) }]), 'ok');
   assert.equal(classifyOutput([{ type: 'notification', message: '需要付款' }]), 'quota');
 });
 test('过期重置时间不触发五小时迁移，周额度仍独立触发', () => {
@@ -54,18 +54,66 @@ test('新会话沿用原会话当前模式，无模式时才用默认模式', as
     cancelAgent: async () => {},
     createAgent: async (input: { modeId: string }) => { modes.push(input.modeId); return { id: 'new' }; },
   };
-  const journal = { begin: async () => {}, saveResume: async () => {}, review: async () => {}, finish: async () => {} };
+  const journal = { begin: async () => {}, markStarted: async () => {}, saveResume: async () => {}, review: async () => {}, finish: async () => {} };
   const port = daemonMigrationPort(client as never, undefined, async () => {}, async () => {}, new AbortController().signal, journal);
   await port.stop(original, 'five_hour', () => {});
-  await port.create(original, 'claude-2'); mode = null;
-  await port.create(original, 'claude-2');
+  await port.create(original, 'claude-2', () => {}); mode = null;
+  await port.create(original, 'claude-2', () => {});
   assert.deepEqual(modes, ['plan', 'bypassPermissions']);
 });
 test('周额度回退发送继续工作消息', async () => {
   const { daemonMigrationPort } = await import('../server/modules/capacity/daemon-migration.ts');
   const messages: string[] = [];
   const client = { sendAgentMessage: async (_id: string, message: string) => { messages.push(message); } };
-  const journal = { begin: async () => {}, saveResume: async () => {}, review: async () => {}, finish: async () => {} };
+  const journal = { begin: async () => {}, markStarted: async () => {}, saveResume: async () => {}, review: async () => {}, finish: async () => {} };
   const port = daemonMigrationPort(client as never, undefined, async () => {}, async () => {}, new AbortController().signal, journal);
   await port.continueWork('old'); assert.deepEqual(messages, ['迁移已取消，请继续原工作。']);
+});
+test('真实限额及付款提示可识别，长篇普通正文不误判', () => {
+  assert.equal(classifyOutput([{ type: 'assistant_message', text: "You've hit your limit · resets 3pm (Asia/Shanghai)" }]), 'quota');
+  assert.equal(classifyOutput([{ type: 'assistant_message', text: 'Payment required. Please update billing.' }]), 'quota');
+  assert.equal(classifyOutput([{ type: 'assistant_message', text: '正常工作内容。'.repeat(40) + '需要付款' }]), 'ok');
+  assert.equal(classifyOutput([{ type: 'notification', message: 'Payment required' }]), 'quota');
+});
+test('未开始记录恢复只释放自己的锁，已归档会话不写标签', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'migration-lock-'));
+  try {
+    const journal = new MigrationJournal(join(dir, 'state.json'));
+    await journal.begin('old', 'plugin:1:nonce', 'five_hour');
+    const agent = { id: 'old', provider: 'claude-1', cwd: '/work', model: 'model', title: null, labels: { 'dsh.migration-lease': 'plugin:1:nonce' } };
+    const archived = { ...agent, id: 'archived', archivedAt: 'now', labels: { 'dsh.migration-lease': 'plugin:1:archived' } };
+    await journal.review('archived', 'archive_unknown');
+    const updates: string[] = []; const notices: any[] = [];
+    await recoverMigrations(journal, [agent, archived], async (id, labels) => { updates.push(id); Object.assign(agent.labels, labels); }, async (_event, data) => { notices.push(data); }, true, async id => id === 'old' ? agent : archived);
+    assert.deepEqual(updates, ['old']); assert.ok(agent.labels['dsh.migration-lease'].startsWith('released:'));
+    assert.equal(journal.get('old'), undefined); assert.equal(journal.get('archived')?.state, 'needs_review');
+    assert.equal(notices[0].autoResume, null); assert.equal(notices[0].reason, 'archive_unknown');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('解除待审读回标签并删除记录，失败时保留待审', async () => {
+  const { clearReview } = await import('../server/modules/capacity/recovery.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'migration-clear-'));
+  try {
+    const journal = new MigrationJournal(join(dir, 'state.json'));
+    await journal.begin('old', 'plugin:1:nonce', 'weekly'); await journal.saveResume('old', false); await journal.review('old', 'rollback_incomplete');
+    const agent = { id: 'old', provider: 'claude-1', cwd: '/work', model: 'model', title: null, labels: { 'dsh.migration-state': 'needs_review', 'dsh.migration-lease': 'plugin:1:nonce' } };
+    await assert.rejects(clearReview(journal, 'old', async () => agent, async () => {}), /读回失败/);
+    assert.equal(journal.get('old')?.state, 'needs_review');
+    const result = await clearReview(journal, 'old', async () => agent, async (_id, labels) => { Object.assign(agent.labels, labels); });
+    assert.deepEqual(result, { ok: true, autoResume: false }); assert.equal(journal.get('old'), undefined);
+    assert.ok(agent.labels['dsh.migration-state'].startsWith('cleared:')); assert.ok(agent.labels['dsh.migration-lease'].startsWith('released:'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('锁写入后读回失败：重启按未开始恢复，不标待审', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'migration-preflight-'));
+  try {
+    const journal = new MigrationJournal(join(dir, 'state.json'));
+    await journal.begin('old', 'plugin:1:nonce', 'weekly');
+    const restarted = new MigrationJournal(join(dir, 'state.json')); await restarted.load();
+    const agent = { id: 'old', provider: 'claude-1', cwd: '/work', model: 'model', title: null, labels: { 'dsh.migration-lease': 'plugin:1:nonce' } };
+    let notices = 0;
+    await recoverMigrations(restarted, [agent], async (_id, labels) => { Object.assign(agent.labels, labels); }, async () => { notices++; }, true, async () => agent);
+    assert.equal(restarted.get('old'), undefined); assert.equal(notices, 0);
+    assert.ok(agent.labels['dsh.migration-lease'].startsWith('released:')); assert.equal('dsh.migration-state' in agent.labels, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
