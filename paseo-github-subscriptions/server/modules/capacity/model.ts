@@ -1,7 +1,7 @@
 export type Tier = 'max' | 'pro';
 export interface Window { id?: string; remainingPct?: number | null; usedPct?: number | null; resetsAt?: string | null }
 export interface Report { id?: string; sourceId?: string; fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[]; details?: Array<{ id?: string; value?: unknown }> }; lastSuccessful?: { fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[] } } | null }
-export interface Input { provider: string; report?: Report; configuredTier?: Tier; warmup?: boolean; agents: Array<{ id: string; status: string }>; now: number; liveMaxAgeMinutes?: number; paceEnabled?: boolean }
+export interface Input { provider: string; report?: Report; configuredTier?: Tier; warmup?: boolean; agents: Array<{ id: string; status: string }>; now: number; liveMaxAgeMinutes?: number; paceEnabled?: boolean; excluded?: boolean }
 /**
  * 档位识别（大小写不敏感）：「Max 5x」或只写「max」按 Max；「Max 20x」等其他倍数需要确认；「Pro…」按 Pro。
  * 实时报告里套餐标签缺失或认不出时（如新加账号），按配置档位，没有配置就按 Pro 保守计（2 个会话）。
@@ -39,11 +39,11 @@ export function calculate(input: Input) {
     const elapsed = Math.max(0, Math.min(1, (now - (reset - 5 * 3600_000)) / (5 * 3600_000)));
     pace = Number.isFinite(reset) && elapsed > 0 ? (100 - fiveHour.remainingPct) / 100 / elapsed : (fiveHour.remainingPct < 100 ? Infinity : 0);
   }
-  let effectiveCap = eligible ? base : 0;
+  let effectiveCap = eligible && !input.excluded ? base : 0;
   if (eligible && (fiveHour.remainingPct <= 0 || weekly.remainingPct <= 5)) effectiveCap = 0;
-  else if (input.paceEnabled !== false && pace > 1) effectiveCap = Math.floor(base / pace);
+  else if (effectiveCap > 0 && input.paceEnabled !== false && pace > 1) effectiveCap = Math.floor(base / pace);
   const load = { total: input.agents.length, running: input.agents.filter(a => a.status === 'running').length, agentIds: input.agents.map(a => a.id) };
-  const reason = !live ? '额度非实时' : tierResult.reason ?? (!fiveHour || !weekly ? '额度窗口缺失' : null);
+  const reason = input.excluded ? '已排除：不能用于主会话' : !live ? '额度非实时' : tierResult.reason ?? (!fiveHour || !weekly ? '额度窗口缺失' : null);
   return { provider: input.provider, tier, baseCap, warmup: !!input.warmup, fiveHour, weekly, live, fetchedAt: report?.fetchedAt ?? null, load, pace: Number.isFinite(pace) ? pace : null, effectiveCap, canAdd: Math.max(0, effectiveCap - load.total), reason, active_sessions: report?.report?.details?.find(d => d.id === 'active_sessions')?.value ?? null };
 }
 export type Account = ReturnType<typeof calculate>;
