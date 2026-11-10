@@ -1,3 +1,7 @@
+import { join } from 'node:path';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createNotifier } from '../dispatch-finalize/notifier.ts';
+import { signature, shouldPublish, type PublicationState } from './publisher.ts';
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client';
 import { capacitySnapshot } from '../../../shared/capacity.ts';
 import { discover } from '../../vendor/paseo-0.15.0/claude-usage-source/server/usage.ts';
@@ -39,6 +43,37 @@ export const capacityModule: Module<CapacityConfig> = {
   id: 'capacity.mainSessions', label: '主会话容量', defaultEnabled: false, appliesTo: isMainInstance,
   config: { section: 'capacity', spec: { schema: CapacitySchema, fallback: CAPACITY_DEFAULT } },
   register(context) {
-    context.server.handle(capacitySnapshot, async () => snapshot((await context.services.daemon.ready()).client, context.services.home, context.config));
+    const directory = join(context.stateDirectory, 'capacity');
+    const statePath = join(directory, 'publication.json');
+    let stopped = false;
+    let state: PublicationState = null;
+    let current: Promise<void> | null = null;
+    let notifier: Awaited<ReturnType<typeof createNotifier>> | null = null;
+    const readSnapshot = async () => {
+      const config = context.machine.section<{ sourceId: string }>('claudeAccounts');
+      return snapshot((await context.services.daemon.ready()).client, context.services.home, context.config, config.ok ? config.value.sourceId : 'claude-accounts');
+    };
+    context.server.handle(capacitySnapshot, readSnapshot);
+    const start = (async () => {
+      try { state = JSON.parse(await readFile(statePath, 'utf8')); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+      notifier = await createNotifier(context.machine, directory);
+      const publish = () => {
+        if (stopped || current) return;
+        current = (async () => {
+          const data = await readSnapshot(); const now = Date.now(); const next = signature(data.accounts);
+          if (!shouldPublish(state, next, now)) return;
+          await notifier!.send('capacity', data, `capacity:${next}:${Math.floor(now / 3600_000)}`);
+          state = { signature: next, sentAt: now };
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          await writeFile(`${statePath}.tmp`, JSON.stringify(state), { mode: 0o600 });
+          await rename(`${statePath}.tmp`, statePath);
+        })().catch(() => {}).finally(() => { current = null; });
+      };
+      publish();
+      const timer = setInterval(publish, 60_000); timer.unref?.();
+      return () => clearInterval(timer);
+    })();
+    void start.catch(error => context.fail(error));
+    return async () => { stopped = true; const stop = await start.catch(() => null); stop?.(); await current; notifier?.stop(); };
   },
 };

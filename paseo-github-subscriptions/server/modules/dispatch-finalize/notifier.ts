@@ -24,7 +24,7 @@ export async function createNotifier(machine: LoadedMachineConfig, directory: st
   const timer = setInterval(() => { void tick().catch(() => {}); }, 1000);
   timer.unref?.();
   return {
-    send: (event: EventName, data: unknown, key: string) => engine.serial(async () => { await engine.enqueue(event, '', data, key); await engine.tick(); }),
+    send: (event: EventName, data: unknown, key: string) => engine.serial(async () => { await engine.enqueue(event, '', data, key); const job = engine.state.outbox.find(item => item.notice.key === key); if (job) { job.notice.id = key; await saveState(path, engine.state); } await engine.tick(); }),
     stop: () => { clearInterval(timer); abort.abort(); },
   };
 }
