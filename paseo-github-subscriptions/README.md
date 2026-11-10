@@ -119,4 +119,6 @@ npm run test:daemon
 
 本机可使用 `node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/rpc.ts capacity.snapshot '{}'` 调用主实例。脚本只允许 `capacity.clear-review`、`dispatch.finalize` 和已登记的只读快照方法；输出隐藏主机地址和凭据字段。
 
+问答模式远程切换（总控只能用 paseo CLI 连 Mac mini 时）：仓库根目录 `paseo.json` 登记了 `presence-offline`、`presence-online`、`presence-auto`、`presence-status` 四个工作区脚本，调用部署目录的 `scripts/presence-mode.ts`，只改 `mode`，其余设置保持。命令：`paseo script start presence-offline --host <Mac mini> --workspace <Mac mini 上本仓库的工作区>`，再用 `paseo script ls --host <Mac mini> --workspace <同上> --json` 读该脚本的 `exitCode`：切换脚本 0 = 读回一致，1 = 失败；`presence-status` 20 = 判定在线，21 = 判定离线，22 = 未知。
+
 `cloudSession.offlineMinutes` 默认 120，最少 60。新云端程序每分钟发送空时间线作为联系信号。插件只对收到该信号并持久化标记的会话执行失联兜底：两小时没有联系时结束运行中轮次并撤下待答请求，提醒在网页核对。现有浏览器扩展没有可靠的归档或不存在信号，不把页面关闭或读取失败视为归档。可信云端调用方可用 `cloud-session.ended` 明确报告归档或不存在。新心跳需要更新云端程序；旧程序没有周期联系，未收到信号的会话保留原有存量请求对账规则，不会因失联超时结束轮次。Mac mini 自身停机或断网超过两小时后，恢复时可能将已标记会话按云端失联处理。
