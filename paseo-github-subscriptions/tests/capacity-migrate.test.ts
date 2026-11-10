@@ -155,3 +155,13 @@ test('锁写入前的记录失败也只发一条异常', async () => {
   assert.equal(notices.length, 1); assert.equal(notices[0]?.reason, 'operation_failed');
   assert.equal(f.agent.labels['dsh.migration-lease'], undefined);
 });
+test('1808 没有可接账号：不发异常，打开原会话自动继续，等原账号额度恢复', async () => {
+  const f = fixture(); let resume = false; const audits: Record<string, unknown>[] = [];
+  f.port.autoResume = async () => resume; f.port.setAutoResume = async (_, value) => { resume = value; f.calls.push(`resume:${value}`); };
+  f.port.audit = async entry => { audits.push(entry); };
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 10)], 'live', now), 'no_target');
+  assert.deepEqual(f.calls, ['resume:true']); assert.equal(resume, true);
+  assert.equal(audits[0]!.action, 'wait_for_reset'); assert.equal(audits[0]!.autoResume, true);
+  const shadow = fixture(); assert.equal(await migrate(shadow.port, shadow.agent, [account('claude-1', 0)], 'shadow', now), 'no_target');
+  assert.deepEqual(shadow.calls, [], '影子模式不改会话、不发异常');
+});

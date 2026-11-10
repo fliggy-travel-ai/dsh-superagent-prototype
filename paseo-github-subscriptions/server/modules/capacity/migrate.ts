@@ -40,10 +40,19 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   if (agent.labels['dsh.migration-state'] === 'needs_review') return 'needs_review';
   const candidates = targets(accounts, source.provider).slice(0, 2);
   const result = { oldAgentId: agent.id, fromProvider: source.provider, reason, needId: agent.labels.need || agent.labels.issue };
-  if (agent.labels['dsh.lb'] === 'manual' || !candidates.length) {
-    const why = agent.labels['dsh.lb'] === 'manual' ? 'manual' : 'no_target';
-    await port.audit({ ...result, result: why, shadow: mode === 'shadow' });
-    await port.notify('lb_exception', { ...result, reason: why, trigger: reason, autoResume: null, shadow: mode === 'shadow' }); return why;
+  if (agent.labels['dsh.lb'] !== 'manual' && !candidates.length) {
+    // Yang 2026-11-10：确实没有可接账号时，默认等原账号额度恢复，不发异常请示总控。
+    // 五小时用尽时打开原会话的自动继续，窗口重置后续跑；之后每轮仍会重试换号。
+    let autoResume: boolean | null = null;
+    if (reason === 'five_hour' && mode !== 'shadow') {
+      try { await port.setAutoResume(agent.id, true); autoResume = true; } catch { autoResume = null; }
+    }
+    await port.audit({ ...result, result: 'no_target', action: 'wait_for_reset', autoResume, shadow: mode === 'shadow' });
+    return 'no_target';
+  }
+  if (agent.labels['dsh.lb'] === 'manual') {
+    await port.audit({ ...result, result: 'manual', shadow: mode === 'shadow' });
+    await port.notify('lb_exception', { ...result, reason: 'manual', trigger: reason, autoResume: null, shadow: mode === 'shadow' }); return 'manual';
   }
   if (mode === 'shadow') {
     await port.audit({ ...result, result: 'shadow', toProvider: candidates[0]!.provider });
