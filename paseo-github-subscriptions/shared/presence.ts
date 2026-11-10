@@ -12,6 +12,8 @@ export const PresenceObservationSchema = z.strictObject({
   mode: z.enum(['online', 'offline', 'unknown']),
   observedAt: z.string().nullable(), reason: z.string(),
   source: z.enum(['bluetooth', 'manual', 'unavailable']),
+  /** 自动模式下每台主机的识别结果（mode=online 表示该主机识别到锚定设备）。 */
+  hosts: z.array(z.strictObject({ name: z.string().max(200), mode: z.enum(['online', 'offline', 'unknown']), reason: z.string().max(300) })).max(20).optional(),
 });
 export const QuestionPromptSchema = z.strictObject({
   question: z.string().min(1).max(4000), header: z.string().max(200).optional(),

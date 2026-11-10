@@ -360,11 +360,15 @@ export class PresenceRuntime {
         return { target, result: fresh(result) ? result : { ...unavailable(), reason: result.observedAt ? '状态已过期或时间异常' : result.reason } };
       } catch { return { target, result: { ...unavailable(), reason: '无法连接' } }; }
     }));
-    const present = results.find(item => item.result.mode === 'online');
-    if (present) return targets.length === 1 ? present.result : { ...present.result, reason: `${present.target.name}识别到设备：${present.result.reason}` };
-    const detail = results.map(item => `${item.target.name}：${item.result.mode === 'offline' ? '设备已离开' : item.result.reason}`).join('；');
+    const hosts = results.map(item => ({ name: item.target.name.slice(0, 200), mode: item.result.mode, reason: (item.result.mode === 'offline' ? '设备已离开' : item.result.reason).slice(0, 300) }));
+    const present = results.filter(item => item.result.mode === 'online');
+    if (present.length) {
+      const first = present[0]!.result;
+      return { ...first, hosts, reason: targets.length === 1 ? first.reason : `${present.map(item => item.target.name).join('、')}识别到锚定设备` };
+    }
+    const detail = hosts.map(host => `${host.name}：${host.reason}`).join('；');
     return {
-      mode: 'offline', observedAt: new Date().toISOString(),
+      mode: 'offline', observedAt: new Date().toISOString(), hosts,
       source: results.some(item => item.result.source === 'bluetooth') ? 'bluetooth' : 'unavailable',
       reason: `所有主机都没识别到设备，按离线处理，通知总控（${detail}）`.slice(0, 500),
     };
