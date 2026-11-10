@@ -31,12 +31,21 @@ export function runSignature(run: WorkflowRun): string {
   return `${run.status ?? ''}:${run.conclusion ?? ''}:${run.updated_at ?? ''}`;
 }
 
+function preferRun(candidate: WorkflowRun, known: WorkflowRun): boolean {
+  const candidateCancelled = candidate.conclusion === 'cancelled';
+  const knownCancelled = known.conclusion === 'cancelled';
+  if (candidateCancelled !== knownCancelled) return !candidateCancelled;
+  const candidateAt = candidate.created_at ?? '';
+  const knownAt = known.created_at ?? '';
+  return candidateAt > knownAt || (candidateAt === knownAt && candidate.id > known.id);
+}
+
 export function latestRuns(runs: WorkflowRun[]): WorkflowRun[] {
   const latest = new Map<string, WorkflowRun>();
   for (const run of runs) {
     const identity = `${run.workflow_id ?? run.name ?? run.id}:${run.event ?? ''}`;
     const known = latest.get(identity);
-    if (!known || (run.created_at ?? '') > (known.created_at ?? '') || ((run.created_at ?? '') === (known.created_at ?? '') && run.id > known.id)) {
+    if (!known || preferRun(run, known)) {
       latest.set(identity, run);
     }
   }
@@ -83,9 +92,15 @@ export function advanceCi(
   const known = previous ? previous.failures : null;
   const current = failures.length || !counts.running ? failures : known ?? [];
   let emit: CiEmit | null = null;
-  if (known && JSON.stringify(current) !== JSON.stringify(known)) emit = current.length ? 'failed' : 'recovered';
-  else if (known && failures.length && previous?.failedHead !== snapshot.head) emit = 'failed';
-  else if (announcePass && previous && settled && previous.passedHead !== snapshot.head) emit = 'passed';
+  if (!known) {
+    if (failures.length) emit = 'failed';
+  } else if (JSON.stringify(current) !== JSON.stringify(known)) {
+    emit = current.length ? 'failed' : 'recovered';
+  } else if (failures.length && previous?.failedHead !== snapshot.head) {
+    emit = 'failed';
+  } else if (announcePass && settled && previous?.passedHead !== snapshot.head) {
+    emit = 'passed';
+  }
   const state: CiState = {
     failures: current, revision: (previous?.revision ?? 0) + (emit ? 1 : 0), passedHead: settled ? snapshot.head : null,
     failedHead: failures.length ? snapshot.head : current.length ? previous?.failedHead ?? null : null,

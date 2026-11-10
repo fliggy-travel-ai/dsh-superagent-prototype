@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "machine": "macmini",
+  "modules": {
+    "providers.defaults": true,
+    "answer.quietChildren": true,
+    "answer.escalation": true,
+    "usage.claudeAccounts": true,
+    "providers.antigravity": false,
+    "usage.providerQuotas": false
+  },
+  "agentDefaults": [
+    {
+      "provider": [
+        "codex",
+        "codex-2",
+        "codex-3",
+        "codex-4",
+        "codex-5"
+      ],
+      "apply": "always",
+      "modeId": "full-access",
+      "features": {
+        "service_tier": "priority"
+      },
+      "removeFeatures": [
+        "fast_mode"
+      ]
+    },
+    {
+      "provider": "claude-user-pilot",
+      "modeId": "bypassPermissions",
+      "replaceModeIds": [
+        "auto"
+      ]
+    },
+    {
+      "provider": [
+        "opencode",
+        "glm-acp-agent"
+      ],
+      "features": {
+        "auto_accept": true
+      }
+    },
+    {
+      "provider": "qoder",
+      "modeId": "yolo",
+      "features": {
+        "auto_accept": true
+      }
+    }
+  ],
+  "quietChildren": {
+    "enabled": true,
+    "forwardEvents": false
+  },
+  "escalation": {
+    "timezone": "Asia/Singapore",
+    "immediate": [
+      {
+        "days": "daily",
+        "from": "01:00",
+        "to": "09:30"
+      },
+      {
+        "days": "weekdays",
+        "from": "12:00",
+        "to": "14:00"
+      }
+    ],
+    "delayMinutes": 0,
+    "webhook": {
+      "urlService": "示例-webhook-地址",
+      "authService": "示例-webhook-鉴权",
+      "account": "示例账号"
+    },
+    "quotaAlerts": {
+      "enabled": true,
+      "fileDirectory": "/path/to/quota-webhook-files"
+    },
+    "newObjects": true,
+    "prefilter": {
+      "command": "/usr/bin/python3",
+      "script": "/path/to/prefilter.py"
+    }
+  },
+  "claudeAccounts": {
+    "sourceId": "claude-accounts",
+    "autoResumeDefault": false,
+    "renewal": true,
+    "loginWorkspaceName": "账号登录",
+    "loginGuide": false
+  },
+  "antigravity": {
+    "accounts": [
+      {
+        "id": "antigravity-cy517",
+        "label": "Antigravity · 账号一",
+        "command": [
+          "agy-paseo"
+        ]
+      },
+      {
+        "id": "antigravity-beibeimao",
+        "label": "Antigravity · 账号二",
+        "enabled": false,
+        "command": [
+          "agy-paseo"
+        ]
+      }
+    ]
+  },
+  "providerQuotas": {
+    "sources": [
+      "antigravity",
+      "codex-multi",
+      "grok-multi",
+      "qoder",
+      "glm",
+      "cursor-cli",
+      "opencode-token-switch"
+    ],
+    "hideBuiltin": [
+      "codex",
+      "grok",
+      "cursor",
+      "kimi",
+      "zai"
+    ]
+  }
+}

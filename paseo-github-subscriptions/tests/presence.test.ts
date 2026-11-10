@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentPermissionRequest } from '@getpaseo/protocol/agent-types';
@@ -49,6 +49,7 @@ test('代答完成显示选项，已读幂等持久化，重启后不会复活',
   try {
     setup.agents.push(agent());
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
     const question = setup.runtime.snapshot().questions[0];
     assert.equal(isUnreadAutomaticAnswer(question), true);
     assert.deepEqual(question.answer?.answers, answer);
@@ -90,6 +91,7 @@ test('历史已结束的问题不推测代答来源，超过百条的未读代�
   try {
     for (let index = 0; index < 105; index++) setup.agents.push({ ...agent(), id: `agent-${index}` });
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
     assert.equal(setup.runtime.snapshot().questions.filter(isUnreadAutomaticAnswer).length, 105);
     const { answer: _answer, ...legacy } = setup.runtime.snapshot().questions[0];
     assert.equal(isQuestionTodo(QuestionSchema.parse(legacy)), false);
@@ -112,8 +114,13 @@ test('设备保存期间读到的旧离线状态在保存结束后失效', async
     try {
       const snapshot = await current.runtime.snapshot();
       await current.runtime.configure({ ...snapshot.settings, mode: 'auto', paused: false });
+      await current.runtime.refresh();
       current.agents.push(agent());
-      current.port.observe = async () => { observationStarted(); return observing; };
+      let observeCount = 0;
+      current.port.observe = async () => {
+        if (++observeCount === 1) { observationStarted(); return observing; }
+        return { mode: 'unknown', observedAt: null, reason: '等待新设备', source: 'bluetooth' };
+      };
       const change = current.runtime.changeBluetoothTarget(null, (left, right) => left === right, async () => {
         await saving;
         if (saveFails) throw new Error('保存结果未知');
@@ -258,6 +265,7 @@ test('异步提问没有推荐项时留人工，人工完成后移出待办', as
   try {
     setup.agents.push({ ...agent(), pendingPermissions: [{ ...request(), provider: 'codex', name: 'request_user_input_async', input: { questions } }] });
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
     const question = setup.runtime.snapshot().questions[0];
     assert.equal(question.state, 'pending');
     assert.equal(isQuestionTodo(question), true);
@@ -325,12 +333,12 @@ test('关闭语音或问题结束时取消当前语音，取消回执不计失�
     await setup.runtime.browserSync('browser-one', [webpage()], [], sessions);
     const id = setup.runtime.snapshot().questions[0].id;
     assert.deepEqual(spoken, [id]);
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, speechEnabled: false });
+    await setup.runtime.configureLocalSpeech(false);
     await eventually(() => setup.runtime.snapshot().speech?.length === 1);
     assert.deepEqual(cancels, [[null, id]]);
     assert.equal(setup.runtime.snapshot().speech?.[0]?.cancelled, true);
     assert.equal(setup.runtime.snapshot().error, null);
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, speechEnabled: true });
+    await setup.runtime.configureLocalSpeech(true);
     await eventually(() => spoken.length === 2);
     await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_one']);
     await eventually(() => setup.runtime.snapshot().speech?.length === 2);
@@ -366,6 +374,7 @@ test('离线自动回答明确推荐，未知蓝牙状态保留待办', async ()
     await setup.runtime.refresh();
     assert.equal(setup.responses.length, 0);
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
     assert.equal(setup.responses.length, 1);
     assert.equal(setup.runtime.snapshot().questions[0].state, 'resolved');
     await setup.runtime.refresh();
@@ -418,6 +427,7 @@ test('原生回执失败标记未知，重启后不会重试', async () => {
   try {
     setup.agents.push(agent());
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
     assert.equal(setup.runtime.snapshot().questions[0].state, 'unknown');
     await setup.runtime.stop();
     const restarted = new PresenceRuntime(setup.directory, setup.port);
@@ -442,7 +452,7 @@ test('原生发送前再次核对请求，变化后不批准', async () => {
   const setup = await fixture();
   let reads = 0;
   setup.port.refresh = async () => { const current = agent(); if (++reads === 2) current.pendingPermissions[0].input = { questions: [{ ...prompt, question: '修改后的问题' }] }; return current; };
-  try { setup.agents.push(agent()); await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' }); assert.equal(setup.responses.length, 0); assert.equal(setup.runtime.snapshot().questions[0].state, 'pending'); }
+  try { setup.agents.push(agent()); await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' }); await setup.runtime.refresh(); assert.equal(setup.responses.length, 0); assert.equal(setup.runtime.snapshot().questions[0].state, 'pending'); }
   finally { await setup.close(); }
 });
 
@@ -481,6 +491,8 @@ test('云端提问离线时自动选明确推荐项、在线时只提醒、拦�
     };
     setup.agents.push({ ...agent(), provider: 'cloud-session', labels: { 'cloud-session.id': 'cse_one' }, pendingPermissions: [cloudRequest] });
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online' });
+    await setup.runtime.refresh();
+    await eventually(() => setup.speech.length === 1);
     let question = setup.runtime.snapshot().questions[0];
     assert.equal(question.state, 'pending');
     assert.equal(question.reason, '在线：等待用户回答');
@@ -488,6 +500,7 @@ test('云端提问离线时自动选明确推荐项、在线时只提醒、拦�
     assert.equal(setup.responses.length, 0);
 
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
     question = setup.runtime.snapshot().questions[0];
     assert.equal(question.state, 'submitted');
     assert.equal(question.reason, '已交给浏览器执行，等待云端确认');
@@ -546,6 +559,7 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
   try {
     setup.agents.push({ id: 'cloud-agent', title: '云端会话', provider: 'cloud-session', labels: { 'cloud-session.id': 'cse_one' }, pendingPermissions: [] });
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.refresh();
 
     // Before cloud hook notifies Paseo: browser question belongs to cloud session -> never auto-answered in offline mode
     const beforeHookDecisions = await setup.runtime.browserSync('browser-one', [webpage('one')], [], [{ sessionId: 'one', title: '网页开发', url: 'https://claude.ai/code/session_one' }], ['one']);
@@ -565,6 +579,7 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
     };
     setup.agents[0].pendingPermissions = [cloudRequest];
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+    await setup.runtime.refresh();
     browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
     const nativeQ = setup.runtime.snapshot().questions.find(item => item.source === 'native')!;
     assert.equal(browserQ.delegatedTo, nativeQ.id);
@@ -623,4 +638,949 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
     await setup.runtime.stop();
     assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), false);
   } finally { await setup.close(); }
+});
+
+test('1737-speech-local 默认值兼容：旧 presence.json 正常读取，来源主机默认开启本机播放，其他主机默认关闭且保持仅向来源主机播报', async () => {
+  const { writeFile } = await import('node:fs/promises');
+  // 1. 来源主机是本机（MacBook: selfId = srv_macbook，sourceHostId = null 或 srv_macbook）
+  const macbookDir = await mkdtemp(join(tmpdir(), 'presence-macbook-'));
+  try {
+    await writeFile(
+      join(macbookDir, 'presence.json'),
+      JSON.stringify({
+        settings: { mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' },
+        questions: [],
+        notified: [],
+      }),
+    );
+    const spokenOnMacbook: Array<string | null> = [];
+    const macbookPort: PresencePort = {
+      list: async () => [agent()],
+      refresh: async () => agent(),
+      respond: async () => {},
+      observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '蓝牙在线', source: 'bluetooth' }),
+      speak: async hostId => { spokenOnMacbook.push(hostId); return { played: true, engine: 'neural' }; },
+      cancelSpeech: async () => {},
+      hosts: async () => [
+        { id: 'srv_macbook', name: 'MacBook', online: true },
+        { id: 'srv_mini', name: 'Mac Mini', online: true },
+      ],
+      selfId: () => 'srv_macbook',
+      remoteSpeechEnabled: async hostId => hostId === 'srv_macbook',
+    };
+    const macbook = new PresenceRuntime(macbookDir, macbookPort);
+    await macbook.start();
+    try {
+      assert.equal(macbook.localSpeechEnabled(), true, '来源主机升级后默认“在这台电脑播放”为开');
+      assert.equal(macbook.snapshot().localSpeechEnabled, true);
+      assert.equal(macbook.snapshot().hostName, 'MacBook');
+      await eventually(() => spokenOnMacbook.length === 1);
+      assert.deepEqual(spokenOnMacbook, ['srv_macbook']);
+    } finally {
+      await macbook.stop();
+    }
+  } finally {
+    await rm(macbookDir, { recursive: true, force: true });
+  }
+
+  // 2. 非来源主机（Mac Mini: selfId = srv_mini，sourceHostId = srv_macbook）
+  const miniDir = await mkdtemp(join(tmpdir(), 'presence-mini-'));
+  try {
+    await writeFile(
+      join(miniDir, 'presence.json'),
+      JSON.stringify({
+        settings: { mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' },
+        questions: [],
+        notified: [],
+      }),
+    );
+    const spokenFromMini: Array<string | null> = [];
+    const miniPort: PresencePort = {
+      list: async () => [agent()],
+      refresh: async () => agent(),
+      respond: async () => {},
+      observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '蓝牙在线', source: 'bluetooth' }),
+      speak: async hostId => { spokenFromMini.push(hostId); return { played: true, engine: 'neural' }; },
+      cancelSpeech: async () => {},
+      hosts: async () => [
+        { id: 'srv_mini', name: 'Mac Mini', online: true },
+        { id: 'srv_macbook', name: 'MacBook', online: true },
+      ],
+      selfId: () => 'srv_mini',
+      remoteSpeechEnabled: async hostId => hostId === 'srv_macbook',
+    };
+    const mini = new PresenceRuntime(miniDir, miniPort);
+    await mini.start();
+    try {
+      assert.equal(mini.localSpeechEnabled(), false, '非来源主机升级后默认“在这台电脑播放”为关');
+      assert.equal(mini.snapshot().localSpeechEnabled, false);
+      assert.equal(mini.snapshot().hostName, 'Mac Mini');
+      await eventually(() => spokenFromMini.length === 1);
+      assert.deepEqual(spokenFromMini, ['srv_macbook'], 'Mac Mini 未手动开启时仍只在 MacBook 播放');
+    } finally {
+      await mini.stop();
+    }
+  } finally {
+    await rm(miniDir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 本机开/关与跨主机目标集合：向所有开启主机各播一次、离线与超时主机跳过且不阻塞、切换即持久化', async () => {
+  let now = 1_000_000;
+  const dir = await mkdtemp(join(tmpdir(), 'presence-multi-target-'));
+  const spoken: Array<[string | null, string]> = [];
+  const queriedRemote: string[] = [];
+  const questionsList: QuestionAgent[] = [];
+  const port: PresencePort = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'bluetooth' }),
+    speak: async (hostId, id) => { spoken.push([hostId, id]); return { played: true, engine: 'neural' }; },
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_mini', name: 'Mac Mini', online: true },
+      { id: 'srv_macbook', name: 'MacBook', online: true },
+      { id: 'srv_offline', name: '离线开发机', online: false },
+      { id: 'srv_timeout', name: '超时主机', online: true },
+      { id: 'srv_muted', name: '静音主机', online: true },
+    ],
+    selfId: () => 'srv_mini',
+    remoteSpeechEnabled: async hostId => {
+      queriedRemote.push(hostId);
+      if (hostId === 'srv_offline') throw new Error('不应查询离线主机');
+      if (hostId === 'srv_timeout') throw new Error('来源主机响应超时');
+      return hostId === 'srv_macbook';
+    },
+  };
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    assert.equal(runtime.snapshot().localSpeechEnabled, false);
+
+    // 开启 Mac Mini 本机播放：立即保存，无需重载
+    const afterEnable = await runtime.configureLocalSpeech(true);
+    assert.equal(afterEnable.localSpeechEnabled, true);
+    const savedDisk = JSON.parse(await readFile(join(dir, 'presence.json'), 'utf8'));
+    assert.equal(savedDisk.localSpeechEnabled, true);
+
+    // 新提问到达：本机（srv_mini）与远端开启主机（srv_macbook）各播一次，不因 hosts 含本机而重复播两次
+    questionsList.push(agent());
+    await runtime.refresh();
+    await eventually(() => (runtime.snapshot().speech?.length ?? 0) === 2);
+    assert.equal(queriedRemote.includes('srv_offline'), false, '离线主机应直接跳过不发 RPC');
+    assert.deepEqual(
+      spoken.map(([h]) => h),
+      ['srv_mini', 'srv_macbook'],
+      '应向本机和开启的远端主机各播一次，跳过离线/超时/关闭主机',
+    );
+    assert.deepEqual(
+      runtime.snapshot().speech?.map(s => [s.hostId, s.played]),
+      [['srv_mini', true], ['srv_macbook', true]],
+    );
+
+    // 关闭 Mac Mini 本机播放后，新提问只向 srv_macbook 播报
+    const afterDisable = await runtime.configureLocalSpeech(false);
+    assert.equal(afterDisable.localSpeechEnabled, false);
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-two', pendingPermissions: [{ ...request(), id: 'request-two' }] });
+    await runtime.refresh();
+    await eventually(() => spoken.length === 3);
+    assert.equal(spoken[2]![0], 'srv_macbook');
+  } finally {
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 任一成功即 notified 且重启不误报错误；全部失败才记 speechError 并按冷却重试；关闭本机开关只取消本机在播语音', async () => {
+  let now = 2_000_000;
+  const dir = await mkdtemp(join(tmpdir(), 'presence-partial-ok-'));
+  const questionsList: QuestionAgent[] = [agent()];
+  let hostResults: Record<string, SpeechResult> = {
+    srv_mini: { played: true, engine: 'neural' },
+    srv_macbook: { played: false, detail: '远端声卡忙', retryAt: now + 5000 },
+  };
+  let speakCalls: string[] = [];
+  const cancels: Array<[string | null, string]> = [];
+  let holdMini: ((res: SpeechResult) => void) | null = null;
+  let holdMacbook: ((res: SpeechResult) => void) | null = null;
+
+  const port: PresencePort = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'bluetooth' }),
+    speak: async hostId => {
+      speakCalls.push(String(hostId));
+      if (hostId === 'srv_mini' && holdMini !== undefined && holdMacbook !== null) {
+        // handled below when holding
+      }
+      if (hostId === 'srv_mini' && holdMini) return new Promise<SpeechResult>(r => { holdMini = r; });
+      if (hostId === 'srv_macbook' && holdMacbook) return new Promise<SpeechResult>(r => { holdMacbook = r; });
+      return hostResults[String(hostId)] ?? { played: false, detail: '未知主机' };
+    },
+    cancelSpeech: async (hostId, id) => {
+      cancels.push([hostId, id]);
+      if (hostId === 'srv_mini') holdMini?.({ played: false, cancelled: true, detail: '语音播放已取消' });
+      if (hostId === 'srv_macbook') holdMacbook?.({ played: false, cancelled: true, detail: '语音播放已取消' });
+    },
+    hosts: async () => [
+      { id: 'srv_mini', name: 'Mac Mini', online: true },
+      { id: 'srv_macbook', name: 'MacBook', online: true },
+    ],
+    selfId: () => 'srv_mini',
+    remoteSpeechEnabled: async () => true,
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    await runtime.configureLocalSpeech(true);
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await eventually(() => (runtime.snapshot().speech?.length ?? 0) === 2);
+
+    // 1. 一成一败：任一 played 即 notified，不报 speechError，不重试已提醒提问
+    assert.equal(runtime.snapshot().error, null, '任一目标主机播放成功时不应记 speechError');
+    assert.deepEqual(
+      runtime.snapshot().speech?.map(e => [e.hostId, e.played]),
+      [['srv_mini', true], ['srv_macbook', false]],
+    );
+    now += 10_000;
+    await runtime.refresh();
+    assert.equal(speakCalls.length, 2, '任一主机成功后该提问已标为 notified，不应重复播报');
+
+    // 重启后也不应因最后一条记录为 false 而误报 speechError
+    await runtime.stop();
+    const restarted = new PresenceRuntime(dir, port, () => now);
+    await restarted.start();
+    try {
+      assert.equal(restarted.snapshot().error, null, '重启后已 notified 的批次不应误报上次语音未确认播放');
+
+      // 2. 全部失败：记 speechError 并按冷却重试
+      now += 180_001;
+      speakCalls = [];
+      hostResults = {
+        srv_mini: { played: false, detail: '本机音频失败', retryAt: now + 180_000 },
+        srv_macbook: { played: false, detail: '远端音频失败', retryAt: now + 180_000 },
+      };
+      questionsList.push({ ...agent(), id: 'agent-2', pendingPermissions: [{ ...request(), id: 'req-2' }] });
+      await restarted.refresh();
+      await eventually(() => speakCalls.length === 2 && restarted.snapshot().error !== null);
+      assert.match(restarted.snapshot().error ?? '', /音频失败/);
+
+      // 冷却期内不重试
+      now += 10_000;
+      await restarted.refresh();
+      assert.equal(speakCalls.length, 2);
+
+      // 冷却结束后重试，且播报中途关闭本机开关只取消 srv_mini，不取消 srv_macbook
+      now += 180_001;
+      let resolveMini!: (res: SpeechResult) => void;
+      let resolveMacbook!: (res: SpeechResult) => void;
+      port.speak = async hostId => {
+        speakCalls.push(String(hostId));
+        if (hostId === 'srv_mini') return new Promise<SpeechResult>(r => { resolveMini = r; });
+        return new Promise<SpeechResult>(r => { resolveMacbook = r; });
+      };
+      port.cancelSpeech = async (hostId, id) => {
+        cancels.push([hostId, id]);
+        if (hostId === 'srv_mini') resolveMini?.({ played: false, cancelled: true, detail: '语音播放已取消' });
+        if (hostId === 'srv_macbook') resolveMacbook?.({ played: false, cancelled: true, detail: '语音播放已取消' });
+      };
+      await restarted.refresh();
+      await eventually(() => speakCalls.length === 4);
+
+      await restarted.configureLocalSpeech(false);
+      assert.equal(cancels.length, 1);
+      assert.equal(cancels[0]![0], 'srv_mini', '关闭本机播放只应取消本机正在播放的语音');
+
+      resolveMacbook({ played: true, engine: 'neural' });
+      await eventually(() => restarted.snapshot().error === null);
+    } finally {
+      await restarted.stop();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 审阅项 1：两台来源主机均为自动（sourceHostId=null）且均未显式保存时，提问只在本机播；远端显式开启后两台都播', async () => {
+  const dirA = await mkdtemp(join(tmpdir(), 'presence-auto-a-'));
+  const dirB = await mkdtemp(join(tmpdir(), 'presence-auto-b-'));
+  let now = 5_000_000;
+  const spokenOnA: Array<string | null> = [];
+  const questionsA: QuestionAgent[] = [agent()];
+
+  // 模拟对端主机 B：sourceHostId 也为 null（自动），未显式保存过 localSpeechEnabled
+  const portB: PresencePort = {
+    list: async () => [],
+    refresh: async () => null,
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async () => ({ played: true, engine: 'neural' }),
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_b', name: 'Host B', online: true },
+      { id: 'srv_a', name: 'Host A', online: true },
+    ],
+    selfId: () => 'srv_b',
+  };
+  const runtimeB = new PresenceRuntime(dirB, portB, () => now);
+  await runtimeB.start();
+  await runtimeB.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: null });
+
+  const portA: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsA),
+    refresh: async id => structuredClone(questionsA.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async hostId => {
+      spokenOnA.push(hostId);
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_a', name: 'Host A', online: true },
+      { id: 'srv_b', name: 'Host B', online: true },
+    ],
+    selfId: () => 'srv_a',
+    // 对端 B 的本机默认值为 true，但未显式保存（configured: false）
+    remoteSpeechEnabled: async () => runtimeB.localSpeechEnabled(),
+    remoteSpeechState: async () => ({
+      enabled: runtimeB.localSpeechEnabled(),
+      configured: (runtimeB as unknown as { localSpeechConfigured?: () => boolean }).localSpeechConfigured?.() ?? false,
+    }),
+  };
+
+  const runtimeA = new PresenceRuntime(dirA, portA, () => now);
+  await runtimeA.start();
+  try {
+    await runtimeA.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: null });
+    await eventually(() => spokenOnA.length >= 1);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.deepEqual(spokenOnA, ['srv_a'], '两台都是自动且都未显式保存时，提问只应在本机 srv_a 播报');
+
+    // 当 B 显式保存开启“在这台电脑播放”后，新提问应在两台各播一次
+    await runtimeB.configureLocalSpeech(true);
+    now += 180_001;
+    questionsA.push({ ...agent(), id: 'agent-auto-2', pendingPermissions: [{ ...request(), id: 'req-auto-2' }] });
+    await runtimeA.refresh();
+    await eventually(() => spokenOnA.length === 3);
+    assert.deepEqual(spokenOnA.slice(1), ['srv_a', 'srv_b']);
+  } finally {
+    await runtimeA.stop();
+    await runtimeB.stop();
+    await rm(dirA, { recursive: true, force: true });
+    await rm(dirB, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 审阅项 2：远端旧版插件缺少 presence.local-speech RPC 时回退为“对方是我的来源主机才播”；超时与离线仍跳过', async () => {
+  const { PresenceHosts } = await import('../server/presence-port.ts');
+  const { DeadlineError } = await import('../server/core/hosts.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'presence-legacy-rpc-'));
+  let now = 6_000_000;
+  const spoken: Array<string | null> = [];
+  let sourceRpcMode: 'missing' | 'timeout' = 'missing';
+  const questionsList: QuestionAgent[] = [agent()];
+
+  // 通过真实 PresenceHosts 验证 RPC 错误识别与回退逻辑
+  const fakeOrigin = {
+    getLastServerInfoMessage: () => ({ serverId: 'srv_mini' }),
+    listHosts: async () => ({
+      self: { serverId: 'srv_mini', label: 'Mac Mini' },
+      hosts: [
+        { serverId: 'srv_macbook', label: 'MacBook', enabled: true, status: 'online' },
+        { serverId: 'srv_other_old', label: 'Old Host', enabled: true, status: 'online' },
+        { serverId: 'srv_offline_src', label: 'Offline Host', enabled: true, status: 'offline' },
+      ],
+    }),
+  };
+  const hosts = new PresenceHosts(fakeOrigin as never);
+  hosts.invokePlugin = async (_hostId: string, method: string) => {
+    if (method === 'presence.local-speech') {
+      if (_hostId === 'srv_macbook' && sourceRpcMode === 'timeout') {
+        throw new DeadlineError('来源主机响应超时');
+      }
+      throw new Error(`Plugin github-subscriptions does not contribute RPC ${method}`);
+    }
+    throw new Error(`unexpected ${method}`);
+  };
+
+  const port: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async hostId => {
+      spoken.push(hostId);
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: () => hosts.hosts(),
+    selfId: () => 'srv_mini',
+    remoteSpeechEnabled: hostId => hosts.remoteSpeechEnabled(hostId),
+    remoteSpeechState: hostId => (hosts as unknown as { remoteSpeechState: (id: string) => Promise<{ enabled: boolean; configured: boolean }> }).remoteSpeechState(hostId),
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    // 1. 对方旧版无此 RPC：只有作为 sourceHostId 的 srv_macbook 会播报，srv_other_old 不播
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await eventually(() => spoken.length === 1);
+    assert.deepEqual(spoken, ['srv_macbook'], '旧版插件缺少 RPC 时，来源主机应回退播报，非来源旧主机不播');
+
+    // 2. 来源主机超时（非方法不存在）：必须跳过，不向超时主机发 speak
+    sourceRpcMode = 'timeout';
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-timeout', pendingPermissions: [{ ...request(), id: 'req-timeout' }] });
+    await runtime.refresh();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(spoken.length, 1, '来源主机查询超时时必须跳过，不应继续播报');
+  } finally {
+    await runtime.stop();
+    await hosts.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-local 审阅项 3 & 4：任一台 played 立即落盘 notified 且不阻塞后续提问，卡住主机稍后返回再补记录；全部主机关闭时 hasSpeechTarget=false', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-fast-notified-'));
+  let now = 7_000_000;
+  const speakCalls: Array<[string | null, string]> = [];
+  const questionsList: QuestionAgent[] = [agent()];
+  let resolveStuckMacbook!: (res: SpeechResult) => void;
+  let remoteEnabled = true;
+
+  const port: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async (hostId, id) => {
+      speakCalls.push([hostId, id]);
+      if (hostId === 'srv_macbook' && speakCalls.filter(([h]) => h === 'srv_macbook').length === 1) {
+        return new Promise<SpeechResult>(r => { resolveStuckMacbook = r; });
+      }
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_mini', name: 'Mac Mini', online: true },
+      { id: 'srv_macbook', name: 'MacBook', online: true },
+    ],
+    selfId: () => 'srv_mini',
+    remoteSpeechEnabled: async () => remoteEnabled,
+    remoteSpeechState: async () => ({ enabled: remoteEnabled, configured: true }),
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    await runtime.configureLocalSpeech(true);
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+
+    // srv_mini 已立即返回 played:true，srv_macbook 仍卡住未返回
+    await eventually(() => (runtime.snapshot().speech?.length ?? 0) === 1);
+    const diskWhileStuck = JSON.parse(await readFile(join(dir, 'presence.json'), 'utf8'));
+    assert.equal(diskWhileStuck.notified.length, 1, '任一台主机 played 后应立即写入 notified，不等卡住主机');
+    assert.equal(diskWhileStuck.speech.length, 1);
+    assert.equal(diskWhileStuck.speech[0].hostId, 'srv_mini');
+
+    // srv_macbook 仍在卡住期间，冷却过后新提问到达，后续提问不被卡住主机阻塞
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-next', pendingPermissions: [{ ...request(), id: 'req-next' }] });
+    await runtime.refresh();
+    await eventually(() => speakCalls.some(([h, qid]) => h === 'srv_mini' && qid !== diskWhileStuck.notified[0]));
+
+    // 卡住的 srv_macbook 稍后返回失败回执，补写 speech 记录且不标错
+    resolveStuckMacbook({ played: false, detail: '来源主机响应超时' });
+    await eventually(() => (runtime.snapshot().speech?.filter(s => s.id === diskWhileStuck.notified[0]).length ?? 0) === 2);
+    assert.equal(runtime.snapshot().error, null);
+
+    // 审阅项 4：当所有主机开关都关时，snapshot().hasSpeechTarget 为 false
+    remoteEnabled = false;
+    const allOffSnap = await runtime.configureLocalSpeech(false);
+    assert.equal((allOffSnap as { hasSpeechTarget?: boolean }).hasSpeechTarget, false, '所有主机播放开关均关闭时 hasSpeechTarget 应为 false');
+  } finally {
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-speech-one-switch：speechEnabled=false 兼容忽略且不再阻止或取消播报；本机播放开关关闭时本机不播', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-one-switch-'));
+  let now = 8_000_000;
+  const spoken: Array<[string | null, string]> = [];
+  const cancels: Array<[string | null, string]> = [];
+  const questionsList: QuestionAgent[] = [agent()];
+  let holdMini: ((res: SpeechResult) => void) | null = null;
+
+  // 旧 presence.json 里 speechEnabled 为 false
+  await writeFile(
+    join(dir, 'presence.json'),
+    JSON.stringify({
+      settings: { mode: 'online', paused: false, speechEnabled: false, sourceHostId: null },
+      questions: [],
+      notified: [],
+    }),
+  );
+
+  const port: PresencePort & { remoteSpeechState?: (hostId: string) => Promise<{ enabled: boolean; configured: boolean }> } = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '在线', source: 'manual' }),
+    speak: async (hostId, id) => {
+      spoken.push([hostId, id]);
+      if (holdMini) return new Promise<SpeechResult>(r => { holdMini = r; });
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async (hostId, id) => {
+      cancels.push([hostId, id]);
+      holdMini?.({ played: false, cancelled: true, detail: '语音播放已取消' });
+    },
+    hosts: async () => [{ id: 'srv_mini', name: 'Mac Mini', online: true }],
+    selfId: () => 'srv_mini',
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    // 1. 旧配置 speechEnabled=false 读取不报错，且只要本机播放开即正常播报
+    await eventually(() => spoken.length === 1);
+    assert.equal(spoken[0]![0], 'srv_mini', '旧配置 speechEnabled=false 不应再阻止播报');
+
+    // 2. 通过 configure 传入 speechEnabled=false 不报错，也不取消正在播放的语音
+    now += 180_001;
+    holdMini = () => {};
+    questionsList.push({ ...agent(), id: 'agent-2', pendingPermissions: [{ ...request(), id: 'req-2' }] });
+    await runtime.refresh();
+    await eventually(() => spoken.length === 2);
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: false, sourceHostId: null });
+    assert.equal(cancels.length, 0, 'configure 传入 speechEnabled=false 不应取消在播语音');
+
+    // 3. 关闭本机播放开关时立即取消在播语音，且之后新提问本机不再播放
+    await runtime.configureLocalSpeech(false);
+    await eventually(() => cancels.length === 1);
+    assert.equal(cancels[0]![0], 'srv_mini');
+    holdMini = null;
+    now += 180_001;
+    questionsList.push({ ...agent(), id: 'agent-3', pendingPermissions: [{ ...request(), id: 'req-3' }] });
+    await runtime.refresh();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(spoken.length, 2, '本机播放开关关闭后不应再在本机播报');
+  } finally {
+    holdMini?.({ played: false, cancelled: true });
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-presence-fast-switch：慢端口（observe/远程探测各延迟 2 秒）下 configure 与 changeBluetoothTarget 在 200ms 内返回新状态，且在途旧扫描结束后自动补跑新扫描', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-fast-switch-'));
+  const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+  let slowPort = false;
+  let aborted = false;
+  const questionsList: QuestionAgent[] = [];
+  const responses: unknown[] = [];
+  let observeCalls = 0;
+
+  const sleepAbortable = (ms: number) =>
+    new Promise<void>(resolve => {
+      if (aborted) { resolve(); return; }
+      const timer = setTimeout(resolve, ms);
+      const poll = setInterval(() => {
+        if (aborted) { clearTimeout(timer); clearInterval(poll); resolve(); }
+      }, 20);
+      poll.unref?.();
+    });
+
+  const port: PresencePort = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async (...args) => { responses.push(args); },
+    observe: async () => {
+      observeCalls += 1;
+      if (slowPort) await sleepAbortable(2000);
+      return { mode: 'online', observedAt: new Date().toISOString(), reason: '来源主机蓝牙在线', source: 'bluetooth' };
+    },
+    speak: async () => ({ played: true, engine: 'neural' }),
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_mini', name: 'Mac Mini', online: true },
+      { id: 'srv_macbook', name: 'MacBook', online: true },
+    ],
+    selfId: () => 'srv_mini',
+    remoteSpeechState: async () => {
+      if (slowPort) await sleepAbortable(2000);
+      return { enabled: true, configured: true };
+    },
+  };
+
+  const runtime = new PresenceRuntime(dir, port);
+  await runtime.start();
+  try {
+    await runtime.configureLocalSpeech(false);
+    await runtime.configure({ mode: 'auto', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await runtime.refresh();
+
+    // 开启慢端口（observe 2s + remoteSpeechState 2s），先启动一轮在途的 5s 轮询旧扫描
+    slowPort = true;
+    questionsList.push(agent());
+    const inflightOldScan = runtime.refresh();
+    await delay(30);
+
+    // 1. 在途旧扫描进行中切到离线：configure 不等待 2s 慢端口，立即返回手动离线快照
+    const tOffline = performance.now();
+    const snapOffline = await runtime.configure({
+      mode: 'offline',
+      paused: false,
+      speechEnabled: true,
+      sourceHostId: 'srv_macbook',
+    });
+    const offlineElapsed = performance.now() - tOffline;
+    assert.ok(offlineElapsed < 1000, `configure(offline) 不应等待 2s 慢端口，实际耗时 ${offlineElapsed.toFixed(1)}ms`);
+    assert.equal(snapOffline.settings.mode, 'offline');
+    assert.equal(snapOffline.observation.mode, 'offline');
+    assert.equal(snapOffline.observation.source, 'manual');
+    assert.match(snapOffline.observation.reason, /手动离线/);
+
+    // 不额外手动调 refresh()：在途旧扫描结束后必须自动补跑新扫描并在离线模式下完成代答
+    await inflightOldScan;
+    await eventually(() => responses.length === 1);
+
+    // 2. 切回自动模式：configure 也不等待慢端口，且 observation 立即标为“正在读取来源主机在场状态”
+    const tAuto = performance.now();
+    const snapAuto = await runtime.configure({
+      mode: 'auto',
+      paused: false,
+      speechEnabled: true,
+      sourceHostId: 'srv_macbook',
+    });
+    const autoElapsed = performance.now() - tAuto;
+    assert.ok(autoElapsed < 1000, `configure(auto) 不应等待 2s 慢端口，实际耗时 ${autoElapsed.toFixed(1)}ms`);
+    assert.equal(snapAuto.settings.mode, 'auto');
+    assert.equal(snapAuto.observation.mode, 'unknown');
+    assert.equal(snapAuto.observation.reason, '正在读取来源主机在场状态');
+
+    // 3. changeBluetoothTarget 同样不阻塞等待慢扫描，且在旧扫描结束后触发新采样
+    const callsBeforeBt = observeCalls;
+    const tBt = performance.now();
+    const btSaved = await runtime.changeBluetoothTarget(
+      'srv_macbook',
+      (l, r) => l === r,
+      async () => 'anchor-updated',
+    );
+    const btElapsed = performance.now() - tBt;
+    assert.equal(btSaved, 'anchor-updated');
+    assert.ok(btElapsed < 1000, `changeBluetoothTarget 不应等待 2s 慢扫描，实际耗时 ${btElapsed.toFixed(1)}ms`);
+    assert.equal(runtime.snapshot().observation.reason, '设备正在切换，等待来源主机采样');
+    slowPort = false;
+    aborted = true;
+    await runtime.refresh();
+    assert.ok(observeCalls > callsBeforeBt, '设备切换后应补跑新一轮 observe');
+  } finally {
+    slowPort = false;
+    aborted = true;
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('1737-presence-fast-switch：scan 并行执行 observe/hosts/list，远程语音状态缓存 60 秒且在主机或设置变化时失效，单轮扫描合并写盘', async () => {
+  const { stat } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'presence-parallel-cache-'));
+  const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+  let now = 10_000_000;
+  let trackConcurrency = false;
+  let inFlightSteps = 0;
+  let maxConcurrentSteps = 0;
+  let releaseBarrier: (() => void) | null = null;
+  let remoteProbes = 0;
+  let hostExtraOnline = false;
+  const questionsList: QuestionAgent[] = [];
+
+  const enterParallelStep = async () => {
+    if (!trackConcurrency) return;
+    inFlightSteps += 1;
+    if (inFlightSteps > maxConcurrentSteps) maxConcurrentSteps = inFlightSteps;
+    if (inFlightSteps === 3) releaseBarrier?.();
+    await new Promise<void>(resolve => {
+      if (maxConcurrentSteps >= 3) { resolve(); return; }
+      const prev = releaseBarrier;
+      releaseBarrier = () => { prev?.(); resolve(); };
+    });
+    inFlightSteps -= 1;
+  };
+
+  const port: PresencePort = {
+    list: async () => {
+      await enterParallelStep();
+      return structuredClone(questionsList);
+    },
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => {
+      await enterParallelStep();
+      return { mode: 'online', observedAt: new Date().toISOString(), reason: '蓝牙在场', source: 'bluetooth' };
+    },
+    speak: async () => ({ played: true, engine: 'neural' }),
+    cancelSpeech: async () => {},
+    hosts: async () => {
+      await enterParallelStep();
+      return [
+        { id: 'srv_mini', name: 'Mac Mini', online: true },
+        { id: 'srv_macbook', name: 'MacBook', online: true },
+        ...(hostExtraOnline ? [{ id: 'srv_extra', name: 'Extra Mac', online: true }] : []),
+      ];
+    },
+    selfId: () => 'srv_mini',
+    remoteSpeechState: async () => {
+      remoteProbes += 1;
+      return { enabled: true, configured: true };
+    },
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    await runtime.configureLocalSpeech(false);
+    await runtime.configure({ mode: 'auto', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await runtime.refresh();
+    const probesAfterSetup = remoteProbes;
+
+    // 1. 60 秒内多次 5s 轮询命中缓存，不再跨主机探测
+    now += 5_000;
+    await runtime.refresh();
+    now += 20_000;
+    await runtime.refresh();
+    now += 25_000;
+    await runtime.refresh();
+    assert.equal(remoteProbes, probesAfterSetup, '60 秒缓存有效期内不应每轮扫描重复跨主机探测');
+
+    // 2. 独立步骤并行（无真实时钟阈值抖动：通过并发屏障验证 observe + hosts + list 同时在途数为 3）
+    trackConcurrency = true;
+    await runtime.refresh();
+    trackConcurrency = false;
+    assert.equal(maxConcurrentSteps, 3, 'scan 内的 observe、hosts、list 应同时并发执行');
+
+    // 3. 超过 60 秒后缓存过期重新探测
+    now += 15_000; // 累计 65s > 60s
+    await runtime.refresh();
+    assert.equal(remoteProbes, probesAfterSetup + 1, '超过 60 秒 TTL 后应重新跨主机探测');
+
+    // 4. 主机列表变化立即使缓存失效
+    hostExtraOnline = true;
+    now += 1_000;
+    await runtime.refresh();
+    assert.ok(remoteProbes > probesAfterSetup + 1, '主机列表变化时应使远程语音状态缓存失效');
+
+    // 5. 本机设置变化立即使缓存失效
+    const probesBeforeConfig = remoteProbes;
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await runtime.refresh();
+    assert.ok(remoteProbes > probesBeforeConfig, '本机设置变化时应使远程语音状态缓存失效');
+
+    // 6. 单轮扫描合并写盘：空闲轮询无问题变化时不重复改写 presence.json
+    const stateFile = join(dir, 'presence.json');
+    for (let i = 0; i < 8; i++) {
+      questionsList.push({
+        id: `batch-agent-${i}`,
+        title: `批量会话 ${i}`,
+        pendingPermissions: [{ ...request(), id: `batch-req-${i}`, input: { questions: [{ ...prompt, question: '是否合并 PR #1737？' }] } }],
+      });
+    }
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().questions.length, 8);
+    await eventually(() => (runtime.snapshot().speech?.length ?? 0) >= 1);
+    const statAfterBatch = await stat(stateFile);
+    await delay(25);
+    await runtime.refresh();
+    const statAfterIdle = await stat(stateFile);
+    assert.equal(statAfterIdle.mtimeMs, statAfterBatch.mtimeMs, '无状态变化的空闲扫描不应重复写盘');
+  } finally {
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PR #31 审阅项 1：真正播报前实时探测远端语音开关（不用 60 秒扫描缓存），探测失败不缓存，且对端 presence.speak 在本机关闭时拒绝出声', async () => {
+  const { presenceModule } = await import('../server/modules/answer-presence/index.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'presence-realtime-speak-'));
+  let now = 20_000_000;
+  let remoteEnabled = true;
+  let remoteFailOnce = false;
+  const spokenHosts: Array<string | null> = [];
+  const questionsList: QuestionAgent[] = [];
+
+  const port: PresencePort = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async () => {},
+    observe: async () => ({ mode: 'online', observedAt: new Date().toISOString(), reason: '蓝牙在线', source: 'bluetooth' }),
+    speak: async hostId => {
+      spokenHosts.push(hostId);
+      return { played: true, engine: 'neural' };
+    },
+    cancelSpeech: async () => {},
+    hosts: async () => [
+      { id: 'srv_mini', name: 'Mac Mini', online: true },
+      { id: 'srv_macbook', name: 'MacBook', online: true },
+    ],
+    selfId: () => 'srv_mini',
+    remoteSpeechState: async () => {
+      if (remoteFailOnce) {
+        remoteFailOnce = false;
+        throw new Error('来源主机中转瞬时超时');
+      }
+      return { enabled: remoteEnabled, configured: true };
+    },
+  };
+
+  const runtime = new PresenceRuntime(dir, port, () => now);
+  await runtime.start();
+  try {
+    await runtime.configureLocalSpeech(false);
+    await runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().hasSpeechTarget, true, '初始扫描应发现远端 srv_macbook 开启语音');
+
+    // 1. 仅过 5 秒（60 秒扫描缓存尚未过期），对方主机关闭了本机播放开关；新问题到达时必须实时核对，不向对方播报
+    now += 5_000;
+    remoteEnabled = false;
+    questionsList.push(agent());
+    await runtime.refresh();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.deepEqual(spokenHosts, [], '对方关闭本机播放后，60 秒内来新提问也不得用旧缓存向对方发 speak');
+    assert.equal(runtime.snapshot().hasSpeechTarget, false);
+
+    // 2. 探测失败（瞬时中转超时）不缓存 60 秒：下一轮（仅隔 5 秒）恢复后立即可探测并播报
+    now += 180_001;
+    remoteEnabled = true;
+    remoteFailOnce = true;
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().hasSpeechTarget, false, '当次探测超时应判定暂无可用目标');
+
+    now += 5_000; // 距失败仅 5 秒，远小于 60 秒
+    questionsList.push({ ...agent(), id: 'agent-after-recover', pendingPermissions: [{ ...request(), id: 'req-recover' }] });
+    await runtime.refresh();
+    await eventually(() => spokenHosts.length === 1);
+    assert.deepEqual(spokenHosts, ['srv_macbook'], '探测超时不应被缓存 60 秒，下一轮恢复后应正常向对方播报');
+    assert.equal(runtime.snapshot().hasSpeechTarget, true);
+
+    // 3. 接收端加固：presence.speak 处理时核对自身本机播放开关，关闭时返回 played:false 且不调用底层发声
+    const handlers = new Map<string, (input: any) => Promise<any>>();
+    let localHardwareSpeakCalls = 0;
+    const dispose = presenceModule.register({
+      server: {
+        handle: (contract: { name: string }, fn: (input: any) => Promise<any>) => { handlers.set(contract.name, fn); },
+        addHook: () => () => {},
+      },
+      services: {
+        main: {
+          readyPresence: async () => runtime,
+          presenceHosts: {
+            localSpeech: async () => { localHardwareSpeakCalls += 1; return { played: true, engine: 'neural' }; },
+            localCancel: () => false,
+          },
+        },
+      },
+    } as any);
+    try {
+      const speakRpc = handlers.get('presence.speak')!;
+      assert.ok(speakRpc, '应注册 presence.speak RPC');
+      // 当前 runtime 本机播放为 false：即使被外部误调 presence.speak 也拒绝出声
+      const blockedRes = await speakRpc({ id: 'q-test', text: '测试提醒' });
+      assert.equal(blockedRes.played, false);
+      assert.equal(localHardwareSpeakCalls, 0, '本机语音开关关闭时 presence.speak 不应调用底层发声');
+
+      // 开启本机播放后 presence.speak 正常播放
+      await runtime.configureLocalSpeech(true);
+      const allowedRes = await speakRpc({ id: 'q-test-2', text: '测试提醒' });
+      assert.equal(allowedRes.played, true);
+      assert.equal(localHardwareSpeakCalls, 1);
+    } finally {
+      dispose?.();
+    }
+  } finally {
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PR #31 审阅项 2：configure 写盘期间启动的旧设置扫描不会覆盖新模式或误代答；自动模式仅切暂停时保留原在场观测', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-write-race-'));
+  const questionsList: QuestionAgent[] = [agent()];
+  const responses: unknown[] = [];
+  let holdObserve = false;
+  let observeEntered!: () => void;
+  let releaseObserve!: (obs: Awaited<ReturnType<PresencePort['observe']>>) => void;
+
+  const port: PresencePort = {
+    list: async () => structuredClone(questionsList),
+    refresh: async id => structuredClone(questionsList.find(a => a.id === id) ?? null),
+    respond: async (...args) => { responses.push(args); },
+    observe: async () => {
+      if (holdObserve) {
+        observeEntered?.();
+        return new Promise(resolve => { releaseObserve = resolve; });
+      }
+      return { mode: 'online', observedAt: new Date().toISOString(), reason: 'iPhone 信号 -50dBm', source: 'bluetooth' };
+    },
+    speak: async () => ({ played: true, engine: 'neural' }),
+    cancelSpeech: async () => {},
+    hosts: async () => [],
+  };
+
+  const runtime = new PresenceRuntime(dir, port);
+  await runtime.start();
+  try {
+    // 先在自动模式（暂停态）下完成初始状态准备
+    await runtime.configure({ mode: 'auto', paused: true, speechEnabled: true, sourceHostId: null });
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().observation.mode, 'online');
+    assert.equal(runtime.snapshot().observation.reason, 'iPhone 信号 -50dBm');
+
+    // 顺手改验证：自动模式下仅切换 paused（模式与来源主机均未变），保留原有蓝牙观测而非置为未知
+    const snapUnpausedAuto = await runtime.configure({ mode: 'auto', paused: false, speechEnabled: true, sourceHostId: null });
+    assert.equal(snapUnpausedAuto.observation.mode, 'online', '自动模式下仅切暂停不应把观测重置为未知');
+    assert.equal(snapUnpausedAuto.observation.reason, 'iPhone 信号 -50dBm');
+    const snapPausedAuto = await runtime.configure({ mode: 'auto', paused: true, speechEnabled: true, sourceHostId: null });
+    assert.equal(snapPausedAuto.observation.mode, 'online');
+    await runtime.refresh();
+
+    // 必改竞态验证：从自动（暂停）切到手动在线（取消暂停）的 persist 写盘窗口内，5 秒轮询触发了一轮旧设置（auto）扫描并返回离线
+    holdObserve = true;
+    const entered = new Promise<void>(resolve => { observeEntered = resolve; });
+
+    // 启动 configure（此时正在异步 persist 写盘，this.state.settings 尚未切换为 online）
+    const configuring = runtime.configure({ mode: 'online', paused: false, speechEnabled: true, sourceHostId: null });
+    // 紧接在同一事件循环 tick 触发轮询扫描：该扫描在写盘完成前读取旧 auto 设置进入 observe()
+    const racingScan = runtime.refresh();
+    await entered;
+
+    // 等 configure 写盘并返回（此时用户设置已是手动在线且未暂停）
+    const snapOnline = await configuring;
+    assert.equal(snapOnline.settings.mode, 'online');
+    assert.equal(snapOnline.observation.mode, 'online');
+
+    // 让那轮写盘期间启动的旧扫描返回“蓝牙离线”观测结果
+    holdObserve = false;
+    releaseObserve({ mode: 'offline', observedAt: new Date().toISOString(), reason: '蓝牙离开', source: 'bluetooth' });
+    await racingScan;
+    await runtime.refresh();
+
+    assert.equal(responses.length, 0, '切到手动在线后，写盘窗口启动的旧扫描绝不能触发离线自动代答');
+    assert.equal(runtime.snapshot().observation.mode, 'online', '旧扫描不能覆盖手动在线观测状态');
+    assert.equal(runtime.snapshot().questions[0]?.state, 'pending');
+  } finally {
+    holdObserve = false;
+    releaseObserve?.({ mode: 'unknown', observedAt: null, reason: '关闭', source: 'unavailable' });
+    await runtime.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

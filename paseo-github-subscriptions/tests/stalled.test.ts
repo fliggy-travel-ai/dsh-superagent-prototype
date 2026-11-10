@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { StalledRuntime, type StalledAgent, type StalledPort } from '../server/stalled.ts';
+import { parseWorkspaceRoles } from '../server/core/session-roles.ts';
 
 function agent(id = 'parent', hostId = 'mini', extra: Partial<StalledAgent> = {}): StalledAgent {
-  return { id, hostId, title: '订单开发', status: 'idle', updatedAt: '2026-11-07T01:00:00Z', ...extra };
+  return { id, hostId, title: '订单开发', workspaceId: 'wks_main', status: 'idle', updatedAt: '2026-11-07T01:00:00Z', ...extra };
 }
 function fixture() {
-  const state = { agents: [agent()], listeners: new Set<string>(), busy: new Set<string>(), messageCalls: 0, unavailable: false, subagentFailure: false, messageFailure: false };
+  const state = { roles: parseWorkspaceRoles([{ workspaceId: 'wks_main', pinnedAt: '2026-11-03T00:00:00Z' }]), agents: [agent()], listeners: new Set<string>(), busy: new Set<string>(), messageCalls: 0, unavailable: false, subagentFailure: false, messageFailure: false };
   const port: StalledPort = {
-    collect: async () => { if (state.unavailable) throw new Error('跨主机状态无法确认'); return { hostId: 'mini', agents: state.agents, listeners: state.listeners }; },
+    collect: async () => { if (state.unavailable) throw new Error('跨主机状态无法确认'); return { hostId: 'mini', agents: state.agents, listeners: state.listeners, roles: state.roles }; },
     subagents: async current => { if (state.subagentFailure) throw new Error('子代理读取失败'); return state.busy.has(current.id); },
     message: async () => { state.messageCalls++; if (state.messageFailure) throw new Error('时间线读取失败'); return '已完成接口，等待下一步。'; },
     current: async current => state.agents.find(item => item.id === current.id && item.hostId === current.hostId) ?? null,
@@ -28,10 +29,21 @@ test('停滞主会话显示最后消息并缓存，更新后重读，恢复工�
 });
 
 test('运行、初始化、活动轮次、待审批、内部、已关闭和归档会话均不算停滞', async () => {
-  for (const extra of [{ status: 'running' }, { status: 'initializing' }, { activeTurn: {} }, { pendingPermissions: [{}] }, { internal: true }, { status: 'closed' }, { archivedAt: '2026-11-07T01:00:01Z' }, { labels: { 'paseo.parent-agent-id': 'another' } }]) {
+  for (const extra of [{ status: 'running' }, { status: 'initializing' }, { activeTurn: {} }, { pendingPermissions: [{}] }, { internal: true }, { status: 'closed' }, { archivedAt: '2026-11-07T01:00:01Z' }, { workspaceId: 'wks_other' }, { workspaceId: null }]) {
     const { state, runtime } = fixture(); state.agents = [agent('parent', 'mini', extra)];
     assert.deepEqual((await runtime.snapshot()).sessions, [], JSON.stringify(extra));
   }
+});
+
+test('主会话只看置顶工作区：带父会话标签的会话在置顶工作区中也检查，不在置顶工作区的无父会话会话不检查', async () => {
+  const { state, runtime } = fixture();
+  state.agents = [
+    agent('child-in-pinned', 'mini', { labels: { 'paseo.parent-agent-id': 'another' } }),
+    agent('loose', 'mini', { workspaceId: 'wks_temp' }),
+  ];
+  assert.deepEqual((await runtime.snapshot()).sessions.map(session => session.agentId), ['child-in-pinned']);
+  state.roles = parseWorkspaceRoles([]);
+  assert.deepEqual((await runtime.snapshot()).sessions, []);
 });
 
 test('跨主机子孙会话工作或有监听时，主会话不算停滞', async () => {

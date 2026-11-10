@@ -7,8 +7,10 @@ import { createHostClient } from '@getpaseo/client/node';
 import { ProviderEventSchema, type ProviderConnection, type ProviderEvent, type ProviderInput, type ProviderRegistration, type ProviderTimelineItem } from '@getpaseo/plugin/server/provider';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import * as rpc from '../../shared/cloud-session.ts';
-import type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult } from '../../shared/web-request.ts';
+import { cloudSessionStatus } from '../../shared/provider-instance.ts';
+import { webRequestDetailReason, type AnswerWebRequest, type ResolveWebRequest, type WebRequestAnswer, type WebRequestContext, type WebRequestResult } from '../../shared/web-request.ts';
 import { toWebAnswer } from '../web-request/normalize.ts';
+import { CLOSED_TTL_MS, STORED_REQUEST_MAX, type CloudRequestStore, type StoredRequest } from './request-store.ts';
 
 export type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult };
 
@@ -16,34 +18,27 @@ type Emit = (event: ProviderEvent) => void;
 type Endpoint = { url: string; headers: Record<string, string>; session?: string };
 type Session = { id: string; cloud: string; emit: Emit; cwd: string; model: string; mode: string; turn: string | null; endpoint?: Endpoint };
 type Item = { seq: number; messageId: string; delivery: 'auto' | 'steer'; text: string; receivedAt: string };
-type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
+type DaemonPending = { id: string; name?: string; kind?: string; input?: unknown };
+type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string; pendingPermissions?: DaemonPending[] } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
 const caps = ['prompt.message', 'prompt.steer', 'session.persistence', 'permission'] as const;
 type PendingRequest = { toolUseId: string; toolName: string; kind: 'question' | 'tool'; input: Record<string, unknown> };
+type RequestEntry = { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response']; openedAt: number; closedAt?: number; imported?: boolean; tombstone?: boolean };
+// 对账兜底（#1737 评论 6734539343）：云端 forward 停止后关闭请求不再到达，Paseo 会一直显示网页上早已处理的请求。
+const SUPERSEDE_MS = 10 * 60_000; // 同一会话之后有新请求、本请求已过 10 分钟：网页上已处理过
+const NEWER_GAP_MS = 60_000; // “新请求”须晚于本条至少 60 秒：并行工具调用几乎同时触发的请求互不算新请求
+const EXPIRE_MS = 2 * 60 * 60_000; // 只用于重载后从 daemon 读回的存量请求
+const REPLAY_CLOSED_MS = 24 * 60 * 60_000;
+export type CloudSessionOptions = { store?: CloudRequestStore; now?: () => number; sweepIntervalMs?: number; importFromDaemon?: boolean };
 export const CLOUD_MANUAL_REQUEST_MARKER = 'cloudSessionManual';
 
-const detailReasons: Record<string, string> = {
-  unsupported_tool: '不是 AskUserQuestion',
-  dismissed: '已在 Paseo 忽略',
-  invalid_answer: '答案对不上原问题',
-  request_changed: '原请求已变化',
-  answer_changed: '回答已变化',
-  bridge_not_connected: '配对浏览器未连接',
-  scan_stale: '浏览器扫描不新鲜',
-  not_found: '页面上找不到对应提问',
-  scan_incomplete: '页面扫描不完整',
-  multiple_candidates: '页面上有多个候选提问',
-  other_not_on_page: '页面上该题没有其他输入框',
-  not_claimed: '浏览器未及时领取',
-  no_receipt: '未收到浏览器回执',
-  page_unknown: '扩展复核未通过',
-};
+
 
 function timelineMessage(result: WebRequestResult): string {
   if (result.status === 'submitted') return '已在 claude.ai 页面提交，等待云端确认';
   if (result.status === 'page_not_open') return 'claude.ai 页面没有打开，请在 claude.ai 作答';
   if (result.detail === 'tool_in_browser') return '权限请求由 claude.ai 页面处理，Paseo 里的回答没有提交，请在 claude.ai 核对';
   if (result.detail === 'multiple_instances') return '多个浏览器环境打开了此会话，没有提交，请在 claude.ai 作答';
-  const reason = detailReasons[result.detail] ?? (result.detail || '未知原因');
+  const reason = webRequestDetailReason(result.detail);
   return `结果不确定（${reason}），请在 claude.ai 核对`;
 }
 
@@ -149,14 +144,32 @@ function displayInput(request: PendingRequest): Record<string, unknown> {
   };
 }
 
-export function createCloudSession(connect: () => Promise<Daemon> = connectLocal, answerWebRequest: AnswerWebRequest = async () => ({ status: 'page_not_open' }), resolveWebRequest?: ResolveWebRequest) {
+export function createCloudSession(connect: () => Promise<Daemon> = connectLocal, answerWebRequest: AnswerWebRequest = async () => ({ status: 'page_not_open' }), resolveWebRequest?: ResolveWebRequest, options: CloudSessionOptions = {}) {
+  const now = options.now ?? Date.now;
   const epoch = randomUUID();
   const sessions = new Map<string, Session>();
   const queues = new Map<string, { seq: number; items: Item[]; waiters: Set<() => void> }>();
   const locks = new Map<string, Promise<unknown>>();
   const workspaceReservations = new Map<string, { id: string; path: string }>();
-  const requests = new Map<string, Map<string, { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response'] }>>();
+  const requests = new Map<string, Map<string, RequestEntry>>();
   const pending = (cloud: string) => { let entries = requests.get(cloud); if (!entries) { entries = new Map(); requests.set(cloud, entries); } return entries; };
+  for (const stored of options.store?.load() ?? []) {
+    pending(stored.cloud).set(stored.toolUseId, { request: stored.request ?? { toolUseId: stored.toolUseId, toolName: '', kind: 'tool', input: {} }, closed: stored.closed, delivered: false, openedAt: stored.openedAt, ...(stored.closedAt !== undefined ? { closedAt: stored.closedAt } : {}), ...(stored.imported ? { imported: true } : {}), ...(stored.tombstone ? { tombstone: true } : {}) });
+  }
+  let saving: Promise<unknown> = Promise.resolve();
+  const imports = new Set<Promise<unknown>>();
+  const persist = () => {
+    if (!options.store) return;
+    const entries: StoredRequest[] = [];
+    for (const [cloud, map] of requests) for (const [toolUseId, entry] of map) entries.push({ cloud, toolUseId, closed: entry.closed, openedAt: entry.openedAt, ...(entry.closedAt !== undefined ? { closedAt: entry.closedAt } : {}), ...(entry.imported ? { imported: true } : {}), ...(entry.tombstone ? { tombstone: true } : {}), ...(entry.closed ? {} : { request: entry.request }) });
+    saving = options.store.save(entries).catch(() => { console.error('云端请求表保存失败'); });
+  };
+  const emitResolved = (cloud: string, toolUseId: string) => { const s = sessions.get(cloud); if (s) s.emit({ type: 'session.permission_resolved', sessionId: s.id, permissionId: toolUseId }); };
+  const close = (cloud: string, toolUseId: string, entry: RequestEntry, outcome?: 'answered' | 'denied' | 'canceled') => {
+    entry.closed = true; entry.closedAt = now();
+    if (outcome) resolveWebRequest?.({ webSessionId: `session_${cloud.slice(4)}`, toolUseId, outcome });
+    emitResolved(cloud, toolUseId);
+  };
   const permissionEvent = (s: Session, request: PendingRequest) => {
     const event = ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: displayInput(request), metadata: { [CLOUD_MANUAL_REQUEST_MARKER]: true, webSessionId: `session_${s.cloud.slice(4)}`, toolUseId: request.toolUseId } } });
     s.emit(event);
@@ -164,16 +177,72 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const notify = ({ cloudSessionId, request }: { cloudSessionId: string; request: PendingRequest }) => {
     const s = find(cloudSessionId); const entries = pending(cloudSessionId);
     const existing = entries.get(request.toolUseId);
-    if (existing) { if (!isDeepStrictEqual(existing.request, request)) throw new Error('云端请求内容已变化'); return { shown: false }; }
+    // 已关闭（墓碑）或已显示的编号不再显示。内容不同的重复通知来自云端按工具名猜错编号，不能抛错打断云端流程。
+    if (existing) { if (!existing.closed && !isDeepStrictEqual(existing.request, request)) console.error('云端请求编号重复且内容不同，已忽略'); return { shown: false }; }
     ProviderEventSchema.parse({ type: 'session.permission', sessionId: s.id, request: { id: request.toolUseId, name: request.toolName, kind: request.kind, title: request.toolName, input: request.input } });
     const original = structuredClone(request);
-    entries.set(request.toolUseId, { request: original, closed: false, delivered: false }); permissionEvent(s, original); return { shown: true };
+    entries.set(request.toolUseId, { request: original, closed: false, delivered: false, openedAt: now() }); permissionEvent(s, original); persist(); return { shown: true };
   };
   const resolve = ({ cloudSessionId, toolUseId, outcome }: { cloudSessionId: string; toolUseId: string; outcome: 'answered' | 'denied' | 'canceled' }) => {
-    const entry = requests.get(cloudSessionId)?.get(toolUseId); if (!entry || entry.closed) return { closed: false };
-    entry.closed = true;
-    resolveWebRequest?.({ webSessionId: `session_${cloudSessionId.slice(4)}`, toolUseId, outcome });
-    const s = sessions.get(cloudSessionId); if (s) s.emit({ type: 'session.permission_resolved', sessionId: s.id, permissionId: toolUseId }); return { closed: true };
+    const entries = pending(cloudSessionId);
+    const entry = entries.get(toolUseId);
+    if (entry?.closed) return { closed: false };
+    if (!entry) {
+      // 插件重载等原因丢了条目：仍让 Paseo 撤下，并记墓碑，之后同编号的通知不再显示。
+      entries.set(toolUseId, { request: { toolUseId, toolName: '', kind: 'tool', input: {} }, closed: true, delivered: false, openedAt: now(), closedAt: now(), tombstone: true });
+      emitResolved(cloudSessionId, toolUseId); persist(); return { closed: true };
+    }
+    close(cloudSessionId, toolUseId, entry, outcome); persist(); return { closed: true };
+  };
+  // 撤下网页上已处理过的请求：同会话之后有新请求（晚 60 秒以上，墓碑不算）且本条已过 10 分钟；重载后读回的存量请求等满 2 小时也撤下。
+  // 墓碑超过 7 天或超过上限时丢弃。
+  const sweep = () => {
+    const t = now(); let changed = false;
+    for (const [cloud, entries] of requests) {
+      const openedAt = [...entries.values()].filter(entry => !entry.tombstone).map(entry => entry.openedAt);
+      const stale: string[] = [];
+      for (const [toolUseId, entry] of entries) {
+        if (entry.closed) continue;
+        const superseded = t - entry.openedAt >= SUPERSEDE_MS && openedAt.some(at => at >= entry.openedAt + NEWER_GAP_MS);
+        const expired = entry.imported && t - entry.openedAt >= EXPIRE_MS;
+        if (superseded || expired) { close(cloud, toolUseId, entry); stale.push(toolUseId); }
+      }
+      if (stale.length) {
+        changed = true;
+        const s = sessions.get(cloud);
+        if (s) s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text: `已撤下 ${stale.length} 条 Paseo 中的云端请求：之后已有新的请求，或是插件重载前留下、已等待超过 2 小时的请求，网页上应已处理。如 claude.ai 仍在等待，请在网页上处理。` } });
+      }
+      for (const [toolUseId, entry] of entries) if (entry.closed && t - (entry.closedAt ?? entry.openedAt) > CLOSED_TTL_MS) { entries.delete(toolUseId); changed = true; }
+      if (!entries.size) requests.delete(cloud);
+    }
+    const all = [...requests.entries()].flatMap(([cloud, map]) => [...map.entries()].map(([toolUseId, entry]) => ({ cloud, toolUseId, entry })));
+    if (all.length > STORED_REQUEST_MAX) {
+      const closed = all.filter(item => item.entry.closed).sort((a, b) => (a.entry.closedAt ?? 0) - (b.entry.closedAt ?? 0));
+      for (const item of closed.slice(0, all.length - STORED_REQUEST_MAX)) requests.get(item.cloud)?.delete(item.toolUseId);
+      changed = true;
+    }
+    if (changed) persist();
+  };
+  // 插件重载后从 daemon 读回仍挂着的待批请求（它们已在 Paseo 显示，只登记、不重复显示），交给 sweep 撤下。
+  const importPending = (cloud: string) => {
+    if (!options.importFromDaemon) return;
+    const task = (async () => {
+      let daemon: Daemon | undefined;
+      try {
+        daemon = await connect();
+        const agent = await daemon.list(cloud);
+        const entries = pending(cloud); let added = false;
+        for (const item of agent?.pendingPermissions ?? []) {
+          if (!item?.id || entries.has(item.id)) continue;
+          const input = item.input && typeof item.input === 'object' && !Array.isArray(item.input) ? item.input as Record<string, unknown> : {};
+          entries.set(item.id, { request: { toolUseId: item.id, toolName: item.name ?? '', kind: item.kind === 'question' ? 'question' : 'tool', input }, closed: false, delivered: false, openedAt: now(), imported: true });
+          added = true;
+        }
+        if (added) persist();
+      } catch { console.error('读回云端会话待批请求失败'); }
+      finally { await daemon?.close().catch(() => {}); }
+    })();
+    imports.add(task); void task.finally(() => imports.delete(task));
   };
   const answer = async (s: Session, permissionId: string, response: Extract<ProviderInput, { type: 'session.permission' }>['response']) => {
     const entry = requests.get(s.cloud)?.get(permissionId);
@@ -226,7 +295,11 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
           emit({ type: 'session.config', sessionId: s.id, config: config(s) });
           emit({ type: 'session.commands', sessionId: s.id, commands: [] });
           emit({ type: 'session.ready', requestId: input.requestId, sessionId: s.id });
-          for (const entry of requests.get(cloud)?.values() ?? []) if (!entry.closed) permissionEvent(s, entry.request);
+          for (const [toolUseId, entry] of requests.get(cloud) ?? []) {
+            if (!entry.closed && !entry.imported) permissionEvent(s, entry.request);
+            else if (entry.closed && now() - (entry.closedAt ?? entry.openedAt) <= REPLAY_CLOSED_MS) emitResolved(cloud, toolUseId);
+          }
+          importPending(cloud);
           return;
         }
         if (input.type === 'session.prompt') {
@@ -296,6 +369,16 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
     });
     if (input.startTurn && !s.turn) start(s);
     for (const item of items) s.emit({ type: 'timeline.item', sessionId: s.id, item: item as ProviderTimelineItem });
+    // 工具调用已结束说明网页侧已处理了它的权限请求，不等云端 marker 和关闭请求。
+    let closedAny = false;
+    for (const item of items) {
+      if (item.type !== 'tool_call' || (item.status !== 'completed' && item.status !== 'failed')) continue;
+      const entry = requests.get(input.cloudSessionId)?.get(item.callId);
+      if (!entry || entry.closed) continue;
+      const denied = item.status === 'failed' && /denied|rejected|拒绝/i.test(JSON.stringify(item.error ?? ''));
+      close(input.cloudSessionId, item.callId, entry, denied ? 'denied' : 'answered'); closedAny = true;
+    }
+    if (closedAny) persist();
     if (input.usage) s.emit({ type: 'session.usage', sessionId: s.id, turnId: s.turn ?? undefined, usage: input.usage });
     if (input.endTurn) finish(s, input.endTurn);
     return { accepted: items.length, turnRunning: !!s.turn, epoch };
@@ -323,7 +406,15 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       return { status: response.status, messages: parts.map(part => clean(JSON.parse(part)) as Record<string, unknown>) };
     } catch { throw new Error(controller.signal.aborted ? 'Paseo MCP request timed out' : 'Paseo MCP request failed'); } finally { clearTimeout(timer); }
   };
-  return { provider, ensure, push, poll, ack, mcp, notify, resolve, epoch, dispose() { sessions.clear(); requests.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
+  const status = () => {
+    let unackedMessages = 0;
+    for (const q of queues.values()) unackedMessages += q.items.length;
+    return { enabled: true, onlineSessions: sessions.size, unackedMessages };
+  };
+  const sweepTimer = options.sweepIntervalMs === 0 ? undefined : setInterval(sweep, options.sweepIntervalMs ?? 60_000);
+  sweepTimer?.unref?.();
+  const flush = async () => { await Promise.allSettled([...imports]); await saving; };
+  return { provider, ensure, push, poll, ack, mcp, notify, resolve, sweep, flush, status, epoch, dispose() { clearInterval(sweepTimer); sessions.clear(); requests.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
 }
 
 export function registerCloudSession(server: PluginServerContext, create = createCloudSession) {
@@ -336,5 +427,6 @@ export function registerCloudSession(server: PluginServerContext, create = creat
   server.handle(rpc.forwardMcp, input => cloud.mcp(input));
   server.handle(rpc.notifyPendingRequest, input => cloud.notify(input));
   server.handle(rpc.resolvePendingRequest, input => cloud.resolve(input));
+  server.handle(cloudSessionStatus, () => cloud.status());
   return () => cloud.dispose();
 }

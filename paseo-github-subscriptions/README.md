@@ -32,7 +32,7 @@ macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app
 - 每仓库读取 Issue、对话评论、代码评论和最近 100 条 Actions runs。详情流支持分页、五秒重叠窗口、ETag 和十四天追读上限。首次启动只建立基线。
 - `opened`、`comment`、`review_comment`、`state` 可按仓库或具体对象匹配。整仓库 `ci` 只监听默认分支；`push`、`review` 需要指定 PR，仓库范围选择会返回明确错误。
 - 已跟踪 PR 每五分钟补读详情和评审，每十分钟核对 CI；默认分支每十分钟核对 CI。这些核对用于补充列表更新信号，可能增加请求数。额度偏低、429 或额度耗尽时降速，按重置时间恢复。
-- CI 使用 Actions runs、jobs 和提交状态，不调用 `check-runs`。新提交出现同名失败、恢复后再次失败、取消后重订都有独立事件编号。
+- CI 使用 Actions runs、jobs 和提交状态，不调用 `check-runs`。同一 `workflow_id + event` 分组下优先取最新的非 `cancelled` 运行，仅当该组全部为 `cancelled` 时才取最新的 `cancelled`。首次观测即存在失败项（如新订阅或丢失来源状态重启）会发出一次 `failed`，带已保存状态正常重启不重复发送；新提交出现同名失败、恢复后再次失败、取消后重订都有独立事件编号。
 - 同轮按会话合并。通知最多展开二十条、总长小于四千字符，超出部分给出数量和读取提示。送达记录仍保留全部事件编号。发送使用固定 `messageId` 与 `activeTurnBehavior: 'steer'`。
 - 失败最多尝试三次；重试沿用相同编号和正文。结果未知时停止自动重发并记录原因。提供方设置「跳过本轮」时直接跳过，不等待空闲。
 - 订阅工具描述提示会话使用 `gh issue comment` 或 `gh pr comment` 发评论时，从 `PASEO_AGENT_ID` 读取当前会话 ID，在正文末尾另起一行添加 `<!-- paseo-ghsub agent=<当前会话ID> -->`。只过滤写评论的会话，其他订阅者仍能收到。插件不再提供评论发布工具；未按格式加标记的评论照常送达。
@@ -54,6 +54,19 @@ macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app
 最近事件保留七天、最多五百条；完成的送达记录保留十四天、最多五千条；待发记录不按数量裁剪。去重与评论登记保留十四天。切换到影子模式会把已有待发记录转为影子记录，切回实发不会补发这些记录。停用期间不轮询；重新启用后按保存的游标追读并受消息摘要上限约束。
 
 令牌保存前请求 GitHub `/user` 验证。请求仅发往 `api.github.com`，拒绝重定向、跨主机分页和 `/notifications`。客户端令牌输入为密文，保存成功后清空；RPC 快照、日志、状态文件不包含令牌。令牌文件本身是权限受限的本机文件，未声称由系统钥匙串加密。
+
+## 模块、机器配置和两个实例（#1737）
+
+服务端入口 `index.server.ts` 只做组装：读机器配置，建共享守护进程连接和服务，注册模块。
+
+- **模块**：`server/modules/<名称>/index.ts` 导出一个 `Module`，加到 `server/modules/index.ts` 的 `MODULES`。每个模块的注册单独捕获错误，失败只停这个模块；处理函数、钩子和 Provider 回调在模块的异步上下文中运行。进程级 `unhandledRejection` 和 `uncaughtException` 按模块记录，不让插件进程退出。RPC `modules.status` 返回每个模块的状态（运行、关闭、出错和原因）。
+- **共享连接**：`server/core/daemon.ts` 的 `SharedDaemon`，用法 `const { paseo, client } = await context.services.daemon.ready()`。守护进程启动初期 `paseo.pid` 没有监听地址，连接最多等 60 秒；失败后下次调用重试。不要在模块中另开本机连接。
+- **机器配置**：`~/.paseo/github-subscriptions/machine.json`（可用环境变量 `PASEO_GHSUB_MACHINE_CONFIG` 指定），样例见 `config/machine.example.json`。同步读取。`modules` 写模块开关；其他键是各模块登记的区块（模块定义中的 `config: { section, spec: { schema, fallback } }`）。一个区块不合法只停用依赖它的模块。没有文件时全部用默认值，默认值等于整合前的行为。
+- **两个实例**：角色由 `shared/instance.ts` 决定。仓库中为 `null`（兼容模式：按 main 处理并保留云端会话）。部署脚本在部署目录中写入 `'main'` 或 `'provider'`：
+  - `main`（安装 ID `github-subscriptions`）：页面和除 Provider 以外的全部模块。云端程序写死调用这个 ID，所以主实例保留云端会话的 RPC 并转给 Provider 实例。
+  - `provider`（安装 ID `dev-automation-providers`）：只注册 Provider 模块，状态写到 `~/.paseo/github-subscriptions/providers/`，不注册任何界面。
+- **部署**：`node --experimental-strip-types scripts/deploy.ts --role main|provider --ref <标签或提交> [--install] [--reload]`。重载前检查旧实例和新实例托管的 Provider 有没有运行中轮次，有就停止。
+- **提交前扫描**：`npm run scan`（已包含在 `npm run check`），命中邮箱、Apple 隐藏邮箱、webhook 地址或令牌格式时失败。测试数据所在行写 `scan-allow`。
 
 ## 开发检查
 
@@ -79,6 +92,10 @@ npm run test:daemon
 | `validation/gh-self-comment-20261106.json` | 真实 GitHub 评论读回、会话标记识别和发布会话自通知过滤 |
 
 界面预览说明与复现命令见 [界面验收](validation/ui/README.md)。该预览使用真实客户端组件、假宿主和假 RPC，主题颜色为近似值，不能代替原生 Paseo 的生产验收。Mac Mini 已验证从胶囊进入全局页；用户报告的重复弹层尚未复现，根因待确认。手机系统面板、真实胶囊排序、MacBook 原生界面和二十四小时影子观测仍需验证。
+
+## 账号额度与问题答复模块（#1737 第二期）
+
+`usage.claudeAccounts`、`answer.quietChildren`、`answer.escalation` 三个模块和 `core/session-roles`（主会话 = 置顶工作区中的会话）。默认关闭，在 `machine.json` 的 `modules` 中打开；区块 `claudeAccounts`、`quietChildren`、`escalation` 见 `config/machine.example.json`。行为变化、旧状态迁移（只复制）、旧插件保护和已知限制见 [docs/answer-usage-modules.md](docs/answer-usage-modules.md)。
 
 ## 原型复用边界
 

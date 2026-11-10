@@ -11,7 +11,7 @@ export interface PreviewOptions {
   scene: Scene;
   layout: 'wide' | 'compact';
   theme: 'light' | 'dark';
-  /** 例如 screen:main、screen:settings、agent:agent-main */
+  /** 例如 screen:main、agent:agent-main */
   route: string;
 }
 
@@ -21,13 +21,23 @@ const themes: Record<'light' | 'dark', MockHostTheme> = {
   dark: { colors: { surface0: '#151517', surface1: '#1c1c1f', surface2: '#2b2b2f', border: '#303035', foreground: '#ececef', foregroundMuted: '#8e8e95', accent: '#5b8cff', accentForeground: '#ffffff', statusSuccess: '#4cc274', statusWarning: '#e3a33b', statusDanger: '#ff6b66' } },
 };
 
-type Route = { kind: 'screen'; screenId: string; params: Record<string, string> } | { kind: 'agent'; agentId: string };
+type Route =
+  | { kind: 'screen'; screenId: string; params: Record<string, string> }
+  | { kind: 'agent'; agentId: string };
 type Popover = { kind: 'sidebar' | 'pill'; Content: ComponentType<never>; props: Record<string, unknown> } | null;
 
 function parseRoute(text: string): Route {
-  const [kind, id] = text.split(':');
+  const [rawTarget, rawQuery] = text.split('?');
+  const [kind, id] = (rawTarget ?? '').split(':');
+  const params: Record<string, string> = {};
+  if (rawQuery) {
+    for (const pair of rawQuery.split('&')) {
+      const [k, v] = pair.split('=');
+      if (k) params[decodeURIComponent(k)] = decodeURIComponent(v ?? '');
+    }
+  }
   if (kind === 'agent' && id) return { kind: 'agent', agentId: id };
-  return { kind: 'screen', screenId: id || 'main', params: {} };
+  return { kind: 'screen', screenId: id || 'main', params };
 }
 
 export interface PreviewHandle {
@@ -51,12 +61,19 @@ export function createPreview(options: PreviewOptions) {
           const found = agents.find((agent) => agent.id === agentId);
           return { id: agentId, workspaceId: found?.workspaceId ?? null, refresh: async () => null };
         },
+        async list() {
+          return {
+            entries: agents.map(a => ({ agent: { id: a.id, title: a.title, status: 'idle', archivedAt: null } })),
+            pageInfo: { hasMore: false },
+          };
+        },
       },
     },
     rpc: (contract: Parameters<FakeDaemon['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
     openScreen: (input: { screenId: string; params?: Record<string, string> }) => route.set({ kind: 'screen', screenId: input.screenId, params: input.params ?? {} }),
     addScreen: (entry: Parameters<Registry['addScreen']>[0]) => registry.addScreen(entry),
     addSidebarHeaderItem: (entry: Parameters<Registry['addSidebar']>[0]) => registry.addSidebar(entry),
+    addCommandCenterItem: (entry: Parameters<Registry['addCommandCenterItem']>[0]) => registry.addCommandCenterItem(entry),
     addComposerPill: (entry: PillEntry) => registry.addPill(entry),
   } as unknown as PluginClientContext;
 

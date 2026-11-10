@@ -1,0 +1,366 @@
+{
+ "source": "claude.ai 业务会话，2026-11-09 04:3x UTC，SunBrowser 29 号环境，只读导出；标题和工作区编号已替换为占位符",
+ "note": "带阅读门槛的 MCP 权限卡片（rename_workspace）：有 [data-testid=approval-read-rows] 参数表和 [data-testid=approval-read-hint]“Scroll to the end to allow this.”。可见按钮 Deny、Allow once（未禁用）、More allow options。未滚到底时点 Allow once 无效（#1704 评论 6732374037）。",
+ "format": "[标签, 属性, ...子节点]；子节点为字符串时是文本；属性名以“.”开头的是元素运行时属性",
+ "tree": [
+  "div",
+  {
+   "tabindex": "0",
+   "role": "group",
+   "aria-label": "Permission request: use rename workspace (paseo)",
+   "data-approval-card-root": "",
+   "data-approval-card-digits": "3",
+   "data-approval-presentation": "card",
+   "data-fixed-code-size": ""
+  },
+  [
+   "div",
+   {
+    "data-fixed-code-size": "",
+    "data-testid": "approval-title-region"
+   },
+   [
+    "div",
+    {},
+    [
+     "div",
+     {},
+     [
+      "span",
+      {},
+      [
+       "span",
+       {},
+       [
+        "span",
+        {},
+        [
+         "span",
+         {
+          "data-approval-value": ""
+         },
+         "Allow Claude to",
+         [
+          "span",
+          {},
+          "use rename workspace (paseo)"
+         ],
+         "?"
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  [
+   "div",
+   {
+    "data-fixed-code-size": ""
+   },
+   [
+    "div",
+    {},
+    [
+     "p",
+     {
+      "data-testid": "approval-always-allow-saves"
+     },
+     "“Always allow” lasts for this session and covers:",
+     "every use of",
+     [
+      "code",
+      {},
+      "mcp__paseo__rename_workspace"
+     ]
+    ],
+    [
+     "div",
+     {
+      "data-testid": "approval-read-rows",
+      "data-approval-read-rows": ""
+     },
+     [
+      "div",
+      {},
+      [
+       "span",
+       {
+        "aria-hidden": "true"
+       },
+       "What Claude sent"
+      ],
+      [
+       "ul",
+       {
+        "role": "list",
+        "aria-label": "What Claude sent"
+       },
+       [
+        "li",
+        {},
+        [
+         "span",
+         {},
+         "Title"
+        ],
+        [
+         "span",
+         {
+          "data-approval-value": ""
+         },
+         [
+          "bdi",
+          {},
+          "测试工作区标题"
+         ]
+        ]
+       ],
+       [
+        "li",
+        {},
+        [
+         "span",
+         {},
+         "Workspace ID"
+        ],
+        [
+         "span",
+         {
+          "data-approval-value": ""
+         },
+         [
+          "bdi",
+          {},
+          "wks_TEST1"
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ],
+  [
+   "span",
+   {}
+  ],
+  [
+   "div",
+   {},
+   [
+    "p",
+    {
+     "aria-live": "polite"
+    }
+   ],
+   [
+    "p",
+    {
+     "aria-hidden": "true",
+     "data-testid": "approval-read-hint"
+    },
+    "Scroll to the end to allow this."
+   ],
+   [
+    "div",
+    {},
+    [
+     "span",
+     {},
+     [
+      "button",
+      {
+       "type": "button",
+       "data-cds": "Button",
+       "aria-keyshortcuts": "Escape",
+       "data-approval-variant": "secondary",
+       "data-keeps-width": "",
+       ".disabled": false
+      },
+      [
+       "span",
+       {
+        "aria-hidden": "true"
+       },
+       [
+        "span",
+        {
+         "data-cds-part": "paint"
+        }
+       ]
+      ],
+      [
+       "span",
+       {},
+       [
+        "span",
+        {
+         "data-approval-digit": "1"
+        },
+        "Deny"
+       ]
+      ]
+     ]
+    ],
+    [
+     "div",
+     {
+      "data-approval-allow": ""
+     },
+     [
+      "span",
+      {},
+      [
+       "div",
+       {
+        "data-cds": "SplitDropdownButton",
+        "role": "group",
+        "aria-label": "More allow options"
+       },
+       [
+        "div",
+        {
+         "data-cds-segment": ""
+        },
+        [
+         "div",
+         {},
+         [
+          "button",
+          {
+           "type": "button",
+           "data-cds": "Button",
+           "aria-keyshortcuts": "Meta+Enter",
+           ".disabled": false
+          },
+          [
+           "span",
+           {
+            "aria-hidden": "true"
+           },
+           [
+            "span",
+            {
+             "data-cds-part": "paint"
+            }
+           ]
+          ],
+          [
+           "span",
+           {},
+           [
+            "span",
+            {
+             "data-approval-digit": "2",
+             "data-approval-primary": ""
+            },
+            "Allow once"
+           ],
+           [
+            "span",
+            {
+             "aria-hidden": "true",
+             "data-cds": "Shortcut",
+             "data-variant": "keycap"
+            },
+            [
+             "kbd",
+             {},
+             [
+              "span",
+              {
+               "aria-hidden": "true"
+              },
+              "⌘"
+             ],
+             [
+              "span",
+              {},
+              "Command"
+             ]
+            ],
+            [
+             "kbd",
+             {},
+             [
+              "span",
+              {
+               "aria-hidden": "true"
+              },
+              "⏎"
+             ],
+             [
+              "span",
+              {},
+              "Enter"
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ],
+       [
+        "span",
+        {
+         "aria-hidden": "true"
+        },
+        [
+         "span",
+         {
+          "data-cds-seam-line": ""
+         }
+        ]
+       ],
+       [
+        "div",
+        {
+         "data-cds-segment": ""
+        },
+        [
+         "button",
+         {
+          "type": "button",
+          "data-cds": "Button",
+          "data-cds-icon-only": "",
+          "aria-label": "More allow options",
+          "tabindex": "0",
+          "aria-haspopup": "menu",
+          "aria-expanded": "false",
+          "id": "base-ui-_r_1cj_",
+          ".disabled": false
+         },
+         [
+          "span",
+          {
+           "aria-hidden": "true"
+          },
+          [
+           "span",
+           {
+            "data-cds-part": "paint"
+           }
+          ]
+         ],
+         [
+          "span",
+          {},
+          [
+           "span",
+           {
+            "data-cds": "Icon",
+            "aria-hidden": "true"
+           },
+           ""
+          ]
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  ]
+ ]
+}

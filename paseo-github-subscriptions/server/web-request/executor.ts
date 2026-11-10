@@ -28,6 +28,8 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 const MAX_AUDIT = 300;
 const DEDUP_TTL_MS = 10 * 60_000;
 const MAX_DEDUP = 500;
+const LATE_POLL_MS = 1_000;
+const LATE_WATCH_MS = 10 * 60_000;
 
 export interface WebRequestBridgeSession {
   instanceId: string;
@@ -72,6 +74,9 @@ export interface WebRequestRuntimePort {
     browserSubmittedAt?: string;
     reason?: string;
   } | null;
+  // 网页作答结果和云端确认的回写（在线离线问答据此把未确认的提问放回人工待办）。
+  noteWebResult?(input: { webSessionId: string; toolUseId: string; result: WebRequestResult; late?: boolean }): void;
+  noteCloudConfirmed?(input: { webSessionId: string; toolUseId: string; outcome: CloudRequestOutcome }): void;
 }
 
 export interface WebRequestExecutorOptions {
@@ -187,28 +192,20 @@ export class WebRequestExecutor {
     }
   }
 
+  // 首个结果之后才到的扩展回执另记在 lateReceipt，webSubmitted 保持首个结果。
   private checkLateReceipts() {
     let changed = false;
     for (const [key, watcher] of this.lateWatchers) {
       const state = this.runtime.browserState(watcher.candidateId);
       if (!state) continue;
+      const { entry } = watcher;
       if (state.browserSubmittedAt) {
-        watcher.entry.webSubmitted = {
-          at: state.browserSubmittedAt,
-          instanceId: watcher.instanceId,
-          status: 'submitted',
-          lateReceipt: true,
-        };
+        entry.lateReceipt = { at: state.browserSubmittedAt, status: 'submitted' };
         this.lateWatchers.delete(key);
         changed = true;
+        this.runtime.noteWebResult?.({ webSessionId: entry.webSessionId, toolUseId: entry.toolUseId, result: { status: 'submitted' }, late: true });
       } else if (state.state === 'unknown' || (state.state === 'resolved' && !state.browserSubmittedAt)) {
-        watcher.entry.webSubmitted = {
-          at: new Date(this.clock()).toISOString(),
-          instanceId: watcher.instanceId,
-          status: 'unknown',
-          detail: 'page_unknown',
-          lateReceipt: true,
-        };
+        entry.lateReceipt = { at: new Date(this.clock()).toISOString(), status: 'unknown', detail: 'page_unknown' };
         this.lateWatchers.delete(key);
         changed = true;
       }
@@ -216,7 +213,17 @@ export class WebRequestExecutor {
     if (changed) void this.persistAudit();
   }
 
+  private async watchLate(key: string): Promise<void> {
+    const until = this.clock() + LATE_WATCH_MS;
+    while (this.lateWatchers.has(key) && this.clock() < until) {
+      await this.sleep(LATE_POLL_MS);
+      this.checkLateReceipts();
+    }
+    this.lateWatchers.delete(key);
+  }
+
   confirmCloud(input: { webSessionId: string; toolUseId: string; outcome: CloudRequestOutcome }): void {
+    this.runtime.noteCloudConfirmed?.(input);
     void this.ensureLoaded().then(() => {
       this.checkLateReceipts();
       for (let i = this.auditEntries.length - 1; i >= 0; i--) {
@@ -386,6 +393,8 @@ export class WebRequestExecutor {
         } else {
           auditEntry.webSubmitted = { at, ...(instanceId ? { instanceId } : {}), status: 'unknown', detail: result.detail };
         }
+        // 云端已记录结果（例如用户已在网页上手动作答）时，不再让问答侧把提问重新打开。
+        if (!auditEntry.cloudConfirmed) this.runtime.noteWebResult?.({ webSessionId: request.webSessionId, toolUseId: request.toolUseId, result });
         await this.persistAudit();
         return result;
       };
@@ -488,6 +497,7 @@ export class WebRequestExecutor {
             instanceId,
             entry: auditEntry,
           });
+          void this.watchLate(dedupKey);
           return finish({ status: 'unknown', detail: 'no_receipt' }, instanceId);
         }
         await this.sleep(this.pollIntervalMs);

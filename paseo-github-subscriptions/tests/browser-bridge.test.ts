@@ -75,7 +75,9 @@ test('配对鉴权、严格输入、跨 profile 绑定、重命名及关闭', as
     assert.equal(bridge.snapshot().bindings.length, 0);
     await bridge.configure({ enabled: false, port: Number(new URL(pairing.url).port) });
     assert.equal(bridge.snapshot().connected, false);
-    await assert.rejects(fetch(pairing.url)); await assert.rejects(bridge.pairing());
+    const disabledSync = await (await post({ instanceId: 'p1', sessions: [session('abc')] })).json() as { approvalEnabled: boolean };
+    assert.equal(disabledSync.approvalEnabled, false);
+    await assert.rejects(bridge.pairing());
   } finally { await bridge.stop(); await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -151,6 +153,8 @@ test('answerWebRequest 转调执行器且 freshSessions 只返回 70 秒内的�
     assert.deepEqual(res, { status: 'submitted' });
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], request);
+    assert.equal(bridge.snapshot().extensionPath?.startsWith('/'), true);
+    assert.equal(bridge.snapshot().extensionPath?.endsWith('/browser-extension'), true);
   } finally {
     await bridge.stop();
     await rm(dir, { recursive: true, force: true });

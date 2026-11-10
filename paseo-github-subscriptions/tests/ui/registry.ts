@@ -12,6 +12,12 @@ export interface SidebarEntry {
   title: string;
   Component: AnyComponent;
 }
+export interface CommandEntry {
+  id: string;
+  title: string;
+  context: string;
+  onSelect(ctx: unknown): void | Promise<void>;
+}
 export interface PillButton {
   title: string;
   label?: string;
@@ -31,6 +37,7 @@ export interface PillEntry {
 export class Registry {
   readonly screens = new Map<string, ScreenEntry>();
   readonly sidebar = new Map<string, SidebarEntry>();
+  readonly commands = new Map<string, CommandEntry>();
   readonly pills = new Map<string, PillEntry>();
   /** 记录所有注册、更新、移除，用来验收清理是否完整。 */
   readonly events: string[] = [];
@@ -64,6 +71,16 @@ export class Registry {
     this.bump();
     return () => {
       if (this.sidebar.delete(entry.id)) this.events.push(`sidebar- ${entry.id}`);
+      this.bump();
+    };
+  }
+  addCommandCenterItem(entry: CommandEntry) {
+    if (this.commands.has(entry.id)) throw new Error(`重复的命令项 ${entry.id}`);
+    this.commands.set(entry.id, entry);
+    this.events.push(`cmd+ ${entry.id}`);
+    this.bump();
+    return () => {
+      if (this.commands.delete(entry.id)) this.events.push(`cmd- ${entry.id}`);
       this.bump();
     };
   }

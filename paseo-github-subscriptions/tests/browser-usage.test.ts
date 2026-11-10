@@ -911,11 +911,22 @@ test('toUsageReport 覆盖第 6.3 节全部状态行、重置时间已过提示�
   ]);
   assertNoAbsoluteTime(channelClosed);
 
-  // 3. 不在线，有数据
-  const offlineWithData = toUsageReport({
+  // 3a. 扩展每分钟上报，休眠会让闹钟延迟：200 秒未上报仍按在线处理
+  const lateButOnline = toUsageReport({
     instanceId: 'env-1',
     instanceName: '环境 1',
     lastPostAt: now - 200_000,
+    status: 'ok',
+    ...baseWindows,
+  }, now, true);
+  assert.equal(lateButOnline.status, 'available');
+  assert.equal(lateButOnline.details?.some(d => d.id === 'state'), false, '200 秒未上报不应判为离线');
+
+  // 3. 不在线（5 分钟以上未上报），有数据：如实说明多久没同步
+  const offlineWithData = toUsageReport({
+    instanceId: 'env-1',
+    instanceName: '环境 1',
+    lastPostAt: now - 6 * 60_000,
     status: 'ok',
     ...baseWindows,
   }, now, true);
@@ -923,7 +934,7 @@ test('toUsageReport 覆盖第 6.3 节全部状态行、重置时间已过提示�
   assert.equal(offlineWithData.windows[0].usedPct, 59);
   assert.equal(offlineWithData.windows[0].tone, 'default');
   assert.deepEqual(offlineWithData.details, [
-    { id: 'state', label: '状态', value: '未打开浏览器，无法检测剩余额度，只展示上一次同步的额度', tone: 'warning' },
+    { id: 'state', label: '状态', value: '浏览器扩展最后一次同步在 6 分钟前（可能未打开浏览器或扩展休眠），无法检测剩余额度，只展示上一次同步的额度', tone: 'warning' },
     { id: 'synced', label: '上一次同步', value: '2 小时 15 分钟前' },
   ]);
   assertNoAbsoluteTime(offlineWithData);
@@ -932,14 +943,14 @@ test('toUsageReport 覆盖第 6.3 节全部状态行、重置时间已过提示�
   const offlineNoData = toUsageReport({
     instanceId: 'env-1',
     instanceName: '环境 1',
-    lastPostAt: now - 200_000,
+    lastPostAt: now - 6 * 60_000,
     status: 'pending',
     fiveHour: null,
     weekly: null,
   }, now, true);
   assert.deepEqual(offlineNoData, {
     status: 'unavailable',
-    problem: { kind: 'no_quota', detail: '未打开浏览器，无法检测剩余额度，还没有同步过额度' },
+    problem: { kind: 'no_quota', detail: '浏览器扩展最后一次同步在 6 分钟前（可能未打开浏览器或扩展休眠），还没有同步过额度' },
   });
   assertNoAbsoluteTime(offlineNoData);
 
@@ -1073,7 +1084,7 @@ test('toUsageReport 覆盖第 6.3 节全部状态行、重置时间已过提示�
   assert.equal(pastResetReport.windows[1].usedPct, 46);
   assert.equal(
     pastResetReport.details?.[0].value,
-    '未打开浏览器，无法检测剩余额度，只展示上一次同步的额度；部分窗口已过重置时间，实际用量可能更低',
+    '浏览器扩展最后一次同步在 5 分钟前（可能未打开浏览器或扩展休眠），无法检测剩余额度，只展示上一次同步的额度；部分窗口已过重置时间，实际用量可能更低',
   );
   assertNoAbsoluteTime(pastResetReport);
 });
@@ -1475,7 +1486,7 @@ test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置
   installTsxAndReactNativeHooks();
   const React = (await import('react')).default;
   const { isValidElement } = await import('react');
-  const { AdsPowerKeyCard } = await import('../client/dashboard.tsx');
+  const { AdsPowerKeyCard } = await import('../client/drawers.tsx');
   const { bind } = await import('../client/ui.tsx');
 
   const mockTheme = {
@@ -1515,6 +1526,11 @@ test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置
     if (!isValidElement(element)) return '';
     const el = element as { type: unknown; props: Record<string, unknown> };
     if (typeof el.type === 'function') {
+      const proto = (el.type as { prototype?: { isReactComponent?: boolean } }).prototype;
+      if (proto && proto.isReactComponent) {
+        const Ctor = el.type as unknown as new (props: Record<string, unknown>) => { render(): unknown };
+        return renderTree(new Ctor(el.props).render());
+      }
       return renderTree((el.type as (props: Record<string, unknown>) => unknown)(el.props));
     }
     if (typeof el.type === 'object' && el.type !== null && 'value' in el.props) {
@@ -1596,4 +1612,62 @@ test('AdsPowerKeyCard 前端界面：key 来自环境变量时显示“已配置
   const noneText = renderWithSettings({ adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' });
   assert.ok(noneText.includes('当前状态：未配置'));
   assert.equal(noneText.includes('清除 API key'), false);
+});
+
+test('插件重载后不因落盘的旧上报时间立刻判离线：宽限期内显示等待同步，扩展上报后在线；上报时间至少每 5 分钟落盘', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-usage-reload-'));
+  let now = Date.parse('2026-11-09T12:40:00.000Z');
+  const post = {
+    instanceId: 'env-1',
+    instanceName: '环境 1',
+    status: 'ok' as const,
+    observedAt: '2026-11-09T12:39:00.000Z',
+    fiveHour: { usedPct: 59, resetsAt: '2026-11-09T14:10:00.000Z', observedAt: '2026-11-09T12:39:00.000Z' },
+    weekly: { usedPct: 65, resetsAt: '2026-11-14T00:00:00.000Z', observedAt: '2026-11-09T12:39:00.000Z' },
+  };
+  const bridge = async () => ({ setUsageRoute() {}, snapshot: () => ({ settings: { enabled: true, port: 17373 } }) } as unknown as BrowserBridge);
+  const start = () => {
+    let registered: UsageSourceRegistration | null = null;
+    const store = registerBrowserUsage({ registerUsageSource(source) { registered = source; } }, bridge, dir, () => now, { adspowerMinIntervalMs: 0, fetchFn: (async () => ({ ok: false, status: 404, async json() { return {}; } })) as never });
+    return { store, fetch: async () => (registered as unknown as UsageSourceRegistration).fetch({ instanceId: 'env-1' } as never) as Promise<UsageReport> };
+  };
+  const state = (report: UsageReport) => report.status === 'available' ? report.details?.find(d => d.id === 'state')?.value ?? null : null;
+  const savedPostAt = async () => JSON.parse(await readFile(join(dir, 'browser-usage.json'), 'utf8')).records[0].lastPostAt as number;
+  try {
+    // 重载前：扩展上报（数据有变化，立即落盘）
+    const first = start();
+    await first.store.record(post, now);
+    await first.store.flushQueries();
+    assert.equal(await savedPostAt(), now);
+    await first.store.stop();
+
+    // 20 分钟后插件重载：文件里的上报时间已旧，扩展还没来得及上报
+    now += 20 * 60_000;
+    const second = start();
+    let report = await second.fetch();
+    assert.equal(state(report), '插件刚重新加载，正在等待浏览器扩展同步，暂时展示上一次同步的额度');
+    assert.doesNotMatch(JSON.stringify(report), /未打开浏览器/);
+
+    // 扩展上报后在线
+    now += 30_000;
+    await second.store.record(post, now);
+    report = await second.fetch();
+    assert.equal(state(report), null);
+    // 数据没变化：不到 5 分钟不落盘，满 5 分钟后落盘新的上报时间
+    const reloadedAt = now - 30_000;
+    assert.equal(await savedPostAt(), reloadedAt - 20 * 60_000);
+    now = reloadedAt + 5 * 60_000 + 1000;
+    await second.store.record(post, now);
+    assert.equal(await savedPostAt(), now);
+    await second.store.stop();
+
+    // 重载后一直没有上报：宽限期（5 分钟）结束后如实显示多久没同步
+    const third = start();
+    now += 6 * 60_000;
+    report = await third.fetch();
+    assert.equal(state(report), '浏览器扩展最后一次同步在 6 分钟前（可能未打开浏览器或扩展休眠），无法检测剩余额度，只展示上一次同步的额度');
+    await third.store.stop();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

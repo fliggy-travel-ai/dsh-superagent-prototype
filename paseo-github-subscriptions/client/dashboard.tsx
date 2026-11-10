@@ -1,298 +1,1102 @@
-import type { PluginScreenProps, PluginSurfaceProps } from '@getpaseo/plugin/client';
-import { useEffect, useRef, useState } from 'react';
-import { Linking, ScrollView, Switch, Text, TextInput, View } from 'react-native';
-import type { AutomationSnapshot } from '../shared/automation.ts';
-import type { BrowserPairing, BrowserSnapshot } from '../shared/browser.ts';
-import type { BrowserUsageSettings } from '../shared/browser-usage.ts';
+import type { PluginScreenProps } from '@getpaseo/plugin/client';
+import { useEffect, useState, type ComponentProps } from 'react';
+import { Linking, Pressable, ScrollView, Switch, Text, TextInput, View } from 'react-native';
+import type { Question, QuestionAnswer, QuestionPrompt } from '../shared/presence.ts';
+import type { TodoItem, TodoType } from '../shared/todo.ts';
+import { DrawerOverlay, type DrawerId } from './drawers.tsx';
+import { ago } from './format.ts';
+import { GitHubSubscriptionsViews } from './screen/index.tsx';
+import { computeHasAlert, computeTodoCount, setLastNonTodoPage } from './sidebar-state.ts';
 import { errorMessage } from './store.ts';
-import { GitHubPanel } from './screen/index.tsx';
-import { PresencePanel, QuestionList, todoQuestions, presenceLabel } from './presence-panel.tsx';
-import { isUnreadAutomaticAnswer } from '../shared/presence.ts';
-import { Btn, Card, Chip, Notice, useControlState, useStoreState, useUi } from './ui.tsx';
+import { Btn, Card, Chip, FeatureCard, Notice, Segmented, useControlState, useStoreState, useUi } from './ui.tsx';
 
-type Section = 'overview' | 'sessions' | 'browser' | 'usage' | 'github' | 'todos' | 'activity';
-type Run = (operation: () => Promise<unknown>) => Promise<void>;
-type Session = AutomationSnapshot['sessions'][number];
-const sections: Array<{ id: Section; title: string }> = [
-  { id: 'overview', title: '概览' }, { id: 'sessions', title: '问答模式' },
-  { id: 'browser', title: '浏览器分组' }, { id: 'usage', title: '额度设置' },
-  { id: 'github', title: 'GitHub 订阅' },
-  { id: 'todos', title: '人工待办' }, { id: 'activity', title: '最近动作' },
+export interface QuestionDraftState {
+  answers: Record<string, string[]>;
+  otherAnswers: Record<string, string>;
+}
+
+export function pickPromptOption(prompt: QuestionPrompt, current: QuestionDraftState, nextPicked: string[]): QuestionDraftState {
+  const answers = { ...current.answers, [prompt.question]: nextPicked };
+  const otherAnswers = { ...current.otherAnswers };
+  if (!prompt.multiSelect && nextPicked.length > 0) {
+    otherAnswers[prompt.question] = '';
+  }
+  return { answers, otherAnswers };
+}
+
+export function changePromptOther(prompt: QuestionPrompt, current: QuestionDraftState, value: string): QuestionDraftState {
+  const otherAnswers = { ...current.otherAnswers, [prompt.question]: value };
+  const answers = { ...current.answers };
+  if (!prompt.multiSelect && value.length > 0) {
+    answers[prompt.question] = [];
+  }
+  return { answers, otherAnswers };
+}
+
+export function isPromptComplete(prompt: QuestionPrompt, picked: string[], otherText?: string): boolean {
+  const other = (otherText ?? '').trim();
+  if (other.length > 0 && (!prompt.allowOther || other.length > 2000)) return false;
+  const count = picked.length + (other.length > 0 ? 1 : 0);
+  return prompt.multiSelect ? count >= 1 : count === 1;
+}
+
+export function isQuestionAnswerable(question: Question): boolean {
+  return (question.pages ?? 1) <= 1 && question.prompts.length > 0 && question.prompts.every(prompt => prompt.options.length > 0 || Boolean(prompt.allowOther));
+}
+
+export function isQuestionComplete(question: Question, answers: Record<string, string[]>, otherAnswers: Record<string, string>): boolean {
+  return isQuestionAnswerable(question) && question.prompts.every(prompt => isPromptComplete(prompt, answers[prompt.question] ?? [], otherAnswers[prompt.question]));
+}
+
+export function buildQuestionSubmission(question: Question, answers: Record<string, string[]>, otherAnswers: Record<string, string>): QuestionAnswer {
+  const submittedAnswers: Record<string, string[]> = {};
+  const submittedOther: Record<string, string> = {};
+  for (const prompt of question.prompts) {
+    submittedAnswers[prompt.question] = answers[prompt.question] ?? [];
+    const trimmed = (otherAnswers[prompt.question] ?? '').trim();
+    if (trimmed) submittedOther[prompt.question] = trimmed;
+  }
+  return {
+    id: question.id,
+    answers: submittedAnswers,
+    ...(Object.keys(submittedOther).length ? { otherAnswers: submittedOther } : {}),
+  };
+}
+
+export type PageId = 'providers' | 'answer' | 'github' | 'todo';
+
+const NAV_ITEMS: readonly { id: PageId; num: string; label: string }[] = [
+  { id: 'providers', num: '1', label: 'Provider 与账号' },
+  { id: 'answer', num: '2', label: '问题答复' },
+  { id: 'github', num: '3', label: 'GitHub 订阅' },
+  { id: 'todo', num: '4', label: '待办总览' },
 ];
-const toolNames: Record<string, string> = { Read: '读取文件', Glob: '查找文件', Grep: '搜索内容', Edit: '编辑文件', Write: '写入文件', MultiEdit: '多处编辑', NotebookEdit: '编辑笔记本' };
 
-export function AdsPowerKeyCard() {
+function isModuleOff(
+  id: string,
+  machineSettings: { modules: ReadonlyArray<{ id: string; enabled: boolean; state: string }> } | null,
+  modules: { modules: ReadonlyArray<{ id: string; state: string }> } | null,
+): boolean {
+  const msMod = machineSettings?.modules.find(m => m.id === id);
+  if (msMod) return !msMod.enabled || msMod.state === 'off';
+  const liveMod = modules?.modules.find(m => m.id === id);
+  if (liveMod) return liveMod.state === 'off';
+  return false;
+}
+
+function ModuleOffHint() {
+  return <Chip label="未启用" tone="neutral" />;
+}
+
+function ModuleFeatureCard({ moduleId, label, featureEnabled, ...props }: Omit<ComponentProps<typeof FeatureCard>, 'trailing' | 'notice'> & {
+  moduleId: string;
+  label: string;
+  featureEnabled?: boolean;
+}) {
   const { s, control, theme } = useUi();
-  const [settings, setSettings] = useState<BrowserUsageSettings | null>(null);
-  const [value, setValue] = useState('');
-  const [busy, setBusy] = useState<'save' | 'remove' | null>(null);
+  const { machineSettings, machineSettingsError, moduleReloading, moduleReloadingId, moduleReloadUnverified } = useControlState();
+  const [error, setError] = useState<string | null>(null);
+  const item = machineSettings?.modules.find(m => m.id === moduleId);
+  return <FeatureCard {...props}
+    trailing={<Switch accessibilityLabel={label} disabled={!item || !!machineSettingsError || moduleReloading}
+      value={Boolean(item?.enabled && (featureEnabled ?? true))}
+      onValueChange={enabled => {
+        setError(null);
+        void control.toggleModule(moduleId, enabled).catch(e => setError(errorMessage(e)));
+      }} trackColor={{ true: theme.colors.accent, false: theme.colors.border }} thumbColor={theme.colors.accentForeground} />}
+    notice={moduleReloading && moduleReloadingId === moduleId ? <Text style={s.small}>正在重新加载，约 5 秒后生效</Text> : <>
+      {error ? <Text style={s.small}>{error}</Text> : null}
+      {moduleReloadUnverified === moduleId || (item && item.state !== (item.enabled ? 'running' : 'off')) ? <Text style={s.small}>已保存，未生效，请手动重载插件</Text> : null}
+    </>}
+  />;
+}
+
+function ProvidersPage({
+  onOpenDrawer,
+}: {
+  onOpenDrawer(id: DrawerId): void;
+}) {
+  const { s, control, theme } = useUi();
+  const {
+    browser,
+    browserError,
+    providerInstance,
+    cloudSession,
+    cloudSessionError,
+    claudeAccounts,
+    claudeAccountsStatus,
+    machineSettings,
+    machineSettingsError,
+    moduleReloading,
+    modules,
+    todo,
+  } = useControlState();
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pauseBusy, setPauseBusy] = useState(false);
+  const pausedAll = machineSettings?.pausedAll ?? false;
+  const claudeAccountsDisabled =
+    isModuleOff('usage.claudeAccounts', machineSettings, modules) ||
+    claudeAccountsStatus === 'disabled' ||
+    Boolean(claudeAccounts && !claudeAccounts.enabled);
+  const browserModOff = isModuleOff('answer.browser', machineSettings, modules);
+  const accounts = claudeAccounts?.accounts ?? [];
+  const reloginAccounts = claudeAccountsDisabled ? [] : accounts.filter(acc => acc.needsRelogin);
+  const remoteAttention = (todo?.hosts ?? []).find(h => h.accountsNeedingAttention > 0);
+
+  const browserEnvCount =
+    browser?.instances?.length ??
+    new Set((browser?.sessions ?? []).map(sess => sess.instanceId)).size;
+  const instanceRunning = providerInstance
+    ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
+    : false;
+  const resolvedCloud = cloudSession ?? providerInstance?.cloudSession ?? null;
+
+  return (
+    <View style={{ gap: 14 }}>
+      <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+        <Text style={s.h1}>Provider 与账号</Text>
+        <Btn
+          danger={!pausedAll}
+          primary={pausedAll}
+          disabled={moduleReloading || !machineSettings || Boolean(machineSettingsError)}
+          busy={pauseBusy}
+          label={pausedAll ? '恢复自动化' : '暂停全部自动化'}
+          onPress={() => {
+            if (!machineSettings || machineSettingsError || pauseBusy) return;
+            setActionError(null);
+            setPauseBusy(true);
+            void control
+              .pauseAll(!pausedAll)
+              .catch(e => setActionError(errorMessage(e)))
+              .finally(() => setPauseBusy(false));
+          }}
+        />
+      </View>
+
+      {actionError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{actionError}</Text>
+        </Notice>
+      ) : null}
+
+      {reloginAccounts.map(acc => (
+        <Notice key={acc.providerId} tone="danger">
+          <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+            <Text style={s.text}>
+              <Text style={s.strong}>{acc.label}</Text>（{acc.email ?? '本机账号'}）需要重新登录
+            </Text>
+            <Text style={s.small}>请在 Paseo 的 Provider 设置中重新登录</Text>
+          </View>
+        </Notice>
+      ))}
+
+      {remoteAttention ? (
+        <Notice tone="warning">
+          <Text style={s.text}>
+            {remoteAttention.hostName} 有 {remoteAttention.accountsNeedingAttention} 个账号需要处理
+          </Text>
+        </Notice>
+      ) : null}
+
+      {providerInstance && !instanceRunning ? (
+        <Notice tone="danger">
+          <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
+        </Notice>
+      ) : null}
+
+      <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
+        <ModuleFeatureCard
+          title="网页版 claude.ai"
+          moduleId="answer.browser"
+          label="启用网页版 claude.ai"
+          featureEnabled={browser?.settings.enabled}
+          description="连接 AdsPower 浏览器扩展，自动点击 Allow once 并把网页提问转到 Paseo。"
+          kv={
+            browserModOff ? (
+              <ModuleOffHint />
+            ) : browserError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{browserError}</Text>
+              </>
+            ) : !browser ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Text style={s.small}>{browserEnvCount} 个浏览器环境</Text>
+                <Chip
+                  label={browser.connected ? '已连接' : '未连接'}
+                  tone={browser.connected ? 'success' : 'neutral'}
+                />
+              </>
+            )
+          }
+          actions={
+            <>
+              <Btn small label="添加浏览器环境" onPress={() => onOpenDrawer('add-browser')} />
+              <Btn small label="编辑" onPress={() => onOpenDrawer('browser')} />
+            </>
+          }
+        />
+
+        <FeatureCard
+          title="云端会话"
+          description="把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。"
+          kv={
+            cloudSessionError && !resolvedCloud ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{cloudSessionError}</Text>
+              </>
+            ) : !resolvedCloud ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={`${resolvedCloud.onlineSessions} 个在线`}
+                  tone={resolvedCloud.onlineSessions > 0 ? 'success' : 'neutral'}
+                />
+                {resolvedCloud.unackedMessages > 0 ? (
+                  <Chip label={`${resolvedCloud.unackedMessages} 条未确认`} tone="warning" />
+                ) : null}
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
+        />
+
+      </View>
+    </View>
+  );
+}
+
+function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
+  const { s, control, theme } = useUi();
+  const {
+    presence,
+    presenceError,
+    escalation,
+    escalationStatus,
+    escalationError,
+    quiet,
+    quietStatus,
+    quietError,
+    machineSettings,
+    moduleReloading,
+    modules,
+  } = useControlState();
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const presenceModOff = isModuleOff('answer.presence', machineSettings, modules);
+  const escModOff = isModuleOff('answer.escalation', machineSettings, modules) || escalationStatus === 'disabled';
+  const quietModOff = isModuleOff('answer.quietChildren', machineSettings, modules) || quietStatus === 'disabled';
+
+  const settings = presence?.settings ?? null;
+  const observedMode = presence?.observation.mode ?? 'unknown';
+  const effectiveOnline = settings
+    ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
+    : false;
+  const localHostId = presence?.hosts[0]?.id ?? null;
+  const lastPlayedSpeech = presence?.speech
+    ? [...presence.speech]
+        .reverse()
+        .find(item => item.played && item.engine && (item.hostId === null || (localHostId !== null && item.hostId === localHostId)))
+    : undefined;
+
+  const escState = escalation?.blockedReason
+    ? { label: '旧插件仍启用', tone: 'danger' as const }
+    : !escalation?.enabled || escalation.status === 'stopped'
+    ? { label: '未运行', tone: 'neutral' as const }
+    : escalation.status === 'error'
+      ? { label: '异常', tone: 'danger' as const }
+      : { label: '运行中', tone: 'success' as const };
+
+  return (
+    <View style={{ gap: 14 }}>
+      <View style={{ gap: 4 }}>
+        <Text style={s.h1}>问题答复</Text>
+        <Text style={s.muted}>
+          代答和升级是两套独立规则：问答模式决定是否代答，时段规则决定是否通知 Grok。同一道题可能先被代答，之后仍被升级。
+        </Text>
+      </View>
+
+      {actionError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{actionError}</Text>
+        </Notice>
+      ) : null}
+
+      {!escModOff && (escalationError || escalation?.error) ? (
+        <Notice tone="danger">
+          <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+            <Text style={s.text}>升级通知异常：{escalationError ?? escalation?.error}</Text>
+            <Btn small label="查看" onPress={() => onOpenDrawer('escalation')} />
+          </View>
+        </Notice>
+      ) : null}
+
+      <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
+        <ModuleFeatureCard
+          title="问答模式"
+          moduleId="answer.presence"
+          label="启用问答模式、蓝牙和语音提醒"
+          belowTitle={
+            presenceModOff ? null : settings ? (
+              <Segmented
+                options={[
+                  { value: 'online', label: '在线' },
+                  { value: 'offline', label: '离线' },
+                  { value: 'auto', label: '自动' },
+                ]}
+                value={settings.mode}
+                onChange={mode => {
+                  setActionError(null);
+                  void control.configurePresence({ ...settings, mode }).catch(e => setActionError(errorMessage(e)));
+                }}
+              />
+            ) : (
+              <Chip label={presenceError ? '读取失败' : '正在读取'} tone={presenceError ? 'danger' : 'neutral'} />
+            )
+          }
+          description="会话向你提问时，等待本人回答或自动选推荐项。开关同时控制问答模式、蓝牙在场判定和语音提醒。"
+          kv={
+            presenceModOff ? (
+              <ModuleOffHint />
+            ) : presenceError ? (
+              <Text style={s.small}>读取失败：{presenceError}</Text>
+            ) : !presence || !settings ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={effectiveOnline ? '判定在线' : '判定离线'}
+                  tone={effectiveOnline ? 'success' : 'warning'}
+                />
+                <Text style={s.small}>
+                  {settings.mode === 'auto'
+                    ? `自动：${presence.observation.reason || '判定未知'}`
+                    : settings.mode === 'online'
+                      ? '手动在线'
+                      : '手动离线'}
+                </Text>
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('qa-mode')} />}
+        />
+
+        <FeatureCard
+          title="蓝牙在场判定"
+          trailing={
+            presenceModOff ? (
+              <Chip label="未启用" tone="neutral" />
+            ) : presenceError ? (
+              <Chip label="读取失败" tone="danger" />
+            ) : !presence ? (
+              <Chip label="正在读取" tone="neutral" />
+            ) : (
+              <Chip
+                label={observedMode === 'offline' ? '离开' : observedMode === 'online' ? '在线' : '未知'}
+                tone={observedMode === 'offline' ? 'warning' : observedMode === 'online' ? 'success' : 'neutral'}
+              />
+            )
+          }
+          description="按随身蓝牙设备是否在场，自动切换在线或离线。"
+          kv={
+            presenceModOff ? (
+              <ModuleOffHint />
+            ) : presenceError ? (
+              <Text style={s.small}>读取失败：{presenceError}</Text>
+            ) : !presence || !settings ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Text style={s.small}>{presence.observation.reason || '未配置蓝牙设备'}</Text>
+                <Text style={s.small}>
+                  {settings.mode === 'auto' ? '问答模式正在跟随蓝牙' : '问答模式当前为手动'}
+                </Text>
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('bluetooth')} />}
+        />
+
+        <ModuleFeatureCard
+          title="升级通知"
+          moduleId="answer.escalation"
+          label="升级通知"
+          featureEnabled={escalation?.enabled}
+          description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
+          kv={
+            escModOff ? (
+              <ModuleOffHint />
+            ) : escalationStatus === 'error' || escalationError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{escalationError ?? '无法读取升级通知'}</Text>
+              </>
+            ) : !escalation ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip label={escState.label} tone={escState.tone} />
+                {escalation.blockedReason ? <Text style={s.small}>先停用旧插件“会话事件通知”，再重载本插件</Text> : null}
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('escalation')} />}
+        />
+
+        <ModuleFeatureCard
+          title="子会话免提醒"
+          moduleId="answer.quietChildren"
+          label="子会话免提醒"
+          featureEnabled={quiet?.enabled}
+          description="子会话和未置顶工作区的会话不直接提醒你，异常归并到主会话。"
+          kv={
+            quietModOff ? (
+              <ModuleOffHint />
+            ) : quietStatus === 'error' || quietError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{quietError ?? '无法读取免提醒设置'}</Text>
+              </>
+            ) : !quiet ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <Text style={s.small}>主会话：{quiet.pinnedWorkspaceCount} 个置顶工作区</Text>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('quiet-children')} />}
+        />
+
+        <FeatureCard
+          title="语音提醒"
+          trailing={
+            <Switch
+              accessibilityLabel="语音提醒"
+              disabled={moduleReloading || !presence || presenceModOff}
+              value={!presenceModOff && Boolean(presence?.localSpeechEnabled)}
+              onValueChange={enabled => {
+                if (!presence || presenceModOff) return;
+                void control
+                  .configureLocalSpeech(enabled)
+                  .catch(e => setActionError(errorMessage(e)));
+              }}
+              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+              thumbColor={theme.colors.accentForeground}
+            />
+          }
+          description={`判定在线时，这台电脑（${presence?.hostName || '本机'}）播报所有电脑上会话的新提问。`}
+          kv={
+            presenceModOff ? (
+              <ModuleOffHint />
+            ) : presenceError ? (
+              <Text style={s.small}>读取失败：{presenceError}</Text>
+            ) : !presence ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={presence.localSpeechEnabled ? '本机播放开启' : '本机不播放'}
+                  tone={presence.localSpeechEnabled ? 'success' : 'neutral'}
+                />
+                {presence.hasSpeechTarget === false ? (
+                  <Chip label="当前没有主机会播放" tone="warning" />
+                ) : null}
+                {lastPlayedSpeech ? (
+                  <Chip
+                    label={lastPlayedSpeech.engine === 'neural' ? '最近：神经语音' : '最近：系统语音'}
+                    tone={lastPlayedSpeech.engine === 'neural' ? 'neutral' : 'warning'}
+                  />
+                ) : (
+                  <Chip label="尚未播放" tone="neutral" />
+                )}
+                <Text style={s.small}>{presence.hostName || '本机'}</Text>
+                {lastPlayedSpeech?.engine === 'system' && lastPlayedSpeech.detail ? (
+                  <Text style={[s.small, { color: theme.colors.statusWarning }]}>
+                    {`回退原因：${lastPlayedSpeech.detail}`}
+                  </Text>
+                ) : null}
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('speech')} />}
+        />
+      </View>
+    </View>
+  );
+}
+
+function GithubPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
+  const { s, store, theme } = useUi();
+  const { snapshot, error } = useStoreState();
+  const { machineSettings, modules, moduleReloading } = useControlState();
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const githubModOff = isModuleOff('github', machineSettings, modules);
+  const prefs = snapshot?.preferences ?? null;
+  const repoCount = snapshot?.repositories.length ?? 0;
+
+  return (
+    <View style={{ gap: 14 }}>
+      <Text style={s.h1}>GitHub 订阅</Text>
+
+      {actionError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{actionError}</Text>
+        </Notice>
+      ) : null}
+
+      {!githubModOff && snapshot && !snapshot.token.configured ? (
+        <Notice tone="warning">
+          <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+            <Text style={s.text}>未保存 GitHub 令牌，无法轮询事件。</Text>
+            <Btn small label="去编辑面板填写" onPress={() => onOpenDrawer('github-config')} />
+          </View>
+        </Notice>
+      ) : null}
+
+      {!githubModOff && (error || snapshot?.error) ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{error ?? snapshot?.error}</Text>
+        </Notice>
+      ) : null}
+
+      <View style={[s.wrap, { alignItems: 'stretch', gap: 10 }]}>
+        <FeatureCard
+          title="监听"
+          trailing={
+            <Switch
+              accessibilityLabel="启用 GitHub 监听"
+              disabled={moduleReloading || !prefs || githubModOff}
+              value={!githubModOff && (prefs?.enabled ?? false)}
+              onValueChange={enabled => {
+                if (!prefs) return;
+                void store
+                  .savePreferences({ ...prefs, enabled })
+                  .catch(e => setActionError(errorMessage(e)));
+              }}
+              trackColor={{ true: theme.colors.accent, false: theme.colors.border }}
+              thumbColor={theme.colors.accentForeground}
+            />
+          }
+          description="轮询已订阅的仓库与 PR，把新事件直接发到对应会话。"
+          kv={
+            githubModOff ? (
+              <ModuleOffHint />
+            ) : error ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{error}</Text>
+              </>
+            ) : !prefs ? (
+              <Text style={s.small}>正在读取…</Text>
+            ) : (
+              <>
+                <Chip
+                  label={prefs.shadow ? '影子' : '实际发送'}
+                  tone={prefs.shadow ? 'warning' : 'success'}
+                />
+                <Text style={s.small}>
+                  {prefs.organization || '未设置组织'} · {repoCount} 个仓库
+                </Text>
+              </>
+            )
+          }
+          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('github-config')} />}
+        />
+      </View>
+
+      <GitHubSubscriptionsViews onEditConfig={() => onOpenDrawer('github-config')} />
+    </View>
+  );
+}
+
+export function TodoItemCard({ item }: { item: TodoItem }) {
+  const { s, control, navigation, theme } = useUi();
+  const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState<QuestionDraftState>({ answers: {}, otherAnswers: {} });
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const prompts = item.question?.prompts ?? [];
+  const selected = draft.answers;
+  const otherText = draft.otherAnswers;
+  const canSubmit =
+    prompts.length > 0 &&
+    prompts.every(p => isPromptComplete(p, selected[p.question] ?? [], otherText[p.question]));
+
+  const openItemAgent = (agentId: string) => {
+    navigation?.openAgent({
+      agentId,
+      ...(item.hostId && item.hostId !== 'local' ? { serverId: item.hostId } : {}),
+    });
+  };
+
+  const toggleChoice = (prompt: QuestionPrompt, label: string) => {
+    setDraft(prev => {
+      const current = prev.answers[prompt.question] ?? [];
+      const nextPicked = prompt.multiSelect
+        ? current.includes(label)
+          ? current.filter(x => x !== label)
+          : [...current, label]
+        : [label];
+      return pickPromptOption(prompt, prev, nextPicked);
+    });
+  };
+
+  const submitAnswer = async () => {
+    if (!item.question || !canSubmit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const answers: Record<string, string[]> = {};
+      const otherAnswers: Record<string, string> = {};
+      for (const p of prompts) {
+        const picks = [...(selected[p.question] ?? [])];
+        const custom = (otherText[p.question] ?? '').trim();
+        if (custom) otherAnswers[p.question] = custom;
+        answers[p.question] = picks;
+      }
+      const res = await control.actTodo({
+        hostId: item.hostId,
+        action: {
+          type: 'answer',
+          questionId: item.question.questionId,
+          answers,
+          ...(Object.keys(otherAnswers).length > 0 ? { otherAnswers } : {}),
+        },
+      });
+      if (!res.ok) {
+        setError(res.message || '提交回答未成功');
+        return;
+      }
+      setExpanded(false);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const markRead = async () => {
+    if (!item.readReceipt) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await control.actTodo({
+        hostId: item.hostId,
+        action: {
+          type: 'read',
+          questionId: item.readReceipt.questionId,
+          fingerprint: item.readReceipt.fingerprint,
+        },
+      });
+      if (!res.ok) setError(res.message || '标记已读未成功');
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ackEscalation = async () => {
+    if (!item.escalationId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await control.actTodo({
+        hostId: item.hostId,
+        action: {
+          type: 'ack-escalation',
+          escalationId: item.escalationId,
+          agentId: item.agentId,
+        },
+      });
+      if (!res.ok) setError(res.message || '标记已处理未成功');
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const badgeTone =
+    item.type === 'ask' || item.type === 'esc'
+      ? 'danger'
+      : item.type === 'web' || item.type === 'stall'
+        ? 'warning'
+        : 'neutral';
+
+  return (
+    <View
+      style={[
+        s.card,
+        {
+          padding: 14,
+          gap: 10,
+        },
+      ]}
+    >
+      <View style={[s.row, { justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap' }]}>
+        <View style={[s.row, { alignItems: 'flex-start', flex: 1, minWidth: 220, gap: 10 }]}>
+          <Chip label={item.label} tone={badgeTone} />
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={s.strong}>{item.text}</Text>
+            <Text style={s.small}>
+              {item.sessionTitle} · {item.sourceLabel} · {item.hostName} · {item.ageText}
+            </Text>
+          </View>
+        </View>
+
+        <View style={s.row}>
+          {item.type === 'ask' ? (
+            <>
+              <Btn
+                small
+                primary
+                label={expanded ? '收起' : '回答'}
+                onPress={() => setExpanded(prev => !prev)}
+              />
+              {item.url ? (
+                <Btn small label="打开原网页" onPress={() => void Linking.openURL(item.url!)} />
+              ) : null}
+            </>
+          ) : item.type === 'esc' ? (
+            <>
+              <Btn small primary label="标为已处理" busy={busy} onPress={() => void ackEscalation()} />
+              {item.agentId ? (
+                <Btn
+                  small
+                  label="打开会话"
+                  onPress={() => openItemAgent(item.agentId!)}
+                />
+              ) : null}
+            </>
+          ) : item.type === 'web' ? (
+            <Btn
+              small
+              primary
+              label="打开原网页"
+              onPress={() => {
+                if (item.url) void Linking.openURL(item.url);
+              }}
+            />
+          ) : item.type === 'stall' ? (
+            <Btn
+              small
+              primary
+              label="打开会话"
+              onPress={() => {
+                if (item.agentId) openItemAgent(item.agentId);
+              }}
+            />
+          ) : (
+            <Btn small label="已读" busy={busy} onPress={() => void markRead()} />
+          )}
+        </View>
+      </View>
+
+      {expanded && item.type === 'ask' ? (
+        <View
+          style={{
+            paddingTop: 10,
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.border,
+            gap: 10,
+          }}
+        >
+          {prompts.map(p => {
+            const current = selected[p.question] ?? [];
+            return (
+              <View key={p.question} style={{ gap: 6 }}>
+                <Text style={s.strong}>{p.question}</Text>
+                <View style={s.wrap}>
+                  {p.options.map(opt => {
+                    const active = current.includes(opt.label);
+                    return (
+                      <Btn
+                        key={opt.label}
+                        small
+                        primary={active}
+                        label={opt.label}
+                        onPress={() => toggleChoice(p, opt.label)}
+                      />
+                    );
+                  })}
+                </View>
+                {p.allowOther ? (
+                  <TextInput
+                    accessibilityLabel={`其他回答 ${p.question}`}
+                    style={s.input}
+                    value={otherText[p.question] ?? ''}
+                    onChangeText={val => setDraft(prev => changePromptOther(p, prev, val))}
+                    placeholder="其他回答（可选）"
+                    placeholderTextColor={theme.colors.foregroundMuted}
+                  />
+                ) : null}
+              </View>
+            );
+          })}
+          <View style={s.row}>
+            <Btn
+              primary
+              label="提交回答"
+              disabled={!canSubmit || busy}
+              busy={busy}
+              onPress={() => void submitAnswer()}
+            />
+          </View>
+        </View>
+      ) : null}
+
+      {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function TodoPage() {
+  const { s, now, theme } = useUi();
+  const { todo, todoError } = useControlState();
+  const [subtab, setSubtab] = useState<'list' | 'log'>('list');
+  const [filter, setFilter] = useState<'all' | TodoType>('all');
+
+  const items = todo?.items ?? [];
+  const logs = todo?.logs ?? [];
+  const countByType = (t: TodoType) => items.filter(i => i.type === t).length;
+
+  const visibleItems = filter === 'all' ? items : items.filter(item => item.type === filter);
+
+  return (
+    <View style={{ gap: 14 }}>
+      <View style={[s.row, { justifyContent: 'space-between', flexWrap: 'wrap' }]}>
+        <Text style={s.h1}>待办总览</Text>
+        <Segmented
+          options={[
+            { value: 'list', label: `待办 (${items.length})` },
+            { value: 'log', label: '处理记录' },
+          ]}
+          value={subtab}
+          onChange={setSubtab}
+        />
+      </View>
+
+      {todo?.warning ? (
+        <Notice tone="warning">
+          <Text style={s.text}>{todo.warning}</Text>
+        </Notice>
+      ) : null}
+
+      {todoError ? (
+        <Notice tone="danger">
+          <Text style={s.text}>{todoError}</Text>
+        </Notice>
+      ) : null}
+
+      {subtab === 'list' ? (
+        <>
+          <View style={s.wrap}>
+            {(
+              [
+                ['all', `全部 ${items.length}`],
+                ['ask', `网页提问 ${countByType('ask')}`],
+                ['web', `网页等待 ${countByType('web')}`],
+                ['stall', `停滞会话 ${countByType('stall')}`],
+                ['esc', `升级事件 ${countByType('esc')}`],
+                ['read', `代答未读 ${countByType('read')}`],
+              ] as const
+            ).map(([key, label]) => (
+              <Btn
+                key={key}
+                small
+                primary={filter === key}
+                label={label}
+                onPress={() => setFilter(key)}
+              />
+            ))}
+          </View>
+
+          <View style={{ gap: 8 }}>
+            {visibleItems.length === 0 ? (
+              <Card>
+                <Text style={s.muted}>当前没有需要处理的插件待办项。</Text>
+              </Card>
+            ) : (
+              visibleItems.map(item => <TodoItemCard key={item.id} item={item} />)
+            )}
+          </View>
+        </>
+      ) : (
+        <Card title="最近自动处理记录">
+          {logs.length === 0 ? (
+            <Text style={s.muted}>暂无自动处理记录。</Text>
+          ) : (
+            logs.map((log, idx) => (
+              <View
+                key={log.id}
+                style={[
+                  s.row,
+                  {
+                    justifyContent: 'space-between',
+                    paddingVertical: 8,
+                    borderTopWidth: idx === 0 ? 0 : 1,
+                    borderTopColor: theme.colors.border,
+                    flexWrap: 'wrap',
+                  },
+                ]}
+              >
+                <View style={s.wrap}>
+                  <Text style={s.mono}>{ago(log.at, now)}</Text>
+                  <Chip label={log.label} tone="neutral" />
+                  <Text style={s.small}>{log.hostName}</Text>
+                </View>
+                <Text style={[s.text, { flex: 1, minWidth: 200 }]}>{log.detail}</Text>
+              </View>
+            ))
+          )}
+        </Card>
+      )}
+    </View>
+  );
+}
+
+export function MainScreen(props: PluginScreenProps) {
+  const { s, theme, compact } = useUi();
+  const storeState = useStoreState();
+  const controlState = useControlState();
+
+  const paramPage = props.params?.page as PageId | undefined;
+  const paramDrawer = props.params?.drawer as DrawerId | undefined;
+
+  const [page, setPage] = useState<PageId>(() =>
+    paramPage && ['providers', 'answer', 'github', 'todo'].includes(paramPage) ? paramPage : 'providers',
+  );
+  const [drawer, setDrawer] = useState<DrawerId | null>(() => paramDrawer ?? null);
+
   useEffect(() => {
-    let active = true;
-    control.usageSettings()
-      .then(res => { if (active) setSettings(res); })
-      .catch(() => { if (active) setSettings({ adspowerApiKeyConfigured: false, adspowerApiKeySource: 'none' }); });
-    return () => { active = false; };
-  }, [control]);
-
-  const save = async () => {
-    const candidate = value.trim();
-    if (!candidate || busy) return;
-    setBusy('save');
-    setError(null);
-    try {
-      const res = await control.saveAdsPowerApiKey(candidate);
-      setValue('');
-      setSettings(res);
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(null);
+    if (paramPage && ['providers', 'answer', 'github', 'todo'].includes(paramPage)) {
+      setPage(paramPage);
+      setLastNonTodoPage(paramPage);
     }
+  }, [paramPage]);
+
+  useEffect(() => {
+    if (paramDrawer !== undefined) {
+      setDrawer(paramDrawer || null);
+    }
+  }, [paramDrawer]);
+
+  const selectPage = (next: PageId) => {
+    setPage(next);
+    setLastNonTodoPage(next);
   };
 
-  const remove = async () => {
-    if (busy) return;
-    setBusy('remove');
-    setError(null);
-    try {
-      const res = await control.removeAdsPowerApiKey();
-      setValue('');
-      setSettings(res);
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(null);
-    }
+  const openDrawer = (id: DrawerId) => {
+    setDrawer(id);
   };
 
-  const isConfigured = Boolean(settings?.adspowerApiKeyConfigured);
-  const isFromEnv = settings?.adspowerApiKeySource === 'env';
-  const canClear = isConfigured && !isFromEnv;
-  const statusLabel = settings === null
-    ? '读取中'
-    : isFromEnv
-      ? '已配置（来自环境变量）'
-      : isConfigured
-        ? '已配置'
-        : '未配置';
+  const hasAlert = computeHasAlert(storeState, controlState);
+  const todoCount = computeTodoCount(controlState);
 
-  return <Card
-    title="额度设置（AdsPower API key）"
-    trailing={<Chip label={statusLabel} tone={isConfigured ? 'success' : 'neutral'} />}
-  >
-    <Text style={s.text}>当前状态：{settings === null ? '正在读取…' : statusLabel}</Text>
-    <Text style={s.muted}>用于通过本机 AdsPower 本地 API（默认 http://127.0.0.1:50325）查询浏览器环境的名称。API key 只保存在本机插件状态里（文件权限 0600），不写日志，不返回给前端；保留环境变量 PASEO_ADSPOWER_API_KEY / ADSPOWER_API_KEY 作为后备来源。</Text>
-    <Text style={s.muted}>要准确显示浏览器环境名称，请在浏览器扩展选项页填写一次环境序号；单环境自动识别只在单个活跃环境且单个扩展上报时生效。</Text>
-    <TextInput
-      accessibilityLabel="AdsPower API key"
-      style={s.input}
-      value={value}
-      onChangeText={setValue}
-      placeholder={isConfigured ? '重新填写 AdsPower API key 以更换' : '填写 AdsPower API key'}
-      placeholderTextColor={theme.colors.foregroundMuted}
-      secureTextEntry
-      autoCapitalize="none"
-      autoCorrect={false}
-      autoComplete="off"
-      spellCheck={false}
-      contextMenuHidden
-    />
-    {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
-    <View style={s.wrap}>
-      <Btn
-        primary
-        label={isConfigured ? '重新填写并保存' : '保存 API key'}
-        disabled={!value.trim() || busy !== null}
-        busy={busy === 'save'}
-        onPress={() => void save()}
+  return (
+    <View style={[s.page, { flexDirection: compact ? 'column' : 'row', position: 'relative' }]}>
+      <View
+        style={{
+          width: compact ? '100%' : 196,
+          backgroundColor: theme.colors.surface1,
+          borderRightWidth: compact ? 0 : 1,
+          borderBottomWidth: compact ? 1 : 0,
+          borderColor: theme.colors.border,
+          padding: 12,
+          justifyContent: 'space-between',
+          gap: 8,
+        }}
+      >
+        <View style={{ gap: 4 }}>
+          <Text style={[s.strong, { paddingHorizontal: 8, paddingVertical: 6 }]}>开发自动化</Text>
+          <View style={{ flexDirection: compact ? 'row' : 'column', flexWrap: 'wrap', gap: 4 }}>
+            {NAV_ITEMS.map(item => {
+              const active = page === item.id;
+              return (
+                <Pressable
+                  key={item.id}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={item.label}
+                  onPress={() => selectPage(item.id)}
+                  style={[
+                    s.row,
+                    {
+                      justifyContent: 'space-between',
+                      paddingHorizontal: 10,
+                      paddingVertical: 8,
+                      borderRadius: 8,
+                      backgroundColor: active ? theme.colors.surface2 : 'transparent',
+                    },
+                  ]}
+                >
+                  <View style={s.row}>
+                    <Text style={[s.mono, { fontSize: 11, color: theme.colors.foregroundMuted }]}>{item.num}</Text>
+                    <Text
+                      style={{
+                        color: active ? theme.colors.foreground : theme.colors.foregroundMuted,
+                        fontSize: 13,
+                        fontWeight: active ? '600' : '400',
+                      }}
+                    >
+                      {item.label}
+                    </Text>
+                  </View>
+                  {item.id === 'providers' && hasAlert ? (
+                    <Text style={{ color: theme.colors.statusDanger, fontSize: 12, fontWeight: '700' }}>!</Text>
+                  ) : null}
+                  {item.id === 'todo' && todoCount > 0 ? (
+                    <Text style={{ color: theme.colors.statusWarning, fontSize: 12, fontWeight: '600' }}>
+                      {todoCount}
+                    </Text>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
+        {!compact ? (
+          <View
+            style={{
+              paddingTop: 10,
+              borderTopWidth: 1,
+              borderTopColor: theme.colors.border,
+              gap: 6,
+            }}
+          >
+            <Text style={s.small}>
+              启停 Provider、模型、额度在 Paseo 设置和额度面板。令牌、API key 与 Webhook 凭据在对应卡片的编辑面板配置。
+            </Text>
+          </View>
+        ) : null}
+      </View>
+
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={[s.pageContent, { maxWidth: 980 }]}>
+        {controlState.machineSettingsError || controlState.machineSettings?.errors.length ? (
+          <Notice tone="danger">
+            <Text style={s.text}>读取本机设置失败：{[controlState.machineSettingsError, ...(controlState.machineSettings?.errors ?? [])].filter(Boolean).join('；')}</Text>
+          </Notice>
+        ) : null}
+        {page === 'providers' ? <ProvidersPage onOpenDrawer={openDrawer} /> : null}
+        {page === 'answer' ? <AnswerPage onOpenDrawer={openDrawer} /> : null}
+        {page === 'github' ? <GithubPage onOpenDrawer={openDrawer} /> : null}
+        {page === 'todo' ? <TodoPage /> : null}
+      </ScrollView>
+
+      <DrawerOverlay
+        drawerId={drawer}
+        onClose={() => {
+          setDrawer(null);
+        }}
+        onOpenDrawer={openDrawer}
       />
-      {canClear ? <Btn
-        danger
-        label="清除 API key"
-        disabled={busy !== null}
-        busy={busy === 'remove'}
-        onPress={() => void remove()}
-      /> : null}
     </View>
-  </Card>;
-}
-
-export function UsageSettingsScreen(_props: PluginSurfaceProps) {
-  const { s } = useUi();
-  return <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
-    <Text style={s.h1}>额度设置</Text>
-    <AdsPowerKeyCard />
-  </ScrollView>;
-}
-
-function Browsers({ snapshot, native, busy, run }: { snapshot: BrowserSnapshot; native: AutomationSnapshot | null; busy: boolean; run: Run }) {
-  const { s, control } = useUi();
-  const [port, setPort] = useState(String(snapshot.settings.port));
-  const [pairing, setPairing] = useState<BrowserPairing | null>(null);
-  const [binding, setBinding] = useState<BrowserSnapshot['sessions'][number] | null>(null);
-  const [target, setTarget] = useState<Session | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
-  const [filter, setFilter] = useState('');
-  return <View style={{ gap: 12 }}>
-    <Card title="Paseo 名称同步（可选）" trailing={<Chip label={snapshot.connected ? '扩展已连接' : snapshot.settings.enabled ? '等待扩展连接' : '未启用名称同步'} tone={snapshot.connected ? 'success' : 'neutral'} />}>
-      <Text style={s.text}>浏览器扩展安装后即自动点同意，并按网页会话名称分组。无需配对或设置本页。</Text>
-      <Text style={s.muted}>只有需要使用 Paseo 会话名称时，才启用下方名称同步。自动点击开关在浏览器扩展选项中。</Text>
-      <View style={s.wrap}><Text style={s.text}>本机桥接端口</Text>
-        <TextInput accessibilityLabel="浏览器桥接端口" value={port} onChangeText={setPort} keyboardType="number-pad" style={[s.input, { width: 100 }]} />
-        <Btn label={snapshot.settings.enabled ? '保存端口' : '启用名称同步'} busy={busy} onPress={() => void run(async () => {
-          await control.configureBrowser({ enabled: true, port: Number(port) }); setPairing(null);
-        })} />
-        {snapshot.settings.enabled ? <Btn label="暂停名称同步" disabled={busy} onPress={() => void run(async () => { await control.configureBrowser({ ...snapshot.settings, enabled: false }); setPairing(null); })} /> : null}
-        <Btn label={pairing ? '隐藏配对信息' : '查看扩展配对信息'} disabled={!snapshot.settings.enabled || busy} onPress={() => void run(async () => setPairing(pairing ? null : await control.pairing()))} />
-      </View>
-      {pairing && snapshot.settings.enabled ? <View style={{ gap: 6 }}>
-        <Text style={s.text}>在浏览器扩展管理页加载本插件中的 browser-extension 目录，再打开扩展选项页，填写环境名称和以下信息。</Text>
-        <Text style={s.muted}>配对信息仅供本机扩展使用。</Text>
-        <TextInput accessibilityLabel="配对地址" value={pairing.url} editable={false} style={s.input} />
-        <TextInput accessibilityLabel="配对令牌" value={pairing.token} editable={false} selectTextOnFocus style={s.input} />
-      </View> : null}
-    </Card>
-    <AdsPowerKeyCard />
-    {binding ? <Card title={`为「${binding.title}」选择 Paseo 名称`}>
-      <Text style={s.text}>浏览器环境：{binding.instanceName}。绑定后分组使用所选 Paseo 会话名称。</Text>
-      <TextInput accessibilityLabel="搜索绑定目标" placeholder="搜索 Paseo 会话名称" value={filter} onChangeText={setFilter} style={s.input} />
-      <View style={s.wrap}>{native?.sessions.filter(session => session.title.toLowerCase().includes(filter.toLowerCase())).slice(0, 30).map(session =>
-        <Btn key={session.id} label={`${session.title}（${session.workspacePath?.split('/').filter(Boolean).at(-1) || session.provider} · ${session.id.slice(-6)}）`} primary={target?.id === session.id}
-          onPress={() => { setTarget(session); setConfirmed(false); }} />)}</View>
-      {target ? <Text style={s.muted}>{target.workspacePath || target.title}</Text> : null}
-      <View style={s.row}><Switch accessibilityLabel="确认浏览器会话对应关系" value={confirmed} onValueChange={setConfirmed} /><Text style={[s.text, { flex: 1 }]}>我确认所选 Paseo 会话与当前网页对应。</Text></View>
-      <View style={s.wrap}><Btn label="保存名称绑定" primary disabled={!confirmed || !target || busy} onPress={() => void run(async () => {
-        await control.bind({ instanceId: binding.instanceId, sessionId: binding.sessionId, agentId: target!.id }); setBinding(null);
-      })} /><Btn label="取消绑定" disabled={busy} onPress={() => setBinding(null)} /></View>
-    </Card> : null}
-    {!snapshot.sessions.length ? <Text style={s.muted}>等待已配对扩展同步 Claude 网页标签。扩展断开时保留已有分组。</Text> : null}
-    {snapshot.sessions.map(session => <Card key={`${session.instanceId}:${session.sessionId}`} title={session.title} trailing={<Chip label="Claude 网页" tone="accent" />}>
-      <Text style={s.text}>环境：{session.instanceName} · {session.tabCount} 个标签 · 分组：{session.groupTitle}</Text>
-      <Text style={s.muted}>{session.agentId ? '已绑定 Paseo 名称' : '使用网页自身标题'} · 最近同步 {new Date(session.lastSeenAt).toLocaleTimeString()}</Text>
-      <View style={s.wrap}>
-        <Btn label="绑定 Paseo 名称" disabled={busy || !native} onPress={() => { setBinding(session); setTarget(null); setConfirmed(false); }} />
-        {session.agentId ? <Btn label="解除名称绑定" disabled={busy} onPress={() => void run(() => control.bind({ instanceId: session.instanceId, sessionId: session.sessionId, agentId: null }))} /> : null}
-      </View>
-    </Card>)}
-  </View>;
-}
-
-export function MainScreen({ params }: PluginScreenProps) {
-  const { s, compact, control, store, navigation } = useUi();
-  const { automation, browser, presence, stalled, stalledError, automationError, browserError, presenceError } = useControlState();
-  const { snapshot: github, error: githubError } = useStoreState();
-  const initial = sections.find(item => item.id === params.section)?.id ?? (params.tab ? 'github' : 'overview');
-  const [section, setSection] = useState<Section>(initial);
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  const restoring = useRef<{ nativePaused: boolean; presencePaused: boolean; browserEnabled: boolean; githubEnabled: boolean } | null>(null);
-  const working = useRef(false);
-  const run: Run = async operation => {
-    if (working.current) return;
-    working.current = true; setBusy(true); setProblem(null);
-    try { await operation(); } catch (error) { setProblem(errorMessage(error)); }
-    finally { working.current = false; setBusy(false); }
-  };
-  const pending = automation?.sessions.flatMap(session => session.pending.filter(request => request.state === 'manual' && request.kind !== 'question').map(request => ({ session, request }))) ?? [];
-  const asked = todoQuestions(presence);
-  const unreadAnswers = asked.filter(isUnreadAutomaticAnswer).length;
-  const stalledCount = stalled?.sessions.length ?? 0;
-  const waitingPages = (browser?.sessions ?? []).filter(session => ['waiting', 'limited'].includes(session.activity?.state ?? '') && Date.now() - Date.parse(session.lastSeenAt) < 90_000 && !asked.some(question => question.sessionId === session.sessionId));
-  const todoCount = pending.length + asked.length + stalledCount + waitingPages.length;
-  const toggleAll = (restoreRequested = false) => run(async () => {
-    const restore = restoreRequested ? restoring.current : null;
-    restoring.current ??= { nativePaused: automation?.paused ?? true, presencePaused: presence?.settings.paused ?? false, browserEnabled: browser?.settings.enabled ?? false, githubEnabled: github?.preferences.enabled ?? false };
-    const results = await Promise.allSettled([
-      control.pause(restore?.nativePaused ?? true),
-      presence ? control.configurePresence({ ...presence.settings, paused: restore?.presencePaused ?? true }) : Promise.reject(new Error('问答模块状态不可用')),
-      browser ? control.configureBrowser({ ...browser.settings, enabled: restore?.browserEnabled ?? false }) : Promise.reject(new Error('浏览器模块状态不可用')),
-      github ? store.savePreferences({ ...github.preferences, enabled: restore?.githubEnabled ?? false }) : Promise.reject(new Error('GitHub 模块状态不可用')),
-    ]);
-    if (results.some(result => result.status === 'rejected')) throw new Error('部分模块未能更新，请查看模块状态，再重试对应操作。');
-    if (restore) restoring.current = null;
-  });
-  return <ScrollView style={s.page} contentContainerStyle={s.pageContent}>
-    <View style={[s.wrap, { justifyContent: 'space-between' }]}>
-      <View style={{ gap: 4, maxWidth: '100%', flexShrink: 1 }}><Text style={s.h1}>开发自动化</Text><Text style={s.muted}>当前主机：{automation?.hostName || presence?.hostName || '正在连接'} · 问答模式、浏览器分组与 GitHub 订阅</Text></View>
-      <View style={s.wrap}>
-        <Btn label="暂停 Paseo 模块" busy={busy} onPress={() => void toggleAll()} />
-        {restoring.current ? <Btn label="恢复本页暂停前状态" disabled={busy || !automation || !browser || !github} onPress={() => void toggleAll(true)} /> : null}
-      </View>
-    </View>
-    <View style={s.wrap}>{sections.map(item => <Btn key={item.id} label={item.id === 'todos' ? `${item.title}（${todoCount}）` : item.title}
-      primary={section === item.id} onPress={() => setSection(item.id)} />)}</View>
-    {problem ? <Notice tone="danger"><Text style={s.text}>{problem}</Text></Notice> : null}
-    {[automationError || automation?.error, presenceError && `问答模式：${presenceError}`, browserError || browser?.error, githubError].filter(Boolean).map((error, index) =>
-      <Notice key={index} tone="warning"><Text style={s.text}>{error}</Text></Notice>)}
-    {automation?.truncated ? <Notice tone="warning"><Text style={s.text}>会话列表超过显示上限。未显示的会话不作不存在处理。</Text></Notice> : null}
-    {section === 'overview' ? <View style={{ gap: 14 }}>
-      <View style={{ flexDirection: compact ? 'column' : 'row', gap: 12 }}>
-        {[
-          { title: '问答模式', value: presence ? presenceLabel(presence).label : '正在连接', detail: presence ? `${asked.length - unreadAnswers} 个提问待处理 · ${unreadAnswers} 个代答未读` : '正在读取问答状态', target: 'sessions' as Section },
-          { title: 'Paseo 名称同步', value: browser ? browser.settings.enabled ? '已启用' : '未启用' : '正在连接', detail: `${browser?.sessions.length ?? 0} 个已同步网页会话；扩展可独立使用`, target: 'browser' as Section },
-          { title: 'GitHub 订阅', value: github ? github.preferences.enabled ? '已启用' : '已暂停' : '正在连接', detail: `${github?.subscriptions.length ?? 0} 条订阅`, target: 'github' as Section },
-        ].map(item => <View key={item.title} style={{ flex: 1 }}><Card title={item.title}><Text style={s.h1}>{item.value}</Text><Text style={s.muted}>{item.detail}</Text><Btn label={`查看${item.title}`} onPress={() => setSection(item.target)} /></Card></View>)}
-      </View>
-      <Card title="需要你处理">
-        <Text style={s.text}>{todoCount ? `${asked.length - unreadAnswers} 个会话提问待处理，${unreadAnswers} 个代答未读；${pending.length} 个其他原生请求，${stalledCount} 个停滞主会话。` : '当前没有已确认的待办。'}</Text>
-        {stalledError || stalled?.error ? <Text style={s.muted}>停滞状态未完全确认，请到人工待办查看原因。</Text> : null}
-        <Text style={s.muted}>原生会话和 Claude 网页的提问都可以在人工待办中直接选择并提交。</Text>
-        <Btn label="查看人工待办" onPress={() => setSection('todos')} />
-      </Card>
-    </View> : null}
-    {section === 'sessions' ? presence ? <PresencePanel snapshot={presence} busy={busy} run={run} /> : <Text style={s.muted}>{presenceError ? '问答模式暂不可用，原因见页面顶部。其他模块不受影响。' : '正在读取问答模式状态…'}</Text> : null}
-    {section === 'browser' && browser ? <Browsers snapshot={browser} native={automation} busy={busy} run={run} /> : null}
-    {section === 'browser' && !browser ? <Text style={s.muted}>正在读取模块状态；连接错误会显示在页面顶部。</Text> : null}
-    {section === 'usage' ? <View style={{ gap: 12 }}><AdsPowerKeyCard /></View> : null}
-    {section === 'github' ? <GitHubPanel params={params} /> : null}
-    {section === 'todos' ? <View style={{ gap: 12 }}>
-      <Text style={s.strong}>会话提问</Text>
-      <Text style={s.muted}>未回答问题和未读代答保留在此。人工回答完成后自动移出；代答确认完成后可点击“已读”。</Text>
-      {presence ? <QuestionList snapshot={presence} busy={busy} run={run} /> : <Text style={s.muted}>{presenceError ? '会话提问暂不可用，原因见页面顶部。' : '正在读取会话提问…'}</Text>}
-      <Text style={s.strong}>停滞主会话</Text>
-      <Text style={s.muted}>主会话没有工作、没有有效监听，原生子代理和跨主机子会话也没有工作时显示。恢复活动后自动移出。</Text>
-      {stalledError || stalled?.error ? <Notice tone="warning"><Text style={s.text}>{stalledError || stalled?.error}</Text></Notice> : null}
-      {!stalled && !stalledError ? <Text style={s.muted}>正在核对主机、监听和子会话状态…</Text> : null}
-      {stalled && !stalled.error && !stalled.sessions.length ? <Text style={s.muted}>暂无停滞主会话。</Text> : null}
-      {stalled?.sessions.map(session => <Card key={session.agentId} title={session.title} trailing={<Chip label="停滞" tone="warning" />}>
-        <Text style={s.muted}>最后活动：{new Date(session.since).toLocaleString()}</Text>
-        <Text selectable style={s.text}>{session.lastMessage || session.messageError || '最近的时间线中没有助手消息，请打开会话查看。'}</Text>
-        {navigation ? <Btn label="打开 Paseo 会话" onPress={() => navigation.openAgent({ agentId: session.agentId })} /> : null}
-      </Card>)}
-      <Text style={s.strong}>网页等待处理</Text>
-      <Text style={s.muted}>显示网页的等待输入和用量限制提示。网页后台任务及监听状态需打开原会话核对；此处不会自动发送继续指令或切换账号。</Text>
-      {!waitingPages.length ? <Text style={s.muted}>暂无网页等待提示。</Text> : null}
-      {waitingPages.map(session => <Card key={`${session.instanceId}:${session.sessionId}`} title={`${session.instanceName} · ${session.groupTitle}`} trailing={<Chip label={session.activity?.state === 'limited' ? '达到用量限制' : '等待输入'} tone="warning" />}>
-        <Text style={s.muted}>{session.activity?.reason}</Text>
-        <Text selectable style={s.text}>{session.activity?.lastMessage || '页面没有可读取的最后消息。'}</Text>
-        <Btn label="打开原网页处理" onPress={() => { void Linking.openURL(session.url); }} />
-      </Card>)}
-      <Text style={s.strong}>其他原生请求</Text>
-      <Text style={s.muted}>工具审批等请求到原会话查看完整内容并作出决定。</Text>
-      {!pending.length ? <Text style={s.text}>暂无其他待处理请求。</Text> : null}
-      {pending.map(({ session, request }) => <Card key={`${session.id}:${request.id}`} title={session.title}>
-        <Text style={s.strong}>{request.title}</Text><Text style={s.text}>{request.reason}</Text><Text style={s.muted}>{session.workspacePath}</Text>
-        {navigation ? <Btn label="打开 Paseo 会话处理" onPress={() => navigation.openAgent({ agentId: session.id })} /> : null}
-      </Card>)}
-    </View> : null}
-    {section === 'activity' ? <View style={{ gap: 12 }}>
-      <Text style={s.strong}>网页权限动作</Text>
-      <Text style={s.muted}>窗口消失只表示权限窗口已关闭，不代表命令执行成功。仍显示的请求请回网页处理。</Text>
-      {!(browser?.approvals ?? []).length ? <Text style={s.text}>尚无网页权限动作记录。</Text> : null}
-      {(browser?.approvals ?? []).slice(-30).reverse().map(entry => <Card key={`${entry.instanceId}:${entry.reservationId}`} title={entry.instanceName} trailing={<Chip label={{ reserved: '等待回执', dismissed: '窗口已消失', 'still-visible': '窗口仍显示', skipped: '已跳过' }[entry.status]} tone={entry.status === 'dismissed' ? 'success' : 'warning'} />}>
-        <Text style={s.text}>{entry.button} · {new Date(entry.at).toLocaleString()}</Text>
-        <Btn label="打开原网页" onPress={() => void Linking.openURL(`https://claude.ai/code/session_${entry.sessionId}`)} />
-      </Card>)}
-      <Text style={s.muted}>原生权限响应记录。发送响应不代表命令执行成功；结果未知时不会再次响应。</Text>
-      {!automation?.audit.length ? <Text style={s.text}>尚无原生权限响应记录。</Text> : null}
-      {automation?.audit.slice(0, 100).map(entry => <Card key={entry.id} title={entry.title} trailing={<Chip label={entry.status === 'resolved' ? '宿主已处理' : entry.status === 'unknown' ? '结果未知' : '等待确认'} tone={entry.status === 'resolved' ? 'success' : 'warning'} />}>
-        <Text style={s.text}>{toolNames[entry.tool] || entry.tool} · {new Date(entry.at).toLocaleString()}</Text>
-        {entry.resolution ? <Text style={s.muted}>{entry.resolution === 'allow' ? '宿主确认已批准' : entry.resolution === 'deny' ? '宿主确认已拒绝' : '请求已消失，未确认最终决定'}</Text> : null}
-        {navigation ? <Btn label="打开 Paseo 会话" onPress={() => navigation.openAgent({ agentId: entry.agentId })} /> : null}
-      </Card>)}
-      <Btn label="查看 GitHub 事件记录" onPress={() => setSection('github')} />
-    </View> : null}
-  </ScrollView>;
+  );
 }

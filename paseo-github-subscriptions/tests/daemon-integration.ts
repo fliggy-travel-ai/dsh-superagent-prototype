@@ -5,7 +5,6 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Snapshot } from '../shared/model.ts';
-import type { AutomationSnapshot } from '../shared/automation.ts';
 import type { BrowserSnapshot } from '../shared/browser.ts';
 import { connectDaemon } from '../server/daemon.ts';
 import {
@@ -102,14 +101,10 @@ try {
   record('快照：影子模式、工具注入已开、令牌来自文件且只显示前缀', { shadow: first.preferences.shadow, toolInjection: first.toolInjection, tokenPrefix: first.token.prefix });
   assert.deepEqual(await rpc('subscriptions.remove', { id: 'sub_missing' }), { removed: false });
   record('其余 RPC 都已注册并可调用');
-  const native = await rpc<AutomationSnapshot>('automation.snapshot');
   const browser = await rpc<BrowserSnapshot>('browser.snapshot');
-  assert.equal(native.paused, true);
-  assert.deepEqual(native.policies, []);
   assert.equal(browser.settings.enabled, false);
   assert.equal(browser.connected, false);
   assert.ok(!JSON.stringify(browser).includes('token'));
-  assert.equal((await rpc<AutomationSnapshot>('automation.pause', { paused: true })).paused, true);
   await assert.rejects(rpc('browser.pairing'));
   record('新模块默认关闭，独立 RPC 可用，普通快照不泄漏配对令牌');
   const permissionClient = await connectDaemon(harness.home);

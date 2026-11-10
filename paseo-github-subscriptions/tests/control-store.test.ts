@@ -13,7 +13,7 @@ test('设备已保存后问答快照刷新失败，仍返回保存结果', async
 });
 import assert from 'node:assert/strict';
 import { createControlStore as createStore } from '../client/control-store.ts';
-import { makeAutomation, makeBrowser } from './ui/control-fixtures.ts';
+import { makeBrowser } from './ui/control-fixtures.ts';
 import type { PresenceSnapshot } from '../shared/presence.ts';
 import type { StalledSnapshot } from '../shared/stalled.ts';
 
@@ -34,32 +34,32 @@ function deferred<Value>() {
   return { promise, resolve };
 }
 
-test('旧快照不能覆盖新的暂停状态，写入期间不启动刷新', async () => {
-  const original = deferred<ReturnType<typeof makeAutomation>>();
-  const writing = deferred<ReturnType<typeof makeAutomation>>();
-  const initial = makeAutomation();
+test('旧快照不能覆盖新的配置状态，写入期间不启动刷新', async () => {
+  const original = deferred<ReturnType<typeof makeBrowser>>();
+  const writing = deferred<ReturnType<typeof makeBrowser>>();
+  const initial = makeBrowser();
   let snapshots = 0;
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
-    if (contract.name === 'automation.snapshot') { snapshots += 1; return original.promise; }
-    if (contract.name === 'automation.pause') return writing.promise;
-    return makeBrowser();
+    if (contract.name === 'browser.snapshot') { snapshots += 1; return original.promise; }
+    if (contract.name === 'browser.configure') return writing.promise;
+    return makePresence();
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
     const read = store.refresh();
-    const write = store.pause(true);
+    const write = store.configureBrowser({ enabled: true, port: 17373 });
     await store.refresh();
     assert.equal(snapshots, 1);
-    writing.resolve({ ...initial, paused: true });
+    writing.resolve({ ...initial, settings: { enabled: true, port: 17373 } });
     await write;
-    original.resolve({ ...initial, paused: false });
+    original.resolve({ ...initial, settings: { enabled: false, port: 17373 } });
     await read;
-    assert.equal(store.getState().automation?.paused, true);
+    assert.equal(store.getState().browser?.settings.enabled, true);
     assert.equal(store.getState().browserError, null);
   } finally { store.dispose(); }
 });
 
 test('单个模块错误不会清空其他模块，卸载后忽略在途结果', async () => {
-  const result = deferred<ReturnType<typeof makeAutomation>>();
+  const result = deferred<PresenceSnapshot>();
   let notifications = 0;
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
     if (contract.name === 'browser.snapshot') throw new Error('浏览器桥接不可用');
@@ -71,10 +71,10 @@ test('单个模块错误不会清空其他模块，卸载后忽略在途结果',
   assert.match(store.getState().browserError ?? '', /浏览器桥接不可用/);
   store.dispose();
   const count = notifications;
-  result.resolve(makeAutomation());
+  result.resolve(makePresence());
   await read;
   assert.equal(notifications, count);
-  assert.equal(store.getState().automation, null);
+  assert.equal(store.getState().presence, null);
 });
 
 test('回答提问后，较早发出的问答快照不能把提问改回待回答', async () => {
@@ -86,7 +86,7 @@ test('回答提问后，较早发出的问答快照不能把提问改回待回�
     if (contract.name === 'presence.snapshot') return original.promise;
     if (contract.name === 'presence.answer') { calls.push(input); return answered.promise; }
     if (contract.name === 'browser.snapshot') return makeBrowser();
-    return makeAutomation();
+    return { sessions: [], error: null };
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
     const read = store.refresh();
@@ -106,13 +106,12 @@ test('问答接口不可用时只记录问答错误，其他模块照常刷新',
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
     if (contract.name.startsWith('presence.')) throw new Error('未知接口 presence.snapshot');
     if (contract.name === 'browser.snapshot') return makeBrowser();
-    return makeAutomation();
+    return { sessions: [], error: null };
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
     await store.refresh();
     assert.match(store.getState().presenceError ?? '', /未知接口/);
     assert.equal(store.getState().presence, null);
-    assert.ok(store.getState().automation);
     assert.ok(store.getState().browser);
     await assert.rejects(store.configurePresence({ ...makePresence().settings, paused: true }), /未知接口/);
   } finally { store.dispose(); }
@@ -224,4 +223,205 @@ test('已读写入不被较早快照覆盖，失败时保留未读状态', async
     await assert.rejects(store.markQuestionRead({ id: 'q-1', fingerprint: 'f1' }), /写入失败/);
     assert.equal(store.getState().presence?.questions[0].answer?.readAt, undefined);
   } finally { store.dispose(); }
+});
+
+test('其他会话的 RPC 未注册或模块未开启时标记为 disabled 且不报错；已开启模块运行报错时记录 error', async () => {
+  const store = createControlStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'modules.status') {
+      return {
+        instance: { role: 'main', legacy: false },
+        config: { path: '/x/machine.json', source: 'file', errors: [] },
+        modules: [
+          { id: 'usage.claudeAccounts', label: 'Claude 账号', state: 'off', reason: '默认关闭' },
+          { id: 'answer.escalation', label: '升级通知', state: 'running' },
+        ],
+      };
+    }
+    if (contract.name === 'answer.escalation' || contract.name === 'escalation.snapshot') {
+      throw new Error('Webhook 状态文件损坏');
+    }
+    throw new Error(`未知调用 ${contract.name}`);
+  }) as Parameters<typeof createControlStore>[0]['rpc'] });
+  try {
+    await store.refreshUnify();
+    const state = store.getState();
+    assert.equal(state.claudeAccountsStatus, 'disabled');
+    assert.equal(state.claudeAccountsError, null);
+    assert.equal(state.quietStatus, 'disabled');
+    assert.equal(state.quietError, null);
+    assert.equal(state.escalationStatus, 'error');
+    assert.match(state.escalationError ?? '', /Webhook 状态文件损坏/);
+  } finally { store.dispose(); }
+});
+
+
+test('待办操作超时后返回失败提示，按钮不会一直“处理中”；之后仍刷新列表', async () => {
+  let lists = 0;
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todo.act') return new Promise(() => {});
+    if (contract.name === 'todo.list') { lists += 1; return { items: [], logs: [], hosts: [], warning: null }; }
+    throw new Error('未注册');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { actTimeoutMs: 20 });
+  try {
+    const result = await store.actTodo({ hostId: 'srv-mini', action: { type: 'ack-escalation', escalationId: 'esc-1' } });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /超时/);
+    await new Promise(done => setTimeout(done, 20));
+    assert.ok(lists >= 1);
+  } finally { store.dispose(); }
+});
+
+test('待办操作成功后重新读取列表，不沿用操作前发出的旧列表结果', async () => {
+  const before = deferred<unknown>();
+  const item = { id: 'esc:srv-mini:esc-1' };
+  let lists = 0;
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todo.act') return { ok: true, message: '已标为已处理' };
+    if (contract.name === 'todo.list') { lists += 1; return lists === 1 ? before.promise : { items: [], logs: [], hosts: [], warning: null }; }
+    throw new Error('未注册');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { actTimeoutMs: 1000 });
+  try {
+    const stale = store.refreshUnify();
+    const acted = store.actTodo({ hostId: 'srv-mini', action: { type: 'ack-escalation', escalationId: 'esc-1' } });
+    before.resolve({ items: [item], logs: [], hosts: [], warning: null });
+    await stale;
+    assert.equal((await acted).ok, true);
+    await new Promise(done => setTimeout(done, 10));
+    assert.equal(lists, 2);
+    assert.deepEqual(store.getState().todo?.items, []);
+  } finally { store.dispose(); }
+});
+
+test('模块切换和重载期间全局锁住开关，结束后刷新状态并解锁', async () => {
+  const pending = deferred<any>();
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'machine.settings.toggle-module') return pending.promise;
+    throw new Error('离线');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { reloadDelayMs: 10 } as never);
+  try {
+    const first = store.toggleModule('answer.browser', true);
+    assert.equal((store.getState() as any).moduleReloading, true);
+    await assert.rejects(store.toggleModule('answer.presence', false), /正在重新加载/);
+    pending.resolve({ modules: [] }); await first;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal((store.getState() as any).moduleReloading, false);
+    assert.equal((store.getState() as any).moduleReloadUnverified, 'answer.browser');
+  } finally { store.dispose(); }
+});
+
+test('服务器仍在重载时超过提示时间仍锁住开关，直到服务器确认结束', async () => {
+  let pending = true;
+  const snapshot = () => ({ configPath: '/tmp/machine', source: 'file', machine: null, errors: [], modules: [], pausedAll: false, reloadInProgress: pending });
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'machine.settings.toggle-module' || contract.name === 'machine.settings.snapshot') return snapshot();
+    throw new Error('offline');
+  }) as Parameters<typeof createStore>[0]['rpc'] }, emptyAgents, { reloadDelayMs: 10, reloadPollMs: 15 } as never);
+  try {
+    await store.toggleModule('answer.browser', true);
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal((store.getState() as any).moduleReloading, true);
+    pending = false;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal((store.getState() as any).moduleReloading, false);
+  } finally { store.dispose(); }
+});
+
+test('paseoSessions 单独查询不过滤状态的未归档会话，保留 running 会话同时不影响停滞卡片过滤', async () => {
+  const allAgents = [
+    { id: 'sess-idle', title: '空闲会话', status: 'idle', archivedAt: null },
+    { id: 'sess-running', title: '运行中会话', status: 'running', archivedAt: null },
+    { id: 'sess-closed', title: '已关闭会话', status: 'closed', archivedAt: null },
+    { id: 'sess-archived', title: '已归档会话', status: 'idle', archivedAt: '2026-11-09T00:00:00Z' },
+  ];
+  let listCalls = 0;
+  const listAgents = (async (options: { filter: { includeArchived: boolean; statuses?: string[] }; page: { cursor?: string } }) => {
+    listCalls += 1;
+    const entries = allAgents
+      .filter(a => options.filter.includeArchived || !a.archivedAt)
+      .filter(a => !options.filter.statuses || options.filter.statuses.includes(a.status))
+      .map(agent => ({ agent }));
+    return { entries, pageInfo: { hasMore: false } };
+  }) as unknown as Parameters<typeof createStore>[1];
+
+  const stalled: StalledSnapshot = {
+    sessions: ['sess-idle', 'sess-running'].map(agentId => ({
+      agentId, title: agentId, since: '2026-11-08T06:00:00Z', lastMessage: '等待', messageError: null,
+    })),
+    error: null,
+  };
+  const store = createStore({ rpc: (async (contract: { name: string }) => {
+    if (contract.name === 'todos.stalled') return stalled;
+    if (contract.name === 'presence.snapshot') return makePresence();
+    return makeBrowser();
+  }) as Parameters<typeof createStore>[0]['rpc'] }, listAgents);
+  try {
+    await store.refresh();
+    assert.deepEqual(
+      store.getState().paseoSessions.map(s => s.id),
+      ['sess-idle', 'sess-running'],
+      '绑定列表应包含 running 与 idle 的未归档会话，排除 closed 与 archived',
+    );
+    assert.deepEqual(
+      store.getState().stalled?.sessions.map(s => s.agentId),
+      ['sess-idle'],
+      '停滞卡片仍只显示 idle/error 会话',
+    );
+    assert.equal(listCalls, 1, '单次刷新只应查询一遍未归档会话清单');
+  } finally { store.dispose(); }
+});
+
+test('1737-presence-fast-switch：configurePresence 点击后立即乐观更新模式与在场描述，失败时回滚到已确认快照并提示错误', async () => {
+  const initial = makePresence();
+  let nextConfigure!: { promise: Promise<PresenceSnapshot>; resolve: (v: PresenceSnapshot) => void; reject: (e: Error) => void };
+  const makePending = () => {
+    let resolve!: (v: PresenceSnapshot) => void;
+    let reject!: (e: Error) => void;
+    const promise = new Promise<PresenceSnapshot>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+
+  const store = createControlStore({
+    rpc: (async (contract: { name: string }) => {
+      if (contract.name === 'presence.snapshot') return initial;
+      if (contract.name === 'presence.configure') return nextConfigure.promise;
+      if (contract.name === 'browser.snapshot') return makeBrowser();
+      return { sessions: [], error: null };
+    }) as Parameters<typeof createControlStore>[0]['rpc'],
+  });
+
+  try {
+    await store.refresh();
+    assert.equal(store.getState().presence?.settings.mode, 'auto');
+
+    // 1. 切到离线：不等 RPC 返回，状态已同步更新为手动离线
+    nextConfigure = makePending();
+    const saveOffline = store.configurePresence({ ...initial.settings, mode: 'offline' });
+    assert.equal(store.getState().presence?.settings.mode, 'offline', '点击离线后分段控件状态应立即变为 offline');
+    assert.equal(store.getState().presence?.observation.mode, 'offline', '点击离线后判定状态应立即变为 offline');
+    assert.equal(store.getState().presence?.observation.source, 'manual');
+
+    const confirmedOffline: PresenceSnapshot = {
+      ...initial,
+      settings: { ...initial.settings, mode: 'offline' },
+      observation: { mode: 'offline', observedAt: new Date().toISOString(), source: 'manual', reason: '手动离线：选择明确推荐项' },
+    };
+    nextConfigure.resolve(confirmedOffline);
+    await saveOffline;
+    assert.equal(store.getState().presence?.settings.mode, 'offline');
+    assert.equal(store.getState().presenceError, null);
+
+    // 2. 切到自动但 RPC 失败：点击瞬间先乐观显示 auto，失败后回滚为已确认的 offline 并记录错误
+    nextConfigure = makePending();
+    const saveAutoFail = store.configurePresence({ ...confirmedOffline.settings, mode: 'auto' });
+    assert.equal(store.getState().presence?.settings.mode, 'auto', '点击自动后分段控件应立即乐观显示 auto');
+    assert.equal(store.getState().presence?.observation.reason, '正在读取来源主机在场状态');
+
+    nextConfigure.reject(new Error('设置正在保存，请稍后重试'));
+    await assert.rejects(saveAutoFail, /设置正在保存/);
+    assert.equal(store.getState().presence?.settings.mode, 'offline', 'RPC 失败后应回滚到上次确认的 offline 模式');
+    assert.equal(store.getState().presence?.observation.mode, 'offline');
+    assert.match(store.getState().presenceError ?? '', /设置正在保存/);
+  } finally {
+    store.dispose();
+  }
 });

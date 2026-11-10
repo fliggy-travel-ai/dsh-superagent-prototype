@@ -1,6 +1,22 @@
 (() => {
   const PAIR_RE = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/sync$/;
-  const DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const DAY_INDEX = {
+    sun: 0, sunday: 0,
+    mon: 1, monday: 1,
+    tue: 2, tues: 2, tuesday: 2,
+    wed: 3, wednesday: 3,
+    thu: 4, thur: 4, thurs: 4, thursday: 4,
+    fri: 5, friday: 5,
+    sat: 6, saturday: 6,
+  };
+
+  function normalizeLabel(value) {
+    if (typeof value !== 'string') return '';
+    return value
+      .replace(/[\uE000-\uF8FF\u200B-\u200D\uFEFF]|\p{Co}/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
 
   async function readDialog(minTimeOrigin = null) {
     const timeOrigin = typeof performance !== 'undefined' && Number.isFinite(performance?.timeOrigin) ? performance.timeOrigin : null;
@@ -15,11 +31,19 @@
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }
+    const resetRe = /Resets\s+(?:on\s+)?(?:(?:Sun(?:day)?|Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:s(?:day)?)?)?|Fri(?:day)?|Sat(?:urday)?)\.?,?\s+)?(?:at\s+)?\d{1,2}:\d{2}\s*[AP]M/i;
     const rows = meters.map(meter => {
       const labelEl = document.getElementById(meter.getAttribute('aria-labelledby'));
       let row = meter;
       for (let i = 0; i < 6 && labelEl && row.parentElement && !row.contains(labelEl); i++) row = row.parentElement;
-      return { label: labelEl?.textContent?.trim() ?? '', used: meter.getAttribute('aria-valuenow'), valueText: meter.getAttribute('aria-valuetext') ?? '', reset: row.textContent.match(/Resets (?:at )?[A-Za-z]*\s?\d{1,2}:\d{2} [AP]M/)?.[0] ?? null };
+      const rawLabel = labelEl?.textContent ?? '';
+      const cleanLabel = rawLabel.replace(/[\uE000-\uF8FF\u200B-\u200D\uFEFF]|\p{Co}/gu, '').replace(/\s+/g, ' ').trim();
+      return {
+        label: cleanLabel,
+        used: meter.getAttribute('aria-valuenow'),
+        valueText: meter.getAttribute('aria-valuetext') ?? '',
+        reset: (row.textContent ?? '').match(resetRe)?.[0] ?? null,
+      };
     });
     return { path: location.pathname, title: document.title, rows, now: Date.now(), tzOffset: new Date().getTimezoneOffset(), timeOrigin };
   }
@@ -47,9 +71,12 @@
 
   function parseReset(text, now, tzOffset) {
     if (typeof text !== 'string' || !Number.isFinite(now) || !Number.isFinite(tzOffset)) return null;
-    const match = text.trim().match(/^Resets\s+(?:at\s+|(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+)(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    const clean = text.replace(/\s+/g, ' ').trim();
+    const match = clean.match(/^Resets\s+(?:at\s+|(?:on\s+)?([A-Za-z]+)\.?,?\s+(?:at\s+)?|)(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
     if (!match) return null;
-    const dayName = match[1]?.toLowerCase() ?? null;
+    const rawDay = match[1]?.toLowerCase() ?? null;
+    const targetDay = rawDay !== null ? DAY_INDEX[rawDay] : null;
+    if (rawDay !== null && targetDay === undefined) return null;
     const hour12 = Number(match[2]);
     const minute = Number(match[3]);
     const meridiem = match[4].toUpperCase();
@@ -62,8 +89,7 @@
     const month = localNow.getUTCMonth();
     const date = localNow.getUTCDate();
     let targetLocalMs;
-    if (dayName) {
-      const targetDay = DAYS.indexOf(dayName);
+    if (targetDay !== null) {
       const diffDays = (targetDay - localNow.getUTCDay() + 7) % 7;
       targetLocalMs = Date.UTC(year, month, date + diffDays, hour24, minute, 0, 0);
       if (targetLocalMs <= localNowMs) targetLocalMs += 7 * 86_400_000;
@@ -88,8 +114,8 @@
     const nowMs = Number.isFinite(data.now) ? data.now : Date.now();
     const tzOffset = Number.isFinite(data.tzOffset) ? data.tzOffset : 0;
     const observedAt = new Date(nowMs).toISOString();
-    const sessionRow = data.rows.find(row => row?.label === 'Current session');
-    const weekRow = data.rows.find(row => row?.label === 'This week');
+    const sessionRow = data.rows.find(row => normalizeLabel(row?.label) === 'Current session');
+    const weekRow = data.rows.find(row => normalizeLabel(row?.label) === 'This week');
     const fiveHour = parseWindowRow(sessionRow, nowMs, tzOffset, observedAt);
     const weekly = parseWindowRow(weekRow, nowMs, tzOffset, observedAt);
     if (!fiveHour || !weekly) return null;

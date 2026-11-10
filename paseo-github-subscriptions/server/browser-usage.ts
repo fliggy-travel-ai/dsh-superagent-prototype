@@ -15,9 +15,11 @@ import {
 } from '../shared/browser-usage.ts';
 import type { BrowserBridge } from './browser-bridge.ts';
 
-const MAX_AGE = 150_000;
+// 扩展每分钟上报一次；MV3 后台休眠会让闹钟推迟几分钟，所以 5 分钟没有上报才判为离线。
+const OFFLINE_AFTER_MS = 5 * 60_000;
 const RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
-const SAVE_INTERVAL_MS = 60 * 60 * 1000;
+// 数据没有变化时，上报时间也至少每 5 分钟落盘一次，插件重载后读到的上报时间不会太旧。
+const LAST_POST_SAVE_MS = 5 * 60_000;
 const WEEKLY_SYNC_DIFF_MS = 10 * 60 * 1000;
 const ADSPOWER_QUERY_INTERVAL_MS = 10 * 60 * 1000;
 const DEFAULT_ADSPOWER_URL = 'http://127.0.0.1:50325';
@@ -180,6 +182,9 @@ export class BrowserUsageStore {
   private lastRequestAt = 0;
   private lastSavedAt = 0;
   private loaded = false;
+  /** 插件启动（读入落盘状态）的时间，以及之后上报过的环境：用于重载后的等待同步宽限期。 */
+  private loadedAt: number | null = null;
+  private postedSinceLoad = new Set<string>();
   private tail: Promise<unknown> = Promise.resolve();
 
   constructor(directory: string, nowFn: () => number = Date.now, options: BrowserUsageStoreOptions = {}) {
@@ -603,6 +608,7 @@ export class BrowserUsageStore {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器额度状态无效');
       }
       this.loaded = true;
+      this.loadedAt = now;
     });
   }
 
@@ -773,8 +779,9 @@ export class BrowserUsageStore {
         || JSON.stringify(previous.fiveHour) !== JSON.stringify(next.fiveHour)
         || JSON.stringify(previous.weekly) !== JSON.stringify(next.weekly);
       this.records.set(input.instanceId, next);
+      this.postedSinceLoad.add(input.instanceId);
       const clearedOther = this.clearAutoDetectedOnMultiInstance();
-      if (changed || clearedOther || now - this.lastSavedAt >= SAVE_INTERVAL_MS) {
+      if (changed || clearedOther || now - this.lastSavedAt >= LAST_POST_SAVE_MS) {
         await this.save(now);
       }
       if (shouldQuery) {
@@ -782,6 +789,11 @@ export class BrowserUsageStore {
       }
     });
   };
+
+  /** 插件刚启动、这个环境还没有上报过：上报时间来自落盘，可能只是因为重载而显得旧。 */
+  awaitingFirstPost(instanceId: string, now = this.nowFn()): boolean {
+    return this.loadedAt !== null && !this.postedSinceLoad.has(instanceId) && now - this.loadedAt < OFFLINE_AFTER_MS;
+  }
 
   async flushQueries(): Promise<void> {
     while (this.allInflightPromises.size > 0) {
@@ -832,21 +844,25 @@ export class BrowserUsageStore {
   }
 }
 
-export function toUsageReport(record: BrowserUsageRecord | null | undefined, now = Date.now(), channelEnabled = true): UsageReport {
+export function toUsageReport(record: BrowserUsageRecord | null | undefined, now = Date.now(), channelEnabled = true, awaitingFirstPost = false): UsageReport {
   if (!record) {
     return unavailable({ kind: 'no_quota', detail: '该浏览器环境已长时间未连接' });
   }
   const hasData = Boolean(record.fiveHour || record.weekly);
-  const online = channelEnabled && now - record.lastPostAt < MAX_AGE;
+  const online = channelEnabled && now - record.lastPostAt < OFFLINE_AFTER_MS;
   const isCurrentOk = online && record.status === 'ok' && hasData;
 
   let stateText: string | null = null;
   if (!channelEnabled) {
-    if (!hasData) return unavailable({ kind: 'no_quota', detail: '未打开浏览器，无法检测剩余额度，还没有同步过额度' });
+    if (!hasData) return unavailable({ kind: 'no_quota', detail: '开发自动化插件的浏览器通道已关闭，还没有同步过额度' });
     stateText = '开发自动化插件的浏览器通道已关闭，无法检测剩余额度，只展示上一次同步的额度';
+  } else if (!online && awaitingFirstPost) {
+    if (!hasData) return unavailable({ kind: 'no_quota', detail: '插件刚重新加载，正在等待浏览器扩展同步' });
+    stateText = '插件刚重新加载，正在等待浏览器扩展同步，暂时展示上一次同步的额度';
   } else if (!online) {
-    if (!hasData) return unavailable({ kind: 'no_quota', detail: '未打开浏览器，无法检测剩余额度，还没有同步过额度' });
-    stateText = '未打开浏览器，无法检测剩余额度，只展示上一次同步的额度';
+    const silent = `浏览器扩展最后一次同步在 ${formatRelativeTime(record.lastPostAt, now)}（可能未打开浏览器或扩展休眠）`;
+    if (!hasData) return unavailable({ kind: 'no_quota', detail: `${silent}，还没有同步过额度` });
+    stateText = `${silent}，无法检测剩余额度，只展示上一次同步的额度`;
   } else if (record.status === 'signed_out') {
     if (!hasData) return unavailable({ kind: 'no_quota', detail: '该浏览器环境未登录 claude.ai' });
     stateText = '该浏览器环境未登录 claude.ai，只展示上一次同步的额度';
@@ -950,7 +966,8 @@ export function registerBrowserUsage(
     async fetch(rawInput) {
       await attach();
       const { instanceId } = BrowserUsageInputSchema.parse(rawInput);
-      return toUsageReport(await store.get(instanceId), nowFn(), channelEnabled);
+      const record = await store.get(instanceId);
+      return toUsageReport(record, nowFn(), channelEnabled, store.awaitingFirstPost(instanceId, nowFn()));
     },
   });
   return store;

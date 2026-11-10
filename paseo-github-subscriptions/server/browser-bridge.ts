@@ -4,10 +4,20 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BrowserApprovalEventSchema, BrowserBindingInputSchema, BrowserSettingsSchema, BrowserSyncSchema, type AnswerWebRequest, type BrowserBindingInput, type BrowserPairing, type BrowserSettings, type BrowserSnapshot, type WebRequestAnswer, type WebRequestResult } from '../shared/browser.ts';
 import type { PresenceRuntime } from './presence.ts';
+import { MAIN_PLUGIN_ID } from '../shared/instances.ts';
+import { extensionDirectory } from './plugin-directory.ts';
+
 
 const ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
 const MAX_BODY = 65536;
 const MAX_AGE = 150_000;
+const SYNC_DECISION_BUDGET_MS = 3000;
+// 扩展目录在加载后按需查 Paseo 配置（打包后没有 import.meta.url），结果缓存 60 秒。
+let extensionCache: { at: number; value: string | null } | null = null;
+const extensionPath = () => {
+  if (!extensionCache || Date.now() - extensionCache.at > 60_000) extensionCache = { at: Date.now(), value: extensionDirectory(MAIN_PLUGIN_ID) };
+  return extensionCache.value;
+};
 const cleanTitle = (title: string) => title.replace(/\s+/g, ' ').trim().slice(0, 120) || '未命名会话';
 const key = (instanceId: string, sessionId: string) => `${instanceId}:${sessionId}`;
 
@@ -17,6 +27,7 @@ export class BrowserBridge {
   private approvals: NonNullable<BrowserSnapshot['approvals']> = [];
   private sessions = new Map<string, BrowserSnapshot['sessions'][number]>();
   private seen = new Map<string, number>();
+  private knownInstances = new Map<string, { instanceName: string; lastSeenAt: string }>();
   private server: Server | null = null;
   private token = '';
   private error: string | null = null;
@@ -26,9 +37,22 @@ export class BrowserBridge {
   private resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>;
   private syncQuestions?: PresenceRuntime['browserSync'];
   private answerWeb?: AnswerWebRequest;
+  private isModuleRunning?: () => boolean;
   private usageRoute?: (body: unknown) => void | Promise<void>;
 
-  constructor(directory: string, resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>, syncQuestions?: PresenceRuntime['browserSync'], answerWeb?: AnswerWebRequest) { this.directory = directory; this.resolveAgent = resolveAgent; this.syncQuestions = syncQuestions; this.answerWeb = answerWeb; }
+  constructor(
+    directory: string,
+    resolveAgent: (agentId: string) => Promise<{ id: string; title: string } | null>,
+    syncQuestions?: PresenceRuntime['browserSync'],
+    answerWeb?: AnswerWebRequest,
+    isModuleRunning?: () => boolean,
+  ) {
+    this.directory = directory;
+    this.resolveAgent = resolveAgent;
+    this.syncQuestions = syncQuestions;
+    this.answerWeb = answerWeb;
+    this.isModuleRunning = isModuleRunning;
+  }
   setUsageRoute(route: (body: unknown) => void | Promise<void>) { this.usageRoute = route; }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -43,17 +67,19 @@ export class BrowserBridge {
   async start(): Promise<void> { return this.serial(async () => {
     if (this.started) return;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    let hasSavedState = false;
     try {
       const state = JSON.parse(await readFile(join(this.directory, 'browser-state.json'), 'utf8'));
       this.settings = BrowserSettingsSchema.parse(state.settings);
       this.bindings = BrowserBindingInputSchema.extend({ agentId: BrowserBindingInputSchema.shape.agentId.unwrap() }).array().parse(state.bindings);
       this.approvals = BrowserApprovalEventSchema.array().parse(state.approvals ?? []).slice(-300);
+      hasSavedState = true;
     } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器分组状态无效'); }
     const tokenPath = join(this.directory, 'browser-token');
     try { this.token = (await readFile(tokenPath, 'utf8')).trim(); if (!/^[a-f0-9]{64}$/.test(this.token)) throw new Error('invalid'); }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('浏览器配对令牌无效'); this.token = randomBytes(32).toString('hex'); await writeFile(tokenPath, this.token, { mode: 0o600, flag: 'wx' }); }
     await chmod(tokenPath, 0o600); this.started = true;
-    if (this.settings.enabled) await this.listen().catch(() => {});
+    if (this.settings.enabled || hasSavedState) await this.listen().catch(() => {});
   }); }
   private async listen() {
     const server = createServer((req, res) => {
@@ -71,6 +97,8 @@ export class BrowserBridge {
       if (req.method !== 'POST' || (req.url !== '/sync' && req.url !== '/usage') || !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) { res.writeHead(404).end(); return; }
       let size = 0; const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_BODY) { res.writeHead(413).end(); req.destroy(); } else chunks.push(chunk); });
+      // 扩展等同步响应最多 5 秒；收到请求 3 秒后才算出的答案留到下一次同步，避免答案随被放弃的响应丢失。
+      const decisionDeadline = Date.now() + SYNC_DECISION_BUDGET_MS;
       req.on('end', () => { if (size > MAX_BODY) return; void this.serial(async () => {
         try {
           if (req.url === '/usage') { await this.usageRoute?.(JSON.parse(Buffer.concat(chunks).toString('utf8'))); res.writeHead(204).end(); return; }
@@ -80,6 +108,16 @@ export class BrowserBridge {
             const url = new URL(s.url);
             if (url.origin !== 'https://claude.ai' || url.pathname !== `/code/session_${s.sessionId}` || url.search || url.hash || ids.has(s.sessionId)) throw new Error('invalid');
             ids.add(s.sessionId);
+          }
+          if (this.isModuleRunning && !this.isModuleRunning()) {
+            res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(
+              JSON.stringify({
+                approvalEnabled: false,
+                sessions: input.sessions.map(s => ({ sessionId: s.sessionId, groupTitle: cleanTitle(s.title) })),
+                decisions: [],
+              }),
+            );
+            return;
           }
           const next: BrowserSnapshot['sessions'] = [];
           let bindingsChanged = false;
@@ -105,9 +143,19 @@ export class BrowserBridge {
           if (bindingsChanged || previousApprovals !== JSON.stringify(this.approvals)) await this.save();
           for (const [k, session] of this.sessions) if (session.instanceId === input.instanceId) this.sessions.delete(k);
           for (const session of next) this.sessions.set(key(session.instanceId, session.sessionId), session);
+          const nowIso = new Date().toISOString();
           this.seen.set(input.instanceId, Date.now());
-          const decisions = await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds) ?? [];
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify({ sessions: next.map(({ sessionId, groupTitle }) => ({ sessionId, groupTitle })), decisions }));
+          this.knownInstances.set(input.instanceId, { instanceName: input.instanceName, lastSeenAt: nowIso });
+          const decisions = this.settings.enabled
+            ? (await this.syncQuestions?.(input.instanceId, input.questions, input.results, input.sessions, input.observedSessionIds, { deadline: decisionDeadline }) ?? [])
+            : [];
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(
+            JSON.stringify({
+              approvalEnabled: this.settings.enabled,
+              sessions: next.map(({ sessionId, groupTitle }) => ({ sessionId, groupTitle })),
+              decisions,
+            }),
+          );
         } catch { if (!res.headersSent) res.writeHead(400).end(); }
       }); });
       req.on('error', () => {});
@@ -119,12 +167,30 @@ export class BrowserBridge {
   async stop(): Promise<void> { return this.serial(async () => { await this.close(); this.started = false; }); }
   snapshot(): BrowserSnapshot {
     const now = Date.now(); const active = [...this.seen.values()].some(t => now - t < MAX_AGE);
-    return { settings: { ...this.settings }, connected: !!this.server && active, error: this.error, approvals: this.approvals.map(entry => ({ ...entry })), sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })), bindings: this.bindings.map(b => ({ ...b })) };
+    const instances = [...this.knownInstances.entries()].map(([instanceId, info]) => ({
+      instanceId,
+      instanceName: info.instanceName,
+      account: null,
+      connected: this.settings.enabled && !!this.server && (now - (this.seen.get(instanceId) ?? 0) < MAX_AGE),
+      lastSeenAt: info.lastSeenAt,
+    }));
+    return {
+      settings: { ...this.settings },
+      connected: this.settings.enabled && !!this.server && active,
+      error: this.error,
+      approvals: this.approvals.map(entry => ({ ...entry })),
+      sessions: [...this.sessions.values()].filter(s => now - Date.parse(s.lastSeenAt) < MAX_AGE).map(s => ({ ...s })),
+      bindings: this.bindings.map(b => ({ ...b })),
+      // 浏览器桥接只在主实例（含兼容模式）运行，插件 ID 是主实例的 ID。
+      ...(extensionPath() ? { extensionPath: extensionPath()! } : {}),
+      instances,
+    };
   }
   async configure(value: BrowserSettings): Promise<BrowserSnapshot> { return this.serial(async () => {
     if (!this.started) throw new Error('浏览器桥接尚未启动');
     const settings = BrowserSettingsSchema.parse(value); await this.close(); this.settings = settings; await this.save();
-    if (settings.enabled) await this.listen(); else this.error = null;
+    if (settings.enabled) await this.listen();
+    else { await this.listen().catch(() => {}); this.error = null; }
     return this.snapshot();
   }); }
   async bind(value: BrowserBindingInput): Promise<BrowserSnapshot> { return this.serial(async () => {

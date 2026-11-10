@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>开发自动化 · 页面原型</title>
+<style>
+:root{
+  --bg:#0e0e10; --surface0:#141417; --surface1:#1b1b1f; --surface2:#232329; --border:#2c2c33;
+  --fg:#ececf1; --muted:#9a9aa6; --faint:#6b6b76; --accent:#8b7cf6; --accent-fg:#ffffff;
+  --ok:#3fb27f; --warn:#e0a83a; --danger:#e5604f; --info:#5aa2f0;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+.app{display:flex;height:100vh}
+/* Paseo 侧栏（模拟） */
+.paseo-side{width:232px;background:var(--surface0);border-right:1px solid var(--border);padding:12px 8px;display:flex;flex-direction:column;gap:2px;flex-shrink:0}
+.paseo-side .brand{font-weight:600;padding:6px 10px 12px;color:var(--muted);font-size:12px;letter-spacing:.04em}
+.srow{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;color:var(--muted);border:0;background:none;text-align:left;width:100%}
+.srow:hover{background:var(--surface1)}
+.srow.active{background:var(--surface2);color:var(--fg)}
+.srow .ic{width:16px;text-align:center;opacity:.9}
+.srow .tail{margin-left:auto;font-size:12px}
+.srow .tail.badge{background:var(--danger);color:#fff;border-radius:9px;padding:0 7px;font-weight:600}
+.srow .tail.zero{color:var(--faint)}
+.sep{height:1px;background:var(--border);margin:8px 6px}
+.side-label{font-size:11px;color:var(--faint);padding:6px 10px 2px}
+/* 插件屏幕 */
+.screen{flex:1;display:flex;flex-direction:column;min-width:0}
+.screen-head{display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--border);background:var(--surface0)}
+.screen-head h1{font-size:15px;margin:0;font-weight:600}
+.host-pick{margin-left:auto;display:flex;gap:4px;background:var(--surface1);border:1px solid var(--border);border-radius:8px;padding:3px}
+.host-pick button{border:0;background:none;padding:4px 10px;border-radius:6px;color:var(--muted);font-size:12px}
+.host-pick button.on{background:var(--surface2);color:var(--fg)}
+.body{display:flex;flex:1;min-height:0}
+.nav{width:188px;padding:16px 10px;border-right:1px solid var(--border);display:flex;flex-direction:column;gap:4px;flex-shrink:0}
+.nav button{display:flex;align-items:center;gap:10px;border:0;background:none;text-align:left;padding:9px 10px;border-radius:8px;color:var(--muted)}
+.nav button .n{width:20px;height:20px;border-radius:50%;border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;font-size:11px}
+.nav button.on{background:var(--surface2);color:var(--fg)}
+.nav button.on .n{background:var(--accent);border-color:var(--accent);color:#fff}
+.nav button .cnt{margin-left:auto;font-size:12px;color:var(--warn)}
+.nav .hint{margin-top:auto;font-size:11px;color:var(--faint);padding:8px}
+.main{flex:1;overflow:auto;padding:18px 24px 40px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.danger{background:var(--danger)}.dot.off{background:var(--faint)}.dot.info{background:var(--info)}
+h2{font-size:18px;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 16px;font-size:13px}
+h3{font-size:14px;margin:0;font-weight:600}
+.card{background:var(--surface1);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.card-head .right{margin-left:auto;display:flex;gap:6px;align-items:center}
+.muted{color:var(--muted)}.faint{color:var(--faint)}.small{font-size:12px}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted);white-space:nowrap}
+.chip.ok{color:var(--ok);border-color:#2b5a45}.chip.warn{color:var(--warn);border-color:#5e4a22}.chip.danger{color:var(--danger);border-color:#64302a}.chip.accent{color:#b9afff;border-color:#4a417f}.chip.info{color:var(--info);border-color:#2d4a6b}
+.btn{white-space:nowrap;border:1px solid var(--border);background:var(--surface2);padding:5px 12px;border-radius:7px;font-size:12px}
+.btn:hover{border-color:#44444d}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.danger{color:var(--danger)}
+.btn.ghost{background:none}
+table{width:100%;border-collapse:collapse}
+th{white-space:nowrap;font-weight:500;color:var(--faint);font-size:12px;text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
+td{padding:9px 8px;border-bottom:1px solid #222228;vertical-align:middle}
+tr:last-child td{border-bottom:0}
+.grp td{color:var(--faint);font-size:12px;padding-top:14px;border-bottom:0}
+.sw{width:32px;height:18px;border-radius:9px;background:var(--surface2);border:1px solid var(--border);position:relative;display:inline-block;vertical-align:middle;cursor:pointer;flex-shrink:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--muted);transition:.15s}
+.sw.on{background:var(--accent);border-color:var(--accent)}
+.sw.on::after{left:16px;background:#fff}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.modes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.mode{border:1px solid var(--border);background:var(--surface2);border-radius:9px;padding:10px 12px;text-align:left}
+.mode.on{border-color:var(--accent);background:#2a2550}
+.mode b{display:block;margin-bottom:2px}
+.mode span{font-size:12px;color:var(--muted)}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:6px 12px;font-size:13px}
+.kv div:nth-child(odd){color:var(--faint)}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:14px}
+.tabs button{border:0;background:none;padding:8px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button.on{color:var(--fg);border-bottom-color:var(--accent)}
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.filters button{border:1px solid var(--border);background:var(--surface1);padding:4px 11px;border-radius:999px;font-size:12px;color:var(--muted)}
+.filters button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.todo{border-left:3px solid var(--border)}
+.todo.t-perm{border-left-color:var(--danger)}.todo.t-ask{border-left-color:var(--warn)}.todo.t-esc{border-left-color:#d77bd0}.todo.t-web{border-left-color:var(--info)}.todo.t-stall{border-left-color:var(--faint)}.todo.t-acct{border-left-color:#c98b4b}.todo.t-read{border-left-color:var(--ok)}
+.meta{display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--faint);margin-bottom:8px}
+.question{margin:4px 0 10px}
+.opts{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);text-align:left}
+.opt.sel{border-color:var(--accent);background:#2a2550}
+.opt .r{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--muted);margin-top:3px;flex-shrink:0}
+.opt.sel .r{border-color:var(--accent);background:radial-gradient(var(--accent) 45%,transparent 50%)}
+.quote{background:var(--surface0);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--muted);margin-bottom:10px;white-space:pre-wrap}
+.note{border:1px solid #5e4a22;background:#2a2213;border-radius:9px;padding:10px 12px;margin-bottom:14px;font-size:13px}
+.note.info{border-color:#2d4a6b;background:#132233}
+.note.danger{border-color:#64302a;background:#2b1715}
+.empty{color:var(--faint);text-align:center;padding:30px}
+.page{display:none}.page.on{display:block}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);padding:8px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none}
+.toast.on{opacity:1}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:var(--surface2);padding:1px 5px;border-radius:4px}
+input.txt{background:var(--surface0);border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:5px 8px;font:inherit;font-size:12px;width:90px}
+.fgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.fcard{background:var(--surface1);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.fcard .top{display:flex;align-items:center;gap:10px}
+.fcard .top h3{flex:1}
+.fcard .desc{color:var(--muted);font-size:13px}
+.fcard .vals{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px}
+.fcard .vals .v{color:var(--fg)}
+.fcard .foot{display:flex;gap:8px;align-items:center;margin-top:2px}
+.fcard .foot .edit{margin-left:auto}
+.link{border:0;background:none;color:#b9afff;padding:0;font-size:12px}
+.link:hover{text-decoration:underline}
+.seg{display:inline-flex;background:var(--surface0);border:1px solid var(--border);border-radius:8px;padding:2px}
+.seg button{border:0;background:none;padding:3px 12px;border-radius:6px;color:var(--muted);font-size:12px}
+.seg button.on{background:var(--accent);color:#fff}
+.alert{display:flex;align-items:center;gap:10px;border-radius:9px;padding:9px 12px;margin-bottom:14px;font-size:13px;border:1px solid #64302a;background:#2b1715}
+.alert.warn{border-color:#5e4a22;background:#2a2213}
+.alert .btn{margin-left:auto}
+.oneline{color:var(--muted);font-size:12px;margin:-8px 0 14px}
+/* 编辑面板 */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.45);opacity:0;pointer-events:none;transition:.15s}
+.scrim.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:520px;max-width:100%;background:var(--surface0);border-left:1px solid var(--border);transform:translateX(100%);transition:.2s;display:flex;flex-direction:column;z-index:5}
+.drawer.on{transform:none}
+.drawer .dh{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border)}
+.drawer .dh h3{flex:1;font-size:15px}
+.drawer .db{flex:1;overflow:auto;padding:16px 18px 30px}
+.drawer .df{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--border)}
+.sec{margin-bottom:18px}
+.sec h4{margin:0 0 8px;font-size:12px;color:var(--faint);font-weight:500;letter-spacing:.02em}
+.expl{font-size:13px;color:var(--muted);line-height:1.6}
+.expl li{margin-bottom:4px}
+.steps{counter-reset:s;display:flex;flex-direction:column;gap:10px}
+.st{display:flex;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:9px;background:var(--surface1)}
+.st .no{width:22px;height:22px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+.st.done .no{background:var(--ok);color:#fff}
+.st.cur{border-color:var(--accent)}
+.st.cur .no{background:var(--accent);color:#fff}
+.st .who{font-size:11px;margin-left:6px}
+.st .who.me{color:var(--warn)}.st .who.auto{color:var(--ok)}
+.st .stb{flex:1}
+.st .stb .t{font-weight:600;font-size:13px}
+.st .stb .d{font-size:12px;color:var(--muted);margin-top:2px}
+.st .stb .row{margin-top:6px}
+.field{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}
+.field label{width:110px;color:var(--faint);flex-shrink:0}
+.field .txt,.field select{background:var(--surface1);border:1px solid var(--border);border-radius:6px;color:var(--fg);padding:5px 8px;font:inherit;font-size:12px}
+.field .txt{flex:1;width:auto}
+.dev{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--surface1);font-size:13px}
+.dev.sel{border-color:var(--accent)}
+.dev .r{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--muted)}
+.dev.sel .r{border-color:var(--accent);background:radial-gradient(var(--accent) 45%,transparent 50%)}
+.dev .sig{margin-left:auto;font-size:12px;color:var(--muted)}
+.native{font-size:11px;color:var(--faint);padding:2px 10px}
+@media (max-width:900px){
+  .paseo-side{display:none}
+  .body{flex-direction:column}
+  .nav{width:auto;flex-direction:row;overflow:auto;border-right:0;border-bottom:1px solid var(--border);padding:8px}
+  .nav .hint{display:none}
+  .fgrid{grid-template-columns:1fr}
+  .main{padding:14px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Paseo 侧栏（模拟） -->
+  <aside class="paseo-side">
+    <div class="brand">PASEO</div>
+    <button class="srow"><span class="ic">＋</span>新建会话</button>
+    <div class="side-label">插件</div>
+    <button class="srow active" id="side-main" onclick="go(lastPage)"><span class="ic">◆</span>开发自动化<span class="tail" style="color:var(--danger)">!</span></button>
+    <button class="srow" id="side-todo-row" onclick="go('todo')"><span class="ic">☑</span>待办<span class="tail badge" id="side-todo">5</span></button>
+    <div class="sep"></div>
+    <div class="side-label">需要输入 · Paseo 原生分组</div>
+    <button class="srow"><span class="ic">●</span>【退款】联调<span class="tail faint">MacBook</span></button>
+    <button class="srow"><span class="ic">●</span>【整合】方案<span class="tail faint">Mac mini</span></button>
+    <div class="native">原生授权和提问在这里处理，不计入“待办”</div>
+    <div class="sep"></div>
+    <div class="side-label">工作区</div>
+    <button class="srow"><span class="ic">▤</span>【额度看板】改版</button>
+    <button class="srow"><span class="ic">▤</span>【搜索排序】实验</button>
+    <div style="margin-top:auto"></div>
+    <div class="sep"></div>
+    <button class="srow"><span class="ic">◔</span>额度（Paseo 原生）</button>
+    <button class="srow"><span class="ic">⚙</span>设置</button>
+  </aside>
+
+  <section class="screen">
+    <div class="screen-head">
+      <h1>开发自动化</h1>
+      <button class="btn ghost" id="pauseAll" onclick="togglePause()">暂停全部自动化</button>
+      <div class="host-pick" title="Paseo 页头主机选择器">
+        <button class="on" onclick="pickHost(this,'Mac mini')">Mac mini</button>
+        <button onclick="pickHost(this,'MacBook')">MacBook</button>
+      </div>
+    </div>
+    <div class="body">
+      <nav class="nav">
+        <button data-p="providers" class="on" onclick="go('providers')"><span class="n">1</span>Provider 与账号</button>
+        <button data-p="answer" onclick="go('answer')"><span class="n">2</span>问题答复</button>
+        <button data-p="github" onclick="go('github')"><span class="n">3</span>GitHub 订阅</button>
+        <button data-p="todo" onclick="go('todo')"><span class="n">4</span>待办总览</button>
+        <div class="hint">启停 Provider、模型、额度在 Paseo 设置和额度面板。令牌、API key 和 Webhook 凭据在各功能编辑面板，机器配置在“本机配置”卡片。</div>
+      </nav>
+
+      <main class="main">
+        <!-- ① Provider 与账号 -->
+        <div class="page on" id="p-providers">
+          <h2>Provider 与账号</h2>
+          <p class="sub">本页显示 <b id="host-name">Mac mini</b> 上的账号。只做 Paseo 设置里没有的事：多账号配置、登录、网页环境配对、插件 Provider。</p>
+          <div class="alert warn"><span>Claude · 测试 需要重新登录。</span><button class="btn" onclick="openEdit('claude')">重新登录</button></div>
+          <div class="alert warn" style="border-color:var(--border);background:var(--surface1)"><span class="muted">另一台主机 MacBook 有 1 个账号需要处理。</span><button class="btn ghost" onclick="pickHost(document.querySelectorAll('.host-pick button')[1],'MacBook')">切换到 MacBook</button></div>
+
+          <div class="fgrid">
+            <div class="fcard">
+              <div class="top"><h3>Claude 账号</h3><button class="btn primary" onclick="openEdit('addClaude')">添加账号</button></div>
+              <div class="desc">再加一个 Claude 账号：自动建配置目录、打开登录终端，登录后按邮箱命名。</div>
+              <div class="vals"><span class="v">4 个账号</span><span class="chip warn">1 个需要重新登录</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('claude')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>网页版 claude.ai</h3><span class="sw on" onclick="sw(this,'网页版 claude.ai 接入')"></span></div>
+              <div class="desc">浏览器中的 claude.ai 会话接入 Paseo：网页提问进待办，按会话名分组。</div>
+              <div class="vals"><span class="v">3 个浏览器环境</span><span class="chip">1 个未连接</span></div>
+              <div class="foot"><button class="btn" onclick="openEdit('addBrowser')">添加浏览器环境</button><button class="link edit" onclick="openEdit('web')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>Claude 名称带额度</h3><span class="sw on" onclick="sw(this,'名称带额度')"></span></div>
+              <div class="desc">在 Provider 选择菜单中，Claude 账号名称后显示剩余额度。</div>
+              <div class="vals"><span class="v">当前最低 14%</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('quotaName')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>新建会话默认设置</h3><span class="sw on" onclick="sw(this,'新建会话默认设置')"></span></div>
+              <div class="desc">新建会话没有指定时，自动套用模式、Fast 和自动授权。</div>
+              <div class="vals"><span class="v">4 条规则</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('defaults')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>Provider 实例</h3><span class="chip ok">运行中</span></div>
+              <div class="desc">云端会话和 Antigravity 在单独的插件实例中运行，更新本页面不会中断它们。</div>
+              <div class="vals"><span class="v">2 个会话正在运行</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('instance')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>云端会话</h3><span class="sw on" onclick="sw(this,'云端会话')"></span></div>
+              <div class="desc">在 Claude 网页中运行的会话作为 Paseo 会话使用。</div>
+              <div class="vals"><span class="v">2 个在线</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('cloud')">编辑</button></div>
+            </div>
+            <div class="fcard" id="ag-card" style="display:none">
+              <div class="top"><h3>Antigravity</h3></div>
+              <div class="desc">多个 Antigravity 账号分别作为 Provider。</div>
+              <div class="vals"><span class="v">2 个账号</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('ag')">编辑</button></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ② 问题答复 -->
+        <div class="page" id="p-answer">
+          <h2>问题答复</h2>
+          <p class="sub">代答和升级是两套独立规则：问答模式决定是否代答，时段规则决定是否通知 Grok。同一道题可能先被代答，之后仍被升级。</p>
+          <div class="alert"><span>升级通知没有运行。Paseo 启动时连接未就绪，插件没有重试。</span><button class="btn" onclick="openEdit('esc')">查看</button></div>
+          <div class="fgrid">
+            <div class="fcard">
+              <div class="top"><h3>问答模式</h3><div class="seg" id="modeSeg"><button onclick="setMode(this,'在线')">在线</button><button onclick="setMode(this,'离线')">离线</button><button class="on" onclick="setMode(this,'自动')">自动</button></div></div>
+              <div class="desc">你不在时，只自动选择推荐项；没有推荐项就等你。</div>
+              <div class="vals"><span class="v" id="modeVal">自动：判定在线</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('mode')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>蓝牙在场判定</h3><span class="sw on" onclick="sw(this,'蓝牙在场判定')"></span></div>
+              <div class="desc">用手机蓝牙判断你是否在电脑旁，供“自动”模式使用。</div>
+              <div class="vals"><span class="v">iPhone（尾号 3F:A2）</span><span class="chip ok">在线</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('bt')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>升级通知</h3><span class="sw on" onclick="sw(this,'升级通知')"></span></div>
+              <div class="desc">按时段把未回答的主会话提问发给 Grok。</div>
+              <div class="vals"><span class="chip danger">没有运行</span><span class="v">实际发送</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('esc')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>子会话免提醒</h3><span class="sw on" onclick="sw(this,'子会话免提醒')"></span></div>
+              <div class="desc">置顶工作区中的会话是主会话；其他会话完成或出错时不打扰你，事件转给主会话。</div>
+              <div class="vals"><span class="v">主会话：5 个置顶工作区</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('quiet')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>语音提醒</h3><span class="sw on" onclick="sw(this,'语音提醒')"></span></div>
+              <div class="desc">有提问时在选定主机上播报。</div>
+              <div class="vals"><span class="v">播报主机 Mac mini</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('voice')">编辑</button></div>
+            </div>
+            <div class="fcard">
+              <div class="top"><h3>精确授权</h3></div>
+              <div class="desc">按命令精确放行的授权，命中时自动允许一次。</div>
+              <div class="vals"><span class="v">3 条策略</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('perm')">编辑</button></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ③ GitHub 订阅 -->
+        <div class="page" id="p-github">
+          <h2>GitHub 订阅</h2>
+          <p class="sub">监听 GitHub 事件，送到订阅的会话。</p>
+          <div class="fgrid" style="margin-bottom:14px">
+            <div class="fcard">
+              <div class="top"><h3>监听</h3><span class="sw on" onclick="sw(this,'GitHub 监听')"></span></div>
+              <div class="desc">按订阅把议题、评论和 PR 事件发给会话。</div>
+              <div class="vals"><span class="v">实际发送</span></div>
+              <div class="foot"><button class="link edit" onclick="openEdit('gh')">编辑</button></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>订阅</h3></div>
+            <table><tbody>
+              <tr><td>deepseek-harness #1737</td><td class="small muted">【插件整合】主会话</td><td style="text-align:right"><button class="btn ghost" onclick="toast('已取消订阅')">取消订阅</button></td></tr>
+              <tr><td>deepseek-harness #1704</td><td class="small muted">【审批点击】主会话</td><td style="text-align:right"><button class="btn ghost" onclick="toast('已取消订阅')">取消订阅</button></td></tr>
+              <tr><td>dsh-superagent-prototype PR #9</td><td class="small muted">【插件整合】主会话</td><td style="text-align:right"><button class="btn ghost" onclick="toast('已取消订阅')">取消订阅</button></td></tr>
+            </tbody></table>
+          </div>
+          <details class="card"><summary class="muted">最近事件</summary><div class="small muted" style="margin-top:8px">最近 20 条事件和送达结果。</div></details>
+        </div>
+
+        <!-- ④ 待办总览 -->
+        <div class="page" id="p-todo">
+          <h2>待办总览</h2>
+          <p class="sub">只收 Paseo 看不到的待办，两台合看。Paseo 会话中的授权和提问在侧栏“需要输入”中处理。</p>
+          <div class="tabs"><button class="on" onclick="todoTab('list',this)">待办</button><button onclick="todoTab('log',this)">处理记录</button></div>
+          <div id="todo-list">
+            <div class="filters" id="filters"></div>
+            <div id="todos"></div>
+          </div>
+          <div id="todo-log" style="display:none">
+            <div class="card"><table><tbody>
+              <tr><td class="small faint">10:42</td><td>网页权限点击</td><td class="small muted">环境 7 · 退款回调测试 · 窗口已消失</td></tr>
+              <tr><td class="small faint">10:15</td><td>离线代答</td><td class="small muted">【订单退款】联调 · 选择推荐项“预发环境”</td></tr>
+              <tr><td class="small faint">09:58</td><td>子会话归并</td><td class="small muted">【搜索排序】子任务 · 清除提醒，事件转给主会话</td></tr>
+            </tbody></table></div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </section>
+</div>
+
+<div class="scrim" id="scrim" onclick="closeEdit()"></div>
+<aside class="drawer" id="drawer"><div class="dh"><h3 id="dTitle"></h3><button class="btn ghost" onclick="closeEdit()">关闭</button></div><div class="db" id="dBody"></div><div class="df" id="dFoot"></div></aside>
+<div class="toast" id="toast"></div>
+<script>
+const save = '<button class="btn" onclick="closeEdit()">取消</button><button class="btn primary" onclick="closeEdit();toast(\'已保存\')">保存</button>';
+const close1 = '<button class="btn" onclick="closeEdit()">完成</button>';
+const E = {
+  bt: {t:'蓝牙在场判定', f:save, b:`
+    <div class="sec"><h4>来源主机</h4><div class="seg"><button class="on">Mac mini</button><button>MacBook</button></div>
+      <div class="small faint" style="margin-top:6px">在这台主机上扫描手机蓝牙。作用范围：两台共用这一个判定结果。</div></div>
+    <div class="sec"><h4>锚定设备</h4>
+      <div class="dev sel"><span class="r"></span>iPhone（尾号 3F:A2）<span class="sig">−64 dBm · 1 分钟前</span></div>
+      <div class="dev"><span class="r"></span>AirPods Pro（尾号 91:0C）<span class="sig">−78 dBm · 3 分钟前</span></div>
+      <div class="dev"><span class="r"></span>Apple Watch（尾号 B2:44）<span class="sig">未发现</span></div>
+      <button class="btn" onclick="toast('已重新扫描')">刷新设备列表</button></div>
+    <div class="sec"><h4>信号阈值</h4><div class="field"><label>强于此值算在场</label><input class="txt" value="−75 dBm" style="max-width:110px"></div>
+      <div class="field"><label>离开判定</label><input class="txt" value="连续 3 分钟未达阈值" style="max-width:200px"></div></div>
+    <div class="sec"><h4>判定规则</h4><ul class="expl">
+      <li>只在问答模式为“自动”时使用。</li>
+      <li>信号强于阈值：判定在线，提问时语音提醒并等待你回答。</li>
+      <li>连续 3 分钟未达阈值：判定离线，只自动选择推荐项。</li>
+      <li>状态超过 5 分钟没有更新、蓝牙不可用或未知：不自动回答。</li>
+      <li>与升级通知无关。升级通知只看时段规则。</li></ul></div>`},
+  esc: {t:'升级通知', f:save, b:`
+    <div class="note danger" style="margin-bottom:16px">没有运行。两台机器都在 Paseo 启动时失败：插件连接本机守护进程时监听地址还没写入，插件没有重试。修复后需要重载插件。</div>
+    <div class="sec"><h4>时段规则（新加坡时间）</h4>
+      <table><thead><tr><th>日期</th><th>时间</th><th>未回答多久后通知</th></tr></thead><tbody>
+        <tr><td>每天</td><td>01:00–09:30</td><td>立即</td></tr>
+        <tr><td>工作日</td><td>12:00–14:00</td><td>立即</td></tr>
+        <tr><td>其他时间</td><td>—</td><td>30 分钟</td></tr></tbody></table>
+      <button class="btn" style="margin-top:8px" onclick="toast('新增一行时段')">添加时段</button></div>
+    <div class="sec"><h4>投递模式</h4><div class="seg"><button>影子（只记录）</button><button class="on">实际发送</button></div>
+      <div class="small faint" style="margin-top:6px">影子模式只写记录，不发给 Grok。修复后建议先用影子模式观察。</div></div>
+    <div class="sec"><h4>Webhook</h4><div class="kv"><div>状态</div><div>已配置</div><div>主机名</div><div>hooks.example.net</div><div>指纹</div><div><code>a3f19c07</code></div></div>
+      <button class="btn" style="margin-top:8px" onclick="toast('测试通知已发送，结果未确认')">发测试通知</button></div>
+    <div class="sec"><h4>规则说明</h4><ul class="expl">
+      <li>只处理主会话（置顶工作区中的会话）的提问。</li>
+      <li>与问答模式独立：已被代答的题，在时段内仍可能被通知。</li></ul></div>`},
+  quiet: {t:'子会话免提醒', f:save, b:`
+    <div class="sec"><h4>规则</h4><ul class="expl">
+      <li><b>置顶工作区中的会话是主会话。</b>在 Paseo 侧栏置顶或取消置顶工作区即可调整。</li>
+      <li>其他会话完成或出错：清除“需要关注”，不打扰你。</li>
+      <li>等待授权的子会话仍然提醒。</li>
+      <li>子会话的事件转给它的父会话；父会话已不在置顶工作区时，转给同一工作区中最近活动的会话；都找不到时只记录。</li></ul></div>
+    <div class="sec"><h4>事件转发</h4><div class="row"><span class="sw on" onclick="sw(this)"></span><span>把子会话的完成、出错事件发给主会话</span></div></div>
+    <div class="sec"><h4>最近处理的会话</h4>
+      <table><tbody>
+        <tr><td>【搜索排序】子任务 · 跑评测</td><td class="small muted">完成 · 已清除提醒 · 已转给主会话</td><td class="small faint">09:58</td></tr>
+        <tr><td>【订单退款】子任务 · 补测试</td><td class="small muted">出错 · 已清除提醒 · 已转给主会话</td><td class="small faint">09:31</td></tr>
+        <tr><td>临时会话 · 查日志</td><td class="small muted">完成 · 已清除提醒 · 无父会话，未转发</td><td class="small faint">08:47</td></tr></tbody></table></div>`},
+  defaults: {t:'新建会话默认设置', f:save, b:`
+    <div class="sec"><h4>规则（本机）</h4>
+      <table><thead><tr><th>Provider</th><th>模式</th><th>Fast</th><th>自动授权</th><th>启用</th></tr></thead><tbody>
+        <tr><td>Codex（全部账号）</td><td>完全访问</td><td>开</td><td class="faint">—</td><td><span class="sw on" onclick="sw(this)"></span></td></tr>
+        <tr><td>OpenCode</td><td class="faint">不改</td><td class="faint">—</td><td>开</td><td><span class="sw" onclick="sw(this)"></span></td></tr>
+        <tr><td>GLM Agent</td><td class="faint">不改</td><td class="faint">—</td><td>开</td><td><span class="sw on" onclick="sw(this)"></span></td></tr>
+        <tr><td>Qoder</td><td>跳过授权</td><td class="faint">—</td><td>开</td><td><span class="sw" onclick="sw(this)"></span></td></tr></tbody></table>
+      <button class="btn" style="margin-top:8px" onclick="toast('新增一行规则')">添加规则</button></div>
+    <div class="sec"><h4>说明</h4><ul class="expl">
+      <li>只在创建请求没有指定时生效，不覆盖你手动选的值。</li>
+      <li>对所有创建请求生效，包括会话经 MCP 创建的子会话。Paseo 的 Agent 配置档只在手动选用时生效。</li>
+      <li>两台机器分别设置。</li></ul></div>`},
+  addBrowser: {t:'添加浏览器环境', f:close1, b:`
+    <div class="small muted" style="margin-bottom:12px">浏览器环境必须在 <b>Mac mini</b> 上（扩展只连本机地址）。每个 claude.ai 账号用一个环境。</div>
+    <div class="steps">
+      <div class="st done"><div class="no">1</div><div class="stb"><div class="t">新建 AdsPower 环境并设置代理<span class="who me">你来做</span></div><div class="d">在 AdsPower 中新建环境，记下环境 ID。</div></div></div>
+      <div class="st done"><div class="no">2</div><div class="stb"><div class="t">在环境中加载扩展<span class="who me">你来做</span></div><div class="d">扩展管理页打开开发者模式，“加载已解压的扩展程序”，选择下面的目录。</div>
+        <div class="row"><code>~/.paseo/local-plugins/github-subscriptions/browser-extension</code><button class="btn" onclick="toast('路径已复制')">复制路径</button></div></div></div>
+      <div class="st cur"><div class="no">3</div><div class="stb"><div class="t">在扩展选项中粘贴配对信息<span class="who me">你来做</span></div><div class="d">粘贴地址和配对码，填写环境名称和 AdsPower 环境 ID。配对码不在页面显示。</div>
+        <div class="row"><button class="btn primary" onclick="toast('配对信息已复制（地址和配对码）')">复制配对信息</button></div></div></div>
+      <div class="st"><div class="no">4</div><div class="stb"><div class="t">在环境中登录 claude.ai<span class="who me">你来做</span></div><div class="d">登录要接入的账号。</div></div></div>
+      <div class="st"><div class="no">5</div><div class="stb"><div class="t">等待首次同步<span class="who auto">自动</span></div><div class="d">扩展每分钟同步一次。收到新环境后显示“已连接”和 AdsPower 环境名称。</div>
+        <div class="row"><span class="chip">等待新环境连接…</span></div></div></div>
+    </div>`},
+  addClaude: {t:'添加 Claude 账号', f:close1, b:`
+    <div class="small muted" style="margin-bottom:12px">在 <b>Mac mini</b> 上新建 Provider <code>claude-5</code>，配置目录 <code>~/.claude-5</code>。独立 macOS 用户的账号不在此处理。</div>
+    <div class="steps">
+      <div class="st done"><div class="no">1</div><div class="stb"><div class="t">写入 Provider 配置<span class="who auto">自动</span></div><div class="d">先备份配置，再写入名称“Claude 5（待登录）”。</div></div></div>
+      <div class="st done"><div class="no">2</div><div class="stb"><div class="t">建配置目录<span class="who auto">自动</span></div><div class="d">共享技能、指令和设置；会话记录各自保存。</div></div></div>
+      <div class="st done"><div class="no">3</div><div class="stb"><div class="t">打开登录终端<span class="who auto">自动</span></div><div class="d">终端“Claude 5 登录”在工作区“账号登录”中。不会打开默认浏览器。</div></div></div>
+      <div class="st cur"><div class="no">4</div><div class="stb"><div class="t">在指定浏览器环境中登录<span class="who me">你来做</span></div><div class="d">复制链接，在该账号的浏览器环境中打开并登录。页面显示已有账号时先切换账号。</div>
+        <div class="row"><button class="btn primary" onclick="toast('登录链接已复制')">复制登录链接</button><select class="txt" style="background:var(--surface1);border:1px solid var(--border);color:var(--fg);border-radius:6px;padding:4px"><option>环境 15 · 测试浏览器</option></select></div></div></div>
+      <div class="st"><div class="no">5</div><div class="stb"><div class="t">粘贴授权码<span class="who me">你来做</span></div><div class="d">页面给出授权码时粘贴到这里，或直接粘贴到终端。</div>
+        <div class="row"><input class="txt" placeholder="授权码" style="width:220px"><button class="btn" onclick="toast('已发送到登录终端')">发送</button><button class="btn ghost" onclick="toast('已重新触发登录')">重新触发</button></div></div></div>
+      <div class="st"><div class="no">6</div><div class="stb"><div class="t">读取邮箱并命名<span class="who auto">自动</span></div><div class="d">名称改为“Claude · 邮箱”。Apple 登录时需要你确认真实邮箱。</div></div></div>
+    </div>`},
+  claude: {t:'Claude 账号', f:close1, b:`
+    <div class="sec"><h4>本机账号</h4><table><tbody>
+      <tr><td>Claude · lin@example.com</td><td class="small faint">~/.claude</td><td><button class="btn ghost" onclick="toast('打开改名')">改名</button></td></tr>
+      <tr><td>Claude · zhou@example.com</td><td class="small faint">~/.claude-2</td><td><button class="btn ghost" onclick="toast('打开改名')">改名</button></td></tr>
+      <tr><td>Claude · chen@example.com（Apple 登录）</td><td class="small faint">~/.claude-3</td><td><button class="btn ghost" onclick="toast('打开改名')">改名</button></td></tr>
+      <tr><td>Claude · 测试 <span class="chip warn">需要重新登录</span></td><td class="small faint">~/.claude-4</td><td><button class="btn primary" onclick="openEdit('addClaude')">重新登录</button></td></tr></tbody></table></div>
+    <div class="sec"><h4>说明</h4><ul class="expl"><li>启用、停用、模型和诊断在 Paseo 设置 → Providers。</li><li>额度和登录过期提示在 Paseo 额度面板。</li></ul></div>`},
+  web: {t:'网页版 claude.ai', f:close1, b:`
+    <div class="sec"><h4>浏览器环境（Mac mini）</h4><table><tbody>
+      <tr><td>环境 7 · 主力浏览器</td><td class="small muted">lin@example.com</td><td><span class="chip ok">已连接</span></td><td class="small faint">1 分钟前</td></tr>
+      <tr><td>环境 12 · 备用浏览器</td><td class="small muted">zhou@example.com</td><td><span class="chip ok">已连接</span></td><td class="small faint">2 分钟前</td></tr>
+      <tr><td>环境 15 · 测试浏览器</td><td class="small muted">qa@example.com</td><td><span class="chip">未连接</span></td><td class="small faint">2 天前</td></tr></tbody></table>
+      <div class="row" style="margin-top:8px"><button class="btn" onclick="openEdit('addBrowser')">添加浏览器环境</button><button class="btn" onclick="toast('配对信息已复制')">复制配对信息</button></div></div>
+    <details class="sec"><summary class="muted small">网页会话绑定 Paseo 名称</summary><div class="small muted" style="margin-top:6px">把网页会话绑定到 Paseo 会话，分组名称跟随 Paseo 会话名。</div></details>
+    <div class="sec"><h4>说明</h4><ul class="expl"><li>网页额度在 Paseo 额度面板中显示。</li><li>自动点同意在扩展选项中修改。</li></ul></div>`},
+  quotaName: {t:'Claude 名称带额度', f:save, b:`<ul class="expl"><li>每分钟检查；名称变化时才写配置。</li><li>显示 5 小时和每周剩余中较小的一个。</li></ul>
+    <div class="sec"><h4>额度耗尽后自动继续</h4><div class="row"><span class="sw on" onclick="sw(this)"></span><span>新会话默认开启</span></div></div>
+    <div class="sec"><h4>隐藏的内置额度来源</h4><div class="small muted">无</div></div>`},
+  instance: {t:'Provider 实例', f:close1, b:`<div class="kv"><div>插件</div><div>开发自动化 · Provider</div><div>状态</div><div>运行中</div><div>云端会话</div><div>可用 · 2 个会话正在运行</div></div>
+    <ul class="expl" style="margin-top:12px"><li>更新“开发自动化”页面不会重载这个实例。</li><li>重载这个实例会让正在执行的轮次失败；空闲会话下次发消息时恢复。</li><li>启停、重载和日志在 Paseo 设置 → 插件 → 开发自动化 · Provider。</li></ul>`},
+  cloud: {t:'云端会话', f:close1, b:`<div class="kv"><div>在线会话</div><div>2 个</div><div>未确认消息</div><div>0 条</div></div><ul class="expl" style="margin-top:12px"><li>未确认消息只在内存中，重载 Provider 实例会丢失。</li></ul>`},
+  mode: {t:'问答模式', f:save, b:`<ul class="expl"><li>在线：语音提醒，等你回答。</li><li>离线：只选推荐项；没有推荐项就等你。</li><li>自动：按蓝牙在场判定切换。</li></ul>
+    <div class="sec"><h4>必须本人确认的类别</h4><div class="small muted">验收、合并授权、资源清理、资金、登录、权限</div></div>
+    <div class="sec"><h4>暂停</h4><div class="row"><span class="sw" onclick="sw(this)"></span><span>暂停问答处理</span></div></div>`},
+  voice: {t:'语音提醒', f:save, b:`<div class="sec"><h4>播报主机</h4><div class="seg"><button class="on">Mac mini</button><button>MacBook</button></div></div><ul class="expl"><li>与 Paseo 设置 → 通知中的系统通知和提示音不同。</li></ul>`},
+  perm: {t:'精确授权', f:close1, b:`<table><tbody>
+    <tr><td><code>npm test</code></td><td class="small muted">【订单退款】工作区</td><td><button class="btn ghost danger" onclick="toast('已删除')">删除</button></td></tr>
+    <tr><td><code>git push origin 1737-*</code></td><td class="small muted">【插件整合】工作区</td><td><button class="btn ghost danger" onclick="toast('已删除')">删除</button></td></tr>
+    <tr><td><code>paseo plugin logs *</code></td><td class="small muted">全部工作区</td><td><button class="btn ghost danger" onclick="toast('已删除')">删除</button></td></tr></tbody></table>
+    <ul class="expl" style="margin-top:12px"><li>网页单次权限自动点击在扩展选项中修改。</li></ul>`},
+  ag: {t:'Antigravity（MacBook）', f:close1, b:`<table><tbody>
+    <tr><td>antigravity-cy517</td><td>Antigravity · 账号一</td><td><span class="sw on" onclick="sw(this)"></span></td></tr>
+    <tr><td>antigravity-beibeimao</td><td>Antigravity · 账号二</td><td><span class="sw" onclick="sw(this)"></span></td></tr></tbody></table>
+    <div class="note" style="margin-top:12px">添加或停用账号后要重载 Provider 实例才生效。当前有 1 个 Antigravity 会话正在运行，重载会让这一轮失败。</div>
+    <button class="btn" onclick="toast('打开添加 Antigravity 账号')">添加账号</button>`},
+  gh: {t:'GitHub 监听', f:save, b:`<div class="field"><label>组织</label><input class="txt" value="fliggy-travel-ai"></div>
+    <div class="field"><label>排除仓库</label><input class="txt" value="（无）"></div>
+    <div class="field"><label>额外仓库</label><input class="txt" value="（无）"></div>
+    <div class="sec"><h4>运行方式</h4><div class="seg"><button>影子</button><button class="on">实际发送</button></div></div>
+    <div class="sec"><h4>会话忙时</h4><div class="small muted">Claude：插入当前轮次；其他：排队到下一轮。</div></div>`},
+};
+function openEdit(id){const e=E[id];document.getElementById('dTitle').textContent=e.t;document.getElementById('dBody').innerHTML=e.b;document.getElementById('dFoot').innerHTML=e.f;document.getElementById('drawer').classList.add('on');document.getElementById('scrim').classList.add('on');try{history.replaceState(null,'','#'+currentPage+'/'+id)}catch(e){}}
+function closeEdit(){document.getElementById('drawer').classList.remove('on');document.getElementById('scrim').classList.remove('on');try{history.replaceState(null,'','#'+currentPage)}catch(e){}}
+
+let todos = [
+  {id:1,type:'ask',label:'网页提问',src:'claude.ai 网页 · Mac mini',sess:'环境 7 · 退款回调测试',age:'等待 12 分钟',text:'回调失败时如何重试？',opts:['指数退避，最多 5 次（推荐）','固定间隔 30 秒，最多 10 次','不重试，写入人工队列']},
+  {id:2,type:'esc',label:'升级事件',src:'Paseo · Mac mini',sess:'【额度看板】改版',age:'35 分钟前已通知 Grok',text:'是否把每周额度为 0 的账号从下拉列表中隐藏？'},
+  {id:3,type:'web',label:'网页等待',src:'claude.ai 网页 · Mac mini',sess:'环境 12 · 文档迁移',age:'已等 20 分钟',text:'达到用量限制'},
+  {id:4,type:'stall',label:'停滞会话',src:'Paseo · MacBook',sess:'【搜索排序】实验',age:'无活动 2 小时',text:'主会话没有运行中的轮次，也没有定时唤醒。'},
+  {id:5,type:'read',label:'代答未读',src:'Paseo · Mac mini',sess:'【订单退款】联调',age:'32 分钟前',text:'离线代答：选择了推荐项“预发环境”，是否生效未确认。'},
+];
+const order={ask:0,esc:1,web:2,stall:3,read:4};
+const fdefs=[['all','全部'],['ask','网页提问'],['web','网页等待'],['stall','停滞会话'],['esc','升级事件'],['read','代答未读']];
+let filter='all'; const opened={}; const picked={};
+function renderTodos(){
+  document.getElementById('filters').innerHTML=fdefs.map(([k,l])=>`<button class="${filter===k?'on':''}" onclick="filter='${k}';renderTodos()">${l}</button>`).join('');
+  const list=todos.filter(t=>filter==='all'||t.type===filter).sort((a,b)=>order[a.type]-order[b.type]);
+  document.getElementById('todos').innerHTML=list.length?list.map(t=>{
+    let act='';
+    if(t.type==='ask') act=opened[t.id]?`<button class="btn primary" ${picked[t.id]===undefined?'disabled style="opacity:.5"':''} onclick="done(${t.id},'已提交，等待网页确认')">提交回答</button>`:`<button class="btn primary" onclick="opened[${t.id}]=1;renderTodos()">回答</button>`;
+    if(t.type==='esc') act=`<button class="btn primary" onclick="done(${t.id},'已标为已处理')">标为已处理</button>`;
+    if(t.type==='web') act=`<button class="btn primary" onclick="toast('打开原网页')">打开原网页</button>`;
+    if(t.type==='stall') act=`<button class="btn primary" onclick="toast('打开 Paseo 会话（MacBook）')">打开会话</button>`;
+    if(t.type==='read') act=`<button class="btn primary" onclick="done(${t.id},'已读')">已读</button>`;
+    const opts=t.opts&&opened[t.id]?`<div class="opts" style="margin-top:8px">${t.opts.map((o,i)=>`<button class="opt ${picked[t.id]===i?'sel':''}" onclick="picked[${t.id}]=${i};renderTodos()"><span class="r"></span><span>${o}</span></button>`).join('')}</div>`:'';
+    return `<div class="card todo t-${t.type}"><div class="card-head"><span class="chip">${t.label}</span><h3>${t.sess}</h3><div class="right">${act}</div></div><div class="meta"><span>${t.src}</span><span>·</span><span>${t.age}</span></div><div class="small muted">${t.text}</div>${opts}</div>`;
+  }).join(''):'<div class="empty">这一类没有待办。</div>';
+  const n=todos.length; const b=document.getElementById('side-todo'); b.textContent=n; b.className='tail '+(n?'badge':'zero');
+}
+function done(id,msg){todos=todos.filter(t=>t.id!==id);renderTodos();toast(msg)}
+let lastPage='providers', currentPage='providers';
+function go(p){
+  currentPage=p;
+  document.querySelectorAll('.page').forEach(e=>e.classList.toggle('on',e.id==='p-'+p));
+  document.querySelectorAll('.nav button[data-p]').forEach(e=>e.classList.toggle('on',e.dataset.p===p));
+  document.getElementById('side-main').classList.toggle('active',p!=='todo');
+  document.getElementById('side-todo-row').classList.toggle('active',p==='todo');
+  if(p!=='todo') lastPage=p;
+  document.querySelector('.main').scrollTop=0;
+  try{history.replaceState(null,'','#'+p)}catch(e){}
+}
+function setMode(el,m){el.parentNode.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===el));document.getElementById('modeVal').textContent=m==='自动'?'自动：判定在线':m;toast('问答模式已改为'+m)}
+function todoTab(k,el){document.getElementById('todo-list').style.display=k==='list'?'':'none';document.getElementById('todo-log').style.display=k==='log'?'':'none';el.parentNode.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===el))}
+function sw(el,name){el.classList.toggle('on');if(name)toast((el.classList.contains('on')?'已开启 ':'已关闭 ')+name)}
+let paused=false;
+function togglePause(){paused=!paused;const b=document.getElementById('pauseAll');b.textContent=paused?'恢复自动化':'暂停全部自动化';b.classList.toggle('primary',paused);toast(paused?'已暂停：问答处理、升级通知、子会话归并、GitHub 监听':'已恢复')}
+function pickHost(el,h){el.parentNode.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===el));document.getElementById('host-name').textContent=h;document.getElementById('ag-card').style.display=h==='MacBook'?'':'none';toast('页面切换到 '+h)}
+let tt;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('on');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('on'),2200)}
+renderTodos();
+const [hp,he]=location.hash.slice(1).split('/'); if(['providers','answer','github','todo'].includes(hp)) go(hp); if(he&&E[he]) openEdit(he);
+</script>
+</body>
+</html>

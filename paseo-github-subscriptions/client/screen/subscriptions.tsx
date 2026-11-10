@@ -31,16 +31,16 @@ function SubRow(props: { sub: Subscription; first: boolean; indent: boolean; sho
 
   return (
     <View style={[s.item, props.first ? s.firstItem : null, { flexDirection: compact ? 'column' : 'row', alignItems: compact ? 'stretch' : 'center', gap: compact ? 6 : 12 }]}>
-      <View style={{ flex: 2, gap: 2, minWidth: 0, paddingLeft: props.indent ? 16 : 0 }}>
+      <View style={{ flex: 3.5, gap: 2, minWidth: 200, paddingLeft: props.indent ? 16 : 0 }}>
         {props.showSession ? (
           <>
-            <Text style={s.strong} numberOfLines={1}>
+            <Text style={s.strong} numberOfLines={2}>
               {props.indent ? '└ ' : ''}
               {title}
             </Text>
           </>
         ) : (
-          <Text style={s.strong} numberOfLines={1}>
+          <Text style={s.strong} numberOfLines={2}>
             {targetLabel(sub)}
           </Text>
         )}

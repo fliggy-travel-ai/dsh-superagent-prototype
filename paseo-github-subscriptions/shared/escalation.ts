@@ -1,0 +1,55 @@
+import { defineRpc } from '@getpaseo/plugin';
+import { z } from 'zod';
+
+/** 升级通知（模块 answer.escalation）的页面契约。RPC 约定见 #1737 评论 6728145308。 */
+/** 影子模式已删除，只有实际发送。shadow 只出现在旧的投递记录和旧配置中。 */
+export const DeliverySchema = z.enum(['shadow', 'live']);
+export const WindowDaysSchema = z.union([z.enum(['daily', 'weekdays', 'weekends']), z.array(z.number().int().min(0).max(6))]);
+export const ImmediateWindowOutSchema = z.strictObject({ days: WindowDaysSchema, from: z.string(), to: z.string() });
+
+export const EscalationSnapshotSchema = z.strictObject({
+  enabled: z.boolean(),
+  /** 异常时页面显示红色“没有运行”。 */
+  status: z.enum(['running', 'stopped', 'error']),
+  error: z.string().nullable(),
+  /** 旧插件 event-notifications 仍启用时模块不发送，这里给出原因；否则为 null。 */
+  blockedReason: z.string().nullable(),
+  timezone: z.string(),
+  immediate: z.array(ImmediateWindowOutSchema),
+  delayMinutes: z.number(),
+  webhook: z.strictObject({ configured: z.boolean(), hostname: z.string().nullable(), fingerprint: z.string().nullable() }),
+  pendingEvents: z.array(z.strictObject({
+    id: z.string(), agentId: z.string(), sessionTitle: z.string(), workspaceId: z.string().nullable(),
+    questionText: z.string(), notifiedAt: z.string(), delivery: DeliverySchema,
+  })),
+  recentDeliveries: z.array(z.strictObject({
+    id: z.string(), agentId: z.string(), sessionTitle: z.string(), summary: z.string(), at: z.string(),
+    delivery: DeliverySchema, status: z.enum(['delivered', 'recorded-shadow', 'failed']),
+  })),
+  /** 来源提问不再等待而自动结束的升级事件，待办的处理记录显示。 */
+  recentClosures: z.array(z.strictObject({
+    id: z.string(), agentId: z.string(), sessionTitle: z.string(), summary: z.string(), at: z.string(), reason: z.string(),
+  })).optional(),
+});
+export type EscalationSnapshot = z.infer<typeof EscalationSnapshotSchema>;
+
+export const EscalationConfigureSchema = z.strictObject({
+  enabled: z.boolean().optional(),
+  timezone: z.string().min(1).optional(),
+  immediate: z.array(ImmediateWindowOutSchema).optional(),
+  delayMinutes: z.number().int().min(0).optional(),
+});
+
+export const escalationSnapshot = defineRpc({ name: 'escalation.snapshot', input: z.object({}), output: EscalationSnapshotSchema });
+export const escalationConfigure = defineRpc({ name: 'escalation.configure', input: EscalationConfigureSchema, output: EscalationSnapshotSchema });
+export const escalationTestWebhook = defineRpc({ name: 'escalation.test-webhook', input: z.object({}), output: z.strictObject({ sent: z.boolean(), message: z.string() }) });
+export const escalationWebhookConfigure = defineRpc({
+  name: 'escalation.webhook.configure',
+  input: z.strictObject({ url: z.string().min(1), auth: z.string().min(1).optional() }),
+  output: z.strictObject({ configured: z.boolean(), hostname: z.string().nullable(), fingerprint: z.string().nullable() }),
+});
+export const escalationAcknowledge = defineRpc({
+  name: 'escalation.acknowledge',
+  input: z.strictObject({ id: z.string().min(1), agentId: z.string().optional() }),
+  output: z.strictObject({ ok: z.boolean() }),
+});
