@@ -25,7 +25,7 @@ export const cloudGatewayModule: Module = {
     const forward = <Contract extends Parameters<PluginServerContext['handle']>[0]>(contract: Contract) => {
       server.handle(contract, (async (input: unknown) => (await services.daemon.ready()).client.invokePluginRpc(PROVIDER_PLUGIN_ID, contract.name, input)) as never);
     };
-    for (const contract of [cloud.ensureSession, cloud.pushTimeline, cloud.pollInbox, cloud.ackInbox, cloud.forwardMcp, cloud.notifyPendingRequest, cloud.resolvePendingRequest]) forward(contract);
+    for (const contract of [cloud.ensureSession, cloud.pushTimeline, cloud.pollInbox, cloud.ackInbox, cloud.forwardMcp, cloud.notifyPendingRequest, cloud.resolvePendingRequest, cloud.reportEndedSession]) forward(contract);
     server.handle(cloudSessionStatus, async () => {
       try {
         const res = await (await services.daemon.ready()).client.invokePluginRpc(PROVIDER_PLUGIN_ID, cloudSessionStatus.name, {});

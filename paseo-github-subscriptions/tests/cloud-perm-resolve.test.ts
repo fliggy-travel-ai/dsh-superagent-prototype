@@ -81,9 +81,8 @@ test('有更新请求（晚于本条至少 60 秒）且已过 10 分钟的旧请
     f.cloud.sweep();
     assert.deepEqual(f.resolved(), ['toolu_old']);
     assert.ok(f.events.some(event => event.type === 'timeline.item' && /已撤下/.test(JSON.stringify(event))));
-    // 用户离开很久：真实在等的请求不撤下（2 小时规则只用于重载后读回的存量）
-    f.advance(3 * 60 * MIN);
-    f.cloud.sweep();
+    // 云端持续联系时，即使等待超过两小时也不撤下当前请求。
+    for (let i = 0; i < 3; i++) { f.advance(60 * MIN); await f.cloud.poll({ cloudSessionId: cloudId, afterSeq: 0, waitMs: 0 }); f.cloud.sweep(); }
     assert.deepEqual(f.resolved(), ['toolu_old']);
   } finally { f.close(); }
 });

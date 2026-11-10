@@ -64,9 +64,9 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 ## 云端会话
 
-内置 `cloud-session` Provider 将云端会话映射为 Paseo agent，接收时间线并将面板提示和通知排队交给云端。它代理全部 Paseo MCP 工具，`create_agent` 的 `settings.modeId` 由调用方明确提供。注册与恢复使用本机 daemon，MCP 转发只连接 daemon 提供的本机 Paseo MCP 地址；凭据仅保存在进程内。无新增设置。
+内置 `cloud-session` Provider 将云端会话映射为 Paseo agent，接收时间线并将面板提示和通知排队交给云端。它代理全部 Paseo MCP 工具，`create_agent` 的 `settings.modeId` 由调用方明确提供。注册与恢复使用本机 daemon，MCP 转发只连接 daemon 提供的本机 Paseo MCP 地址；凭据仅保存在进程内。
 
-队列不持久化，插件或 daemon 重启会丢失未确认消息，也不自动对账；云端离线时轮次会持续显示运行中，直到云端结束它。GitHub 订阅与云端会话各自初始化。
+队列不持久化，插件或 daemon 重启会丢失未确认消息。云端程序每分钟发送联系信号；运行中轮次或待答请求在两小时内没有云端联系时，插件结束轮次、撤下请求并提示到网页核对。可在机器配置的 `cloudSession.offlineMinutes` 调整阈值，最少 60 分钟。GitHub 订阅与云端会话各自初始化。
 
 ## 浏览器环境剩余额度
 

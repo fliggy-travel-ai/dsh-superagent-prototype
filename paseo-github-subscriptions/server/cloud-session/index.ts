@@ -10,16 +10,17 @@ import * as rpc from '../../shared/cloud-session.ts';
 import { cloudSessionStatus } from '../../shared/provider-instance.ts';
 import { webRequestDetailReason, type AnswerWebRequest, type ResolveWebRequest, type WebRequestAnswer, type WebRequestContext, type WebRequestResult } from '../../shared/web-request.ts';
 import { toWebAnswer } from '../web-request/normalize.ts';
+import type { CloudContactStore } from './contact-store.ts';
 import { CLOSED_TTL_MS, STORED_REQUEST_MAX, type CloudRequestStore, type StoredRequest } from './request-store.ts';
 
 export type { AnswerWebRequest, ResolveWebRequest, WebRequestAnswer, WebRequestContext, WebRequestResult };
 
 type Emit = (event: ProviderEvent) => void;
 type Endpoint = { url: string; headers: Record<string, string>; session?: string };
-type Session = { id: string; cloud: string; emit: Emit; cwd: string; model: string; mode: string; turn: string | null; endpoint?: Endpoint };
+type Session = { id: string; cloud: string; emit: Emit; cwd: string; model: string; mode: string; turn: string | null; ended?: boolean; endpoint?: Endpoint };
 type Item = { seq: number; messageId: string; delivery: 'auto' | 'steer'; text: string; receivedAt: string };
 type DaemonPending = { id: string; name?: string; kind?: string; input?: unknown };
-type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string; pendingPermissions?: DaemonPending[] } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
+type Daemon = { list(id: string): Promise<{ id: string; workspaceId?: string; pendingPermissions?: DaemonPending[]; activeTurn?: { turnId: string } | null } | null>; import(id: string, cwd: string, workspaceId: string): Promise<{ id: string; workspaceId?: string }>; createWorkspace(cwd: string, title: string, projectId?: string): Promise<string>; pinWorkspace(id: string): Promise<void>; title(id: string, title: string): Promise<void>; serverId(): string; close(): Promise<void> };
 const caps = ['prompt.message', 'prompt.steer', 'session.persistence', 'permission'] as const;
 type PendingRequest = { toolUseId: string; toolName: string; kind: 'question' | 'tool'; input: Record<string, unknown> };
 type RequestEntry = { request: PendingRequest; closed: boolean; delivered: boolean; response?: Extract<ProviderInput, { type: 'session.permission' }>['response']; openedAt: number; closedAt?: number; imported?: boolean; tombstone?: boolean };
@@ -28,7 +29,7 @@ const SUPERSEDE_MS = 10 * 60_000; // 同一会话之后有新请求、本请求�
 const NEWER_GAP_MS = 60_000; // “新请求”须晚于本条至少 60 秒：并行工具调用几乎同时触发的请求互不算新请求
 const EXPIRE_MS = 2 * 60 * 60_000; // 只用于重载后从 daemon 读回的存量请求
 const REPLAY_CLOSED_MS = 24 * 60 * 60_000;
-export type CloudSessionOptions = { store?: CloudRequestStore; now?: () => number; sweepIntervalMs?: number; importFromDaemon?: boolean };
+export type CloudSessionOptions = { contactStore?: CloudContactStore; offlineMs?: number; store?: CloudRequestStore; now?: () => number; sweepIntervalMs?: number; importFromDaemon?: boolean };
 export const CLOUD_MANUAL_REQUEST_MARKER = 'cloudSessionManual';
 
 
@@ -148,6 +149,15 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   const now = options.now ?? Date.now;
   const epoch = randomUUID();
   const sessions = new Map<string, Session>();
+  const contacts: Record<string, number> = options.contactStore?.load() ?? {};
+  const lastSaved: Record<string, number> = { ...contacts };
+  let contactSaving: Promise<unknown> = Promise.resolve();
+  const saveContacts = () => { if (options.contactStore) { contactSaving = options.contactStore.save({ ...contacts }).catch(() => { console.error('云端联系记录保存失败'); }); } };
+  const touch = (id: string) => { const t = now(); contacts[id] = t; const session = sessions.get(id); if (session) session.ended = false; if (lastSaved[id] === undefined || t - lastSaved[id]! >= 60_000) { lastSaved[id] = t; saveContacts(); } };
+  const turnVersions = new Map<string, number>();
+  const changeTurn = (id: string) => turnVersions.set(id, (turnVersions.get(id) ?? 0) + 1);
+  const importsByCloud = new Map<string, number>();
+  const importedClouds = new Set<string>();
   const queues = new Map<string, { seq: number; items: Item[]; waiters: Set<() => void> }>();
   const locks = new Map<string, Promise<unknown>>();
   const workspaceReservations = new Map<string, { id: string; path: string }>();
@@ -175,7 +185,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
     s.emit(event);
   };
   const notify = ({ cloudSessionId, request }: { cloudSessionId: string; request: PendingRequest }) => {
-    const s = find(cloudSessionId); const entries = pending(cloudSessionId);
+    const s = find(cloudSessionId); touch(cloudSessionId); const entries = pending(cloudSessionId);
     const existing = entries.get(request.toolUseId);
     // 已关闭（墓碑）或已显示的编号不再显示。内容不同的重复通知来自云端按工具名猜错编号，不能抛错打断云端流程。
     if (existing) { if (!existing.closed && !isDeepStrictEqual(existing.request, request)) console.error('云端请求编号重复且内容不同，已忽略'); return { shown: false }; }
@@ -184,6 +194,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
     entries.set(request.toolUseId, { request: original, closed: false, delivered: false, openedAt: now() }); permissionEvent(s, original); persist(); return { shown: true };
   };
   const resolve = ({ cloudSessionId, toolUseId, outcome }: { cloudSessionId: string; toolUseId: string; outcome: 'answered' | 'denied' | 'canceled' }) => {
+    touch(cloudSessionId);
     const entries = pending(cloudSessionId);
     const entry = entries.get(toolUseId);
     if (entry?.closed) return { closed: false };
@@ -198,13 +209,19 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   // 墓碑超过 7 天或超过上限时丢弃。
   const sweep = () => {
     const t = now(); let changed = false;
+    for (const [cloud, s] of sessions) {
+      if (importsByCloud.has(cloud)) continue;
+      if (options.importFromDaemon && !importedClouds.has(cloud)) { importPending(cloud); continue; }
+      const open = [...(requests.get(cloud)?.values() ?? [])].some(entry => !entry.closed);
+      if ((s.turn || open) && t - (contacts[cloud] ?? t) >= (options.offlineMs ?? 120 * 60_000)) { terminate(cloud, 'offline'); }
+    }
     for (const [cloud, entries] of requests) {
       const openedAt = [...entries.values()].filter(entry => !entry.tombstone).map(entry => entry.openedAt);
       const stale: string[] = [];
       for (const [toolUseId, entry] of entries) {
         if (entry.closed) continue;
         const superseded = t - entry.openedAt >= SUPERSEDE_MS && openedAt.some(at => at >= entry.openedAt + NEWER_GAP_MS);
-        const expired = entry.imported && t - entry.openedAt >= EXPIRE_MS;
+        const expired = entry.imported && t - entry.openedAt >= EXPIRE_MS && t - (contacts[cloud] ?? t) >= (options.offlineMs ?? 120 * 60_000);
         if (superseded || expired) { close(cloud, toolUseId, entry); stale.push(toolUseId); }
       }
       if (stale.length) {
@@ -226,11 +243,16 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   // 插件重载后从 daemon 读回仍挂着的待批请求（它们已在 Paseo 显示，只登记、不重复显示），交给 sweep 撤下。
   const importPending = (cloud: string) => {
     if (!options.importFromDaemon) return;
+    importsByCloud.set(cloud, (importsByCloud.get(cloud) ?? 0) + 1);
+    const openedSession = sessions.get(cloud);
+    const openedVersion = turnVersions.get(cloud) ?? 0;
     const task = (async () => {
       let daemon: Daemon | undefined;
       try {
         daemon = await connect();
         const agent = await daemon.list(cloud);
+        if (sessions.get(cloud) !== openedSession) return;
+        if (agent?.activeTurn?.turnId && openedSession && !openedSession.turn && (turnVersions.get(cloud) ?? 0) === openedVersion) openedSession.turn = agent.activeTurn.turnId;
         const entries = pending(cloud); let added = false;
         for (const item of agent?.pendingPermissions ?? []) {
           if (!item?.id || entries.has(item.id)) continue;
@@ -239,8 +261,9 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
           added = true;
         }
         if (added) persist();
+        importedClouds.add(cloud);
       } catch { console.error('读回云端会话待批请求失败'); }
-      finally { await daemon?.close().catch(() => {}); }
+      finally { await daemon?.close().catch(() => {}); const left = (importsByCloud.get(cloud) ?? 1) - 1; if (left) importsByCloud.set(cloud, left); else importsByCloud.delete(cloud); }
     })();
     imports.add(task); void task.finally(() => imports.delete(task));
   };
@@ -267,8 +290,25 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   };
   const queue = (id: string) => { let q = queues.get(id); if (!q) { q = { seq: 0, items: [], waiters: new Set() }; queues.set(id, q); } return q; };
   const find = (cloud: string) => { const session = sessions.get(cloud); if (!session) throw new Error('not_opened'); return session; };
-  const finish = (s: Session, state: 'completed' | 'failed' | 'canceled') => { if (!s.turn) return; const turnId = s.turn; s.turn = null; s.emit({ type: 'session.turn', sessionId: s.id, turnId, state, ...(state === 'failed' ? { error: { message: 'Cloud turn failed', code: 'CLOUD_TURN_FAILED' } } : {}) }); };
-  const start = (s: Session) => { const turnId = randomUUID(); s.turn = turnId; s.emit({ type: 'session.turn', sessionId: s.id, turnId, state: 'started' }); };
+  const finish = (s: Session, state: 'completed' | 'failed' | 'canceled') => { changeTurn(s.cloud); if (!s.turn) return; const turnId = s.turn; s.turn = null; s.emit({ type: 'session.turn', sessionId: s.id, turnId, state, ...(state === 'failed' ? { error: { message: 'Cloud turn failed', code: 'CLOUD_TURN_FAILED' } } : {}) }); };
+  const terminate = (cloud: string, reason: 'offline' | 'archived' | 'not_found') => {
+    const s = find(cloud); let count = 0;
+    if (s.ended) return { closedRequests: 0 };
+    s.ended = true;
+    for (const [id, entry] of requests.get(cloud) ?? []) if (!entry.closed) { close(cloud, id, entry); count++; }
+    if (count) persist();
+    const text = reason === 'offline' ? `云端已失联，已撤下 ${count} 条请求。如 claude.ai 仍在等待请在网页处理。` : reason === 'archived' ? `云端会话已归档，已撤下 ${count} 条请求。` : `云端会话不存在，已撤下 ${count} 条请求。`;
+    s.emit({ type: 'timeline.item', sessionId: s.id, item: { type: 'assistant_message', id: randomUUID(), text } });
+    finish(s, 'canceled');
+    return { closedRequests: count };
+  };
+  const reportEnded = async (input: { cloudSessionId: string; reason: 'archived' | 'not_found' }) => {
+    find(input.cloudSessionId);
+    await Promise.allSettled([...imports]);
+    if (options.importFromDaemon && !importedClouds.has(input.cloudSessionId)) throw new Error('云端会话待批请求尚未读回');
+    return terminate(input.cloudSessionId, input.reason);
+  };
+  const start = (s: Session) => { changeTurn(s.cloud); const turnId = randomUUID(); s.turn = turnId; s.emit({ type: 'session.turn', sessionId: s.id, turnId, state: 'started' }); };
   const config = (s: Session) => ({ model: s.model, mode: s.mode, models: [{ id: 'cloud-session', label: '云端会话', isDefault: true }], modes: [{ id: 'default', label: 'Default' }], thinkingOptions: [], settings: [] });
   const provider: ProviderRegistration = {
     id: rpc.CLOUD_SESSION_PROVIDER_ID, label: '云端会话', async status() { return { available: true }; },
@@ -291,6 +331,8 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
           }
           const s: Session = { id: input.sessionId, cloud, emit, cwd: input.config.cwd, model: input.config.model ?? 'cloud-session', mode: input.config.mode ?? 'default', turn: null, ...(endpoint ? { endpoint } : {}) };
           sessions.set(cloud, s);
+          importedClouds.delete(cloud);
+          if (contacts[cloud] === undefined) touch(cloud);
           emit({ type: 'session.opened', requestId: input.requestId, sessionId: s.id, capabilities: [...caps], restoration: 'core', persistence: { version: 1, data: { cloudSessionId: cloud } }, cwd: s.cwd, title: input.config.title });
           emit({ type: 'session.config', sessionId: s.id, config: config(s) });
           emit({ type: 'session.commands', sessionId: s.id, commands: [] });
@@ -306,7 +348,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
           const s = byId(input.sessionId); if (!s) { emit({ type: 'session.prompt_result', sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: 'failed', error: { message: 'Unknown session', code: 'UNKNOWN_SESSION' } } }); return; }
           const delivery = s.turn ? 'steer' : 'auto'; const turnId = s.turn ?? randomUUID();
           emit({ type: 'session.prompt_result', sessionId: s.id, clientMessageId: input.prompt.clientMessageId, result: { type: delivery === 'steer' ? 'steer' : 'turn', turnId } });
-          if (!s.turn) { s.turn = turnId; emit({ type: 'session.turn', sessionId: s.id, turnId, state: 'started' }); }
+          if (!s.turn) { changeTurn(s.cloud); s.turn = turnId; emit({ type: 'session.turn', sessionId: s.id, turnId, state: 'started' }); }
           const text = input.prompt.input.type === 'message' ? input.prompt.input.content.map(p => p.type === 'text' ? p.text : `[${p.type}]`).join('\n') : `/${input.prompt.input.name} ${input.prompt.input.arguments}`;
           const q = queue(s.cloud); q.items.push({ seq: ++q.seq, messageId: input.prompt.clientMessageId, delivery, text, receivedAt: new Date().toISOString() }); for (const wake of q.waiters) wake(); return;
         }
@@ -367,6 +409,7 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
       if (!result.success || result.data.type !== 'timeline.item') throw new Error('Invalid timeline item');
       return result.data.item;
     });
+    touch(input.cloudSessionId);
     if (input.startTurn && !s.turn) start(s);
     for (const item of items) s.emit({ type: 'timeline.item', sessionId: s.id, item: item as ProviderTimelineItem });
     // 工具调用已结束说明网页侧已处理了它的权限请求，不等云端 marker 和关闭请求。
@@ -384,12 +427,14 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
     return { accepted: items.length, turnRunning: !!s.turn, epoch };
   };
   const poll = async ({ cloudSessionId, afterSeq, waitMs }: { cloudSessionId: string; afterSeq: number; waitMs: number }) => {
+    touch(cloudSessionId);
     const q = queue(cloudSessionId); if (!q.items.some(i => i.seq > afterSeq) && waitMs) await new Promise<void>(resolve => { const done = () => { clearTimeout(timer); q.waiters.delete(done); resolve(); }; const timer = setTimeout(done, waitMs); q.waiters.add(done); });
     return { epoch, items: q.items.filter(i => i.seq > afterSeq), lastSeq: q.seq };
   };
-  const ack = ({ cloudSessionId, seq }: { cloudSessionId: string; seq: number }) => { const q = queue(cloudSessionId); q.items = q.items.filter(i => i.seq > seq); return { remaining: q.items.length }; };
+  const ack = ({ cloudSessionId, seq }: { cloudSessionId: string; seq: number }) => { touch(cloudSessionId); const q = queue(cloudSessionId); q.items = q.items.filter(i => i.seq > seq); return { remaining: q.items.length }; };
   const mcp = async ({ cloudSessionId, message, timeoutMs }: { cloudSessionId: string; message: Record<string, unknown>; timeoutMs: number }) => {
     const endpoint = find(cloudSessionId).endpoint; if (!endpoint) throw new Error('not_opened');
+    touch(cloudSessionId);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -413,20 +458,21 @@ export function createCloudSession(connect: () => Promise<Daemon> = connectLocal
   };
   const sweepTimer = options.sweepIntervalMs === 0 ? undefined : setInterval(sweep, options.sweepIntervalMs ?? 60_000);
   sweepTimer?.unref?.();
-  const flush = async () => { await Promise.allSettled([...imports]); await saving; };
-  return { provider, ensure, push, poll, ack, mcp, notify, resolve, sweep, flush, status, epoch, dispose() { clearInterval(sweepTimer); sessions.clear(); requests.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
+  const flush = async () => { await Promise.allSettled([...imports]); await saving; await contactSaving; };
+  return { provider, ensure, push, poll, ack, mcp, notify, resolve, reportEnded, touch, sweep, flush, status, epoch, dispose() { clearInterval(sweepTimer); sessions.clear(); requests.clear(); importedClouds.clear(); workspaceReservations.clear(); for (const q of queues.values()) for (const wake of q.waiters) wake(); queues.clear(); } };
 }
 
 export function registerCloudSession(server: PluginServerContext, create = createCloudSession) {
   const cloud = create();
   server.registerProvider(cloud.provider);
-  server.handle(rpc.ensureSession, (input, context) => cloud.ensure(input, context.paseo));
+  server.handle(rpc.ensureSession, async (input, context) => { const result = await cloud.ensure(input, context.paseo); cloud.touch(input.cloudSessionId); return result; });
   server.handle(rpc.pushTimeline, input => cloud.push(input));
   server.handle(rpc.pollInbox, input => cloud.poll(input));
   server.handle(rpc.ackInbox, input => cloud.ack(input));
   server.handle(rpc.forwardMcp, input => cloud.mcp(input));
   server.handle(rpc.notifyPendingRequest, input => cloud.notify(input));
   server.handle(rpc.resolvePendingRequest, input => cloud.resolve(input));
+  server.handle(rpc.reportEndedSession, input => cloud.reportEnded(input));
   server.handle(cloudSessionStatus, () => cloud.status());
   return () => cloud.dispose();
 }

@@ -153,3 +153,10 @@ export const resolvePendingRequest = defineRpc({
   input: z.object({ cloudSessionId: CloudSessionIdSchema, toolUseId: z.string().min(1), outcome: z.enum(['answered', 'denied', 'canceled']) }),
   output: z.object({ closed: z.boolean() }),
 });
+
+/** Only an authoritative cloud-side observation may report an archived or missing session. */
+export const reportEndedSession = defineRpc({
+  name: 'cloud-session.ended',
+  input: z.object({ cloudSessionId: CloudSessionIdSchema, reason: z.enum(['archived', 'not_found']) }),
+  output: z.object({ closedRequests: z.number().int().nonnegative() }),
+});
