@@ -40,13 +40,10 @@ export const presenceModule: Module<OwnerOnlyConfig> = {
     server.handle(presenceRpc.presenceSpeakCancel, async ({ id }) => ({ cancelled: services.presenceHosts?.localCancel(id) ?? false }));
     server.handle(bluetoothRpc.bluetoothLocalList, async () => listBluetoothTargets());
     server.handle(bluetoothRpc.bluetoothLocalSelect, async input => saveBluetoothTarget(input));
+    // 只读设备列表：按请求的主机读取，不因界面与设置短暂不一致而报错；选择设备时仍校验来源主机。
     server.handle(bluetoothRpc.bluetoothList, async ({ hostId }) => {
-      const current = await ready();
-      const hosts = services.presenceHosts!;
-      if (!hosts.sameHost(hostId, current.snapshot().settings.sourceHostId)) throw new Error('来源主机已变化，请刷新');
-      const result = await hosts.bluetooth(hostId);
-      if (!hosts.sameHost(hostId, current.snapshot().settings.sourceHostId)) throw new Error('来源主机已变化，请刷新');
-      return result;
+      await ready();
+      return services.presenceHosts!.bluetooth(hostId);
     });
     server.handle(bluetoothRpc.bluetoothSelect, async ({ hostId, target }) => {
       const current = await ready();
