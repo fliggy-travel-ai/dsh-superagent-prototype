@@ -37,6 +37,7 @@ export const escalationModule: Module<EscalationSection> = {
     const settings = createSettingsStore(join(directory, 'settings.json'), RuntimeSettingsSchema, runtimeDefaults(config));
     const shadow = shadowNotice(config, settings.read() as { delivery?: string });
     if (shadow) console.error(`[开发自动化·升级通知] ${shadow}`);
+    const machineOwnerOnly = (context.machine as { ownerOnly?: { localKeywords?: string[] } }).ownerOnly;
     const runtime = new EscalationRuntime({
       server,
       daemon: services.daemon,
@@ -45,6 +46,15 @@ export const escalationModule: Module<EscalationSection> = {
       machineName: context.machine.machine ?? 'local',
       section: config,
       settings,
+      localKeywords: () =>
+        config.ownerOnly?.localKeywords ??
+        machineOwnerOnly?.localKeywords ??
+        services.main?.ownerOnlyKeywords ??
+        undefined!,
+      presence: () => {
+        const obs = services.main?.presence?.snapshot().observation;
+        return obs ? { mode: obs.mode, source: obs.source } : null;
+      },
       ...(legacy.enabled ? { blocked: `${legacy.problem ?? `旧插件“会话事件通知”（${LEGACY_PLUGIN}）仍启用`}。本模块不发送，以免同一事件发两次；停用旧插件后重载本插件。` } : {}),
     });
     const lifetime = new AbortController();

@@ -57,9 +57,10 @@
 
 ## answer.escalation
 
-迁入 `event-notifications`（用 2026-11-08 修好启动重试的那份）中的升级通知，与代答（`answer.presence`）**两套独立规则**：问答模式决定是否代答，时段规则决定是否通知 Grok。同一道题可能先被代答，之后仍被升级。
+迁入 `event-notifications`（用 2026-11-08 修好启动重试的那份）中的升级通知。插件不自动代答：问答模式（`answer.presence`）控制是否播报语音提醒，升级通知按时段规则把未答提问发给总控（Grok），由总控按用户选择画像决定。
 
-- **范围**：主会话（置顶工作区中的会话）的提问和错误；新建项目和新建工作区（`escalation.newObjects`）；额度报警（`escalation.quotaAlerts`）。
+- **范围**：主会话（置顶工作区中的会话）的提问和错误；独立浏览器扩展上报的网页提问（未绑定到原生提问时，通过 `enqueueExternal` 进入升级通道，问题结束时通过 `closeExternal` 自动结束待办记录）；新建项目和新建工作区（`escalation.newObjects`）；额度报警（`escalation.quotaAlerts`）。
+- **asked 负载扩展字段**（`schemaVersion: 1` 保持不变）：`questionSummary.text` 取第一个问题的正文（`input.questions[0].question`），顶层追加 `serverId`、`needId`、`workspaceTitle`、`requestId`、`answerVia`（`paseo-permission` | `cloud-session` | `browser-only`）、`prompts`（含 `answerKey` 与 `options`，覆盖 `AskUserQuestion`、`request_user_input`、`request_user_input_async`）、`audience`（`{ ownerOnly, category, reason }`，按优先级匹配 `daily_task`、`retro_review`、`local_confirm`、`final_acceptance`、`login_verification`、`payment`、`destructive_cleanup`，合并与发布不标 `ownerOnly`；本机确认关键词可在 `machine.json` 的 `ownerOnly.localKeywords` 或 `escalation.ownerOnly.localKeywords` 配置）、`presence`（`{ mode, source }`）、`features`（`['prompts', 'audience', 'serverId']`）。工作区表始终通过 `watchWorkspaces` 维护，不受 `newObjects` 开关影响。
 - **时段规则**：`timezone`（默认 `Asia/Singapore`）、`immediate`（立即时段，默认每天 01:00–09:30、工作日 12:00–14:00，左闭右开）、`delayMinutes`（时段外等待的分钟数）。时段外的问题等满 `delayMinutes` 后升级，进入立即时段马上升级。**默认 `delayMinutes` 是 0（全天立即），与旧插件的实际行为一致**——旧插件文档写“其他时段等 30 分钟”，但代码里这条规则没有接入。要启用文档里的规则，把它设为 30。
 - **只有实际发送**：影子模式已删除。`machine.json` 的 `escalation.delivery` 或页面旧设置（`escalation/settings.json`）写着 `shadow` 时照常读取，按实际发送处理，日志提示可以删掉这一项。去重记录只用 `state.json`；旧的 `state-shadow.json` 不读不写，文件保留不动。
 - **旧插件保护**：旧插件 `event-notifications` 仍启用时本模块不启动、不发送（避免同一事件发两次），编辑面板显示“旧插件仍启用，先停用”。停用旧插件后重载本插件才开始发送。
@@ -83,3 +84,15 @@
 
 - 订阅、钩子和连接部分（`runtime.ts`、`forward.ts`）没有自动化测试：它们依赖运行中的守护进程。投递、时段、配置、迁移、角色判定、清除队列和 RPC 都有单元测试。需要用真实守护进程观察。
 - 额度来源的 `icon` 写成插件内相对路径 `server/vendor/paseo-0.15.0/claude-usage-source/icon.svg`；如果 Paseo 不按插件根目录解析，只是不显示图标。
+
+## 主会话收尾与容量
+
+`dispatch.finalize` 和 `capacity.mainSessions` 默认关闭。在运行 Claude 主会话的主机上，按需要在 `machine.json` 的 `modules` 中开启。迁移模式 `capacity.migration.mode` 默认是 `off`；开发联调使用 `shadow`，确认旧负载均衡职责已停止后再使用 `live`。
+
+带 `role=main` 和 `need` 或 `issue` 标签的会话会自动收尾：解绑父会话、按需置顶工作区并加「主会话」标签。首次启用时已有的主会话作为基线，不自动收尾；启用后成为主会话的会话才自动处理。收尾结果按会话和单号保存。之后手动取消置顶不会被收尾任务重新置顶。`dispatch.finalize` RPC 可按会话编号手动重试。
+
+`capacity.snapshot` 返回各账号的实时额度、档次、置顶工作区负载和可承接数。仅使用十分钟内的可用额度报告做决策；档次由实时 `planLabel` 判断，`capacity.accounts` 的档次配置用于核对。预热账号在 `capacity.warmup` 中列出。五小时额度用尽或周额度不超过 5% 时，符合条件的主会话可迁移到有余量的 Claude 账号。点名账号的会话设置 `dsh.lb=manual`，耗尽时发例外事件。
+
+余量变化至少间隔五分钟通知总控，每六小时发送一次心跳。收尾、迁移及异常事件使用现有升级通知 webhook。影子模式发送 `main_migration_planned`。迁移失败会保留原会话，恢复自动继续设置并发出异常；周额度迁移回退时通知原会话继续工作。中途退出、归档结果无法确认或回退不完整时，持久标记为待审并停止再次迁移，需人工核查。真实 daemon 联调须核对收尾结果、逐账号容量和影子迁移记录。
+
+人工核查待审迁移后，可调用 `capacity.clear-review {agentId}`。该操作将会话的 `dsh.migration-state` 改为 `cleared:<时间>`，将 `dsh.migration-lease` 改为 `released:<时间>`，读回两个标签，再删除并读回 `capacity/migrations-state.json` 中该会话的记录。返回值包含记录中的自动继续原值；解除待审不会改变当前自动继续设置。调用前应核查原会话、新会话及子会话的实际状态。

@@ -1,8 +1,8 @@
 /**
  * 部署开发自动化插件的一个实例。
  *
- *   node --experimental-strip-types scripts/deploy.ts --role main|provider --ref <标签或提交> \
- *     [--target <部署目录>] [--install] [--reload] [--host <守护进程>] [--paseo <paseo 命令路径>] [--dry-run]
+ *   node --experimental-strip-types scripts/deploy.ts --role main|provider|compat --ref <标签或提交> \
+ *     [--target <部署目录>] [--install] [--reload] [--host <守护进程>] [--paseo <paseo 命令路径>] [--change-role] [--dry-run]
  *
  * 步骤：
  * 1. 从 `--ref` 用 git archive 导出 paseo-github-subscriptions 到临时目录；
@@ -19,7 +19,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSyn
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseDeployArgs, pluginIdFor, providersHostedBy, readRoleFile, roleFileContent, runningTurns, type AgentRow, type DeployOptions } from './deploy-lib.ts';
+import { parseDeployArgs, assertRoleChange, pluginIdFor, providersHostedBy, readRoleFile, roleFileContent, runningTurns, type AgentRow, type DeployOptions } from './deploy-lib.ts';
 
 const PLUGIN_DIRECTORY = 'paseo-github-subscriptions';
 
@@ -42,6 +42,7 @@ function main() {
   const commit = run('git', ['rev-parse', '--verify', `${options.ref}^{commit}`], repo).trim();
   const pluginId = pluginIdFor(options.role);
   const previousRole = existsSync(options.target) ? installedRole(options.target) : null;
+  if (existsSync(options.target)) assertRoleChange(previousRole, options.role, options.changeRole);
   const hosted = [...new Set([...(existsSync(options.target) ? providersHostedBy(previousRole) : []), ...providersHostedBy(options.role)])];
   console.log(`部署 ${pluginId}（角色 ${options.role}）：${options.ref} → ${commit.slice(0, 12)}，目录 ${options.target}`);
   console.log(`需要检查运行中轮次的 Provider：${hosted.length ? hosted.join('、') : '无'}`);

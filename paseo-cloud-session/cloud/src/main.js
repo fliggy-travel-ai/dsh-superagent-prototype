@@ -12,7 +12,7 @@ import readline from 'node:readline';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // #1737 评论 6734539343：forward 停止后关闭请求不再到达。forward 写心跳，通知时发现它不在或卡住就重新拉起。
-const FORWARD_BEAT_MS = 10000, FORWARD_STALE_MS = 120000, REQUEST_RESULTS_MAX = 5000;
+const FORWARD_BEAT_MS = 10000, FORWARD_STALE_MS = 120000, REMOTE_BEAT_MS = 60000, REQUEST_RESULTS_MAX = 5000;
 const workspaceInstructions = id => `这个会话在 Paseo 里有自己的工作区 ${id || '（编号见 PASEO_WORKSPACE_ID）'}；定下需求 Issue 后以及每次需求阶段变化时，用 Paseo 工具 rename_workspace 将它改成 <Issue 号>【<状态>】<需求名>。`;
 const instructions = '请用 run_in_background 运行 node /opt/paseo-cloud-session/paseo-cloud-session.mjs wait；被唤醒后处理消息，处理完再启动下一次 wait。经 Paseo 工具创建子会话时必须传 settings.modeId。';
 const redact = (value, env) => env.PASEO_MINI_HOST ? value.replaceAll(env.PASEO_MINI_HOST, '[已隐藏]') : value;
@@ -204,7 +204,7 @@ export function permissionHook(input, env=process.env, launch=spawn) {
   const child=launch(process.execPath,[fileURLToPath(import.meta.url),'permission-notify'],{detached:true,stdio:['pipe','ignore','ignore'],env,cwd:input.cwd || process.cwd()});
   child.on('error',()=>{}); child.stdin.on('error',()=>{}); child.stdin.end(JSON.stringify(input)); child.unref();
 }
-export async function forward(path, env=process.env, rpc=createRpc(env), startOffset) {
+export async function forward(path, env=process.env, rpc=createRpc(env), startOffset, options={}) {
   const lease=await lock(sessionDir(env),path); if(!lease) return;
   const queue=new ForwardQueue(rpc,env); const requestResults=new Map(); let offset=startOffset ?? (await stat(path)).size, partial=Buffer.alloc(0), delay=500, registered=false, agentId, titlePending=null;
   let titleHandled=lease.titleHandled || (await titleFor(path,offset))!=='云端会话';
@@ -212,7 +212,7 @@ export async function forward(path, env=process.env, rpc=createRpc(env), startOf
   if(titleHandled && !lease.titleHandled && !await updateLease(lease,{titleHandled:true})) return;
   // 回放启动位置之前的工具结果：forward 重启后仍能关闭重启前已有结果、但还没关闭的请求。
   if(offset>0) {try {const head=(await readFile(path)).subarray(0,offset).toString(); for(const line of head.split('\n')) {try {const row=JSON.parse(line); if(row.type==='user' && !row.isMeta && !row.isSidechain && Array.isArray(row.message?.content)) for(const block of row.message.content) if(block.type==='tool_result' && typeof block.tool_use_id==='string') requestResults.set(block.tool_use_id,resultOutcome(block,row));} catch {}}} catch {}}
-  let beatAt=Date.now();
+  let beatAt=Date.now(), remoteBeatAt=Date.now();
   const register=async()=>{const result=await ensure(rpc,env,path); registered=true; agentId=result.agentId; queue.epoch=result.epoch;};
   queue.onEpochChange=async()=>{registered=false; await register();};
   try { for (;;) {
@@ -222,6 +222,12 @@ export async function forward(path, env=process.env, rpc=createRpc(env), startOf
       const f=await open(path,'r'); try { const size=(await f.stat()).size; if(size<offset) {offset=0;partial=Buffer.alloc(0);} if(size>offset) {const b=Buffer.alloc(size-offset); const {bytesRead}=await f.read(b,0,b.length,offset); offset+=bytesRead; partial=Buffer.concat([partial,b.subarray(0,bytesRead)]); let at; while((at=partial.indexOf(10))>=0) { const line=partial.subarray(0,at).toString(); partial=partial.subarray(at+1); try {const row=JSON.parse(line); if(row.type==='user' && !row.isMeta && !row.isSidechain && Array.isArray(row.message?.content)) for(const block of row.message.content) if(block.type==='tool_result' && typeof block.tool_use_id==='string') requestResults.set(block.tool_use_id,resultOutcome(block,row)); const value=queue.map(row); if(value) {queue.enqueue(value); if(!titleHandled && !titlePending) titlePending=value.items.find(x=>x.type==='user_message')?.text || null;}} catch {} } } } finally {await f.close();}
       if(!registered) await register();
       await queue.flush();
+      if(Date.now()-remoteBeatAt >= (options.remoteBeatMs ?? REMOTE_BEAT_MS)) {
+        const beat=await rpc(pushTimeline,{...context(env),startTurn:false,items:[]});
+        if(queue.epoch && beat.epoch && queue.epoch!==beat.epoch) await queue.onEpochChange?.(beat.epoch);
+        if(beat.epoch) queue.epoch=beat.epoch;
+        remoteBeatAt=Date.now();
+      }
       let resolveError;
       for(const [toolUseId,outcome] of requestResults) {const marker=requestMarker(env,toolUseId); try {await stat(marker);} catch(e) {if(e.code==='ENOENT') continue; throw e;} try {await rpc(resolvePendingRequest,{...context(env),toolUseId,outcome}); await unlink(marker).catch(()=>{}); requestResults.delete(toolUseId);} catch(error) {resolveError ??= error;}}
       for(const key of requestResults.keys()) {if(requestResults.size<=REQUEST_RESULTS_MAX) break; requestResults.delete(key);}

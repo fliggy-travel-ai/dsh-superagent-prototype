@@ -9,6 +9,11 @@ export type EventName =
   | 'subagent_done'
   | 'new_project'
   | 'new_workspace'
+  | 'capacity'
+  | 'main_finalized'
+  | 'main_migration_planned'
+  | 'main_migrated'
+  | 'lb_exception'
   | 'test';
 export type Actor = 'user' | 'assistant' | 'automation';
 export interface AgentInfo {
@@ -37,9 +42,12 @@ export function questionSummary(data: unknown): {
 } {
   const d = data as Record<string, unknown> | null;
   const input = d?.input as Record<string, unknown> | undefined;
+  const questions = Array.isArray(input?.questions) ? input.questions : [];
+  const firstQuestion = questions[0] as { question?: unknown } | undefined;
+  const firstText = typeof firstQuestion?.question === 'string' ? firstQuestion.question.trim() : '';
   return {
-    text: String(d?.title || d?.description || d?.name || ''),
-    questions: Array.isArray(input?.questions) ? input.questions : [],
+    text: firstText || String(d?.title || d?.description || d?.name || ''),
+    questions,
     options: Array.isArray(input?.questions)
       ? input.questions.flatMap((q: any) => (Array.isArray(q.options) ? q.options : []))
       : Array.isArray(d?.actions) ? d.actions : [],

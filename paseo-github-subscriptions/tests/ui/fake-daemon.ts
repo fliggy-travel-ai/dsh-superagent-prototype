@@ -256,26 +256,9 @@ export class FakeDaemon {
         text: '已完成契约检查，等待下一步。',
         agentId: 'agent-main',
       },
-      {
-        id: 'read:ar-1',
-        type: 'read',
-        label: '代答未读',
-        hostId: 'local',
-        hostName: 'Mac mini',
-        sourceLabel: '主会话 #1737',
-        sessionTitle: '插件整合主会话',
-        at: new Date(Date.now() - 60 * 60_000).toISOString(),
-        ageText: '1 小时前',
-        text: '已自动选择：使用 TypeScript 严格模式（Recommended）',
-        readReceipt: {
-          questionId: 'ar-1',
-          fingerprint: 'fp-ar-1',
-        },
-      },
     ],
     logs: [
       { id: 'log-1', kind: 'web-approval', label: '网页权限点击', detail: '环境 27 · Allow once（mcp__github__get_issue，820ms 后点击）', hostId: 'local', hostName: 'Mac mini', at: new Date(Date.now() - 120_000).toISOString() },
-      { id: 'log-2', kind: 'auto-answer', label: '离线代答', detail: '主会话 #1737 · 选择“使用 TypeScript 严格模式（Recommended）”', hostId: 'local', hostName: 'Mac mini', at: new Date(Date.now() - 3600_000).toISOString() },
       { id: 'log-3', kind: 'escalation', label: '升级投递', detail: '主会话 #1737 · 必须本人确认 → 已发送 Webhook', hostId: 'local', hostName: 'MacBook', at: new Date(Date.now() - 480_000).toISOString() },
       { id: 'log-4', kind: 'quiet-merge', label: '子会话归并', detail: 'p2p 子任务异常 → 已归并到主会话 #1737，未单独播报', hostId: 'local', hostName: 'Mac mini', at: new Date(Date.now() - 1800_000).toISOString() },
     ],
@@ -349,11 +332,11 @@ export class FakeDaemon {
         return this.todo;
       case 'todo.act': {
         const action = input.action as { type: string; questionId?: string; escalationId?: string };
-        if (action.type === 'answer' || action.type === 'read') {
+        if (action.type === 'answer') {
           this.todo = {
             ...this.todo,
             items: this.todo.items.filter(
-              item => item.question?.questionId !== action.questionId && item.readReceipt?.questionId !== action.questionId,
+              item => item.question?.questionId !== action.questionId,
             ),
           };
         } else if (action.type === 'ack-escalation') {
@@ -488,7 +471,6 @@ export class FakeDaemon {
         this.presence = { ...this.presence, settings: input as unknown as PresenceSettings };
         return this.presence;
       case 'presence.answer':
-      case 'presence.read':
         return this.presence;
       case 'bluetooth.list':
         return {
