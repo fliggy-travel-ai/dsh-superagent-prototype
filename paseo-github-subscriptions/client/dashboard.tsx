@@ -349,7 +349,10 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                   { value: 'auto', label: '自动' },
                 ]}
                 value={settings.mode}
-                onChange={mode => void control.configurePresence({ ...settings, mode }).catch(e => setActionError(errorMessage(e)))}
+                onChange={mode => {
+                  setActionError(null);
+                  void control.configurePresence({ ...settings, mode }).catch(e => setActionError(errorMessage(e)));
+                }}
               />
             ) : (
               <Chip label={presenceError ? '读取失败' : '正在读取'} tone={presenceError ? 'danger' : 'neutral'} />

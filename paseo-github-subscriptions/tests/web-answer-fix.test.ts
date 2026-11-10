@@ -102,6 +102,7 @@ test('网页作答未确认时云端提问回到人工待办并提示去网页�
   try {
     setup.agents.push(cloudAgent([cloudRequest()]));
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+    await setup.runtime.refresh();
     let nativeQ = setup.runtime.snapshot().questions.find(item => item.source === 'native')!;
     // 用户在 Paseo 原生界面作答后，Paseo 不再列出该请求，扫描把它记为已结束
     setup.agents[0]!.pendingPermissions = [];
@@ -135,6 +136,7 @@ test('网页作答已提交时不改人工待办；页面未打开时提示在 c
   try {
     setup.agents.push(cloudAgent([cloudRequest()]));
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+    await setup.runtime.refresh();
     const id = setup.runtime.snapshot().questions.find(item => item.source === 'native')!.id;
     await setup.runtime.answer({ id, answers: answer });
     assert.equal(setup.runtime.snapshot().questions.find(item => item.id === id)!.state, 'submitted');
@@ -239,6 +241,7 @@ async function retryFixture(clock = Date.now) {
   const runtime = new PresenceRuntime(directory, port, clock, new WebRequestLedger());
   await runtime.start();
   await runtime.configure({ ...runtime.snapshot().settings, mode: 'online', speechEnabled: false });
+  await runtime.refresh();
   const nativeId = runtime.snapshot().questions.find(item => item.source === 'native')!.id;
   // 用户在 Paseo 原生界面作答后，Paseo 不再列出该请求
   agents[0]!.pendingPermissions = [];

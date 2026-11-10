@@ -139,6 +139,8 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
   let inflight: Promise<void> | null = null;
   let disposed = false;
   let mutating = 0;
+  let confirmedPresence: PresenceSnapshot | null = null;
+  let latestRolledBackVersion = 0;
   const sequence = { browser: 0, presence: 0, machine: 0 };
   const listeners = new Set<() => void>();
   const emit = (patch: Partial<ControlState>) => {
@@ -148,6 +150,18 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     state = next;
     for (const listener of listeners) listener();
   };
+  const optimisticObservation = (settings: PresenceSettings, current: PresenceSnapshot): PresenceSnapshot['observation'] => {
+    if (settings.mode === 'online') {
+      return { mode: 'online', observedAt: new Date().toISOString(), source: 'manual', reason: '手动在线：语音提醒，等待回答' };
+    }
+    if (settings.mode === 'offline') {
+      return { mode: 'offline', observedAt: new Date().toISOString(), source: 'manual', reason: '手动离线：选择明确推荐项' };
+    }
+    if (current.settings.mode !== 'auto' || current.settings.sourceHostId !== settings.sourceHostId) {
+      return { mode: 'unknown', observedAt: null, source: 'bluetooth', reason: '正在读取来源主机在场状态' };
+    }
+    return current.observation;
+  };
   const browsing = async (operation: () => Promise<BrowserSnapshot>) => {
     const version = ++sequence.browser;
     try { const value = await operation(); if (version === sequence.browser) emit({ browser: value, browserError: null }); }
@@ -155,8 +169,17 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
   };
   const asking = async (operation: () => Promise<PresenceSnapshot>) => {
     const version = ++sequence.presence;
-    try { const value = await operation(); if (version === sequence.presence) emit({ presence: value, presenceError: null }); }
-    catch (error) { if (version === sequence.presence) emit({ presenceError: errorMessage(error) }); throw error; }
+    try {
+      const value = await operation();
+      if (version === sequence.presence) {
+        confirmedPresence = value;
+        latestRolledBackVersion = 0;
+        emit({ presence: value, presenceError: null });
+      }
+    } catch (error) {
+      if (version === sequence.presence) emit({ presenceError: errorMessage(error) });
+      throw error;
+    }
   };
   const visibleStalled = (value: StalledSnapshot | null) => {
     if (!value) return null;
@@ -299,7 +322,35 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     usageSettings: () => client.rpc(browserUsageSnapshot, {}),
     saveAdsPowerApiKey: (apiKey: string) => write(() => client.rpc(browserUsageSaveApiKey, { apiKey })),
     removeAdsPowerApiKey: () => write(() => client.rpc(browserUsageRemoveApiKey, {})),
-    configurePresence: (settings: PresenceSettings) => write(() => asking(() => client.rpc(presenceConfigure, settings))),
+    configurePresence: (settings: PresenceSettings) => write(async () => {
+      const version = ++sequence.presence;
+      if (state.presence) {
+        emit({
+          presence: {
+            ...state.presence,
+            settings,
+            observation: optimisticObservation(settings, state.presence),
+          },
+          presenceError: null,
+        });
+      }
+      try {
+        const value = await client.rpc(presenceConfigure, settings);
+        confirmedPresence = value;
+        if (version === sequence.presence) {
+          latestRolledBackVersion = 0;
+          emit({ presence: value, presenceError: null });
+        } else if (latestRolledBackVersion === sequence.presence) {
+          emit({ presence: value });
+        }
+      } catch (error) {
+        if (version === sequence.presence) {
+          latestRolledBackVersion = version;
+          emit({ presence: confirmedPresence, presenceError: errorMessage(error) });
+        }
+        throw error;
+      }
+    }),
     configureLocalSpeech: (enabled: boolean) => write(() => asking(() => client.rpc(presenceConfigureLocalSpeech, { enabled }))),
     answerQuestion: (answer: QuestionAnswer) => write(() => asking(() => client.rpc(presenceAnswer, answer))),
     markQuestionRead: (question: QuestionRead) => write(() => asking(() => client.rpc(presenceRead, question))),
