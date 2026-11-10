@@ -33,11 +33,36 @@ export interface TodoPort {
 
 const TYPE_ORDER: Record<TodoType, number> = {
   ask: 0,
-  esc: 1,
-  web: 2,
-  stall: 3,
-  read: 4,
+  native: 1,
+  esc: 2,
+  web: 3,
+  stall: 4,
+  read: 5,
 };
+
+const NATIVE_QUESTION_TEXT_MAX_LEN = 120;
+
+function normalizeSessionSuffix(raw?: string): string | null {
+  if (!raw) return null;
+  if (raw.startsWith('cse_') && raw.length > 4) return raw.slice(4);
+  if (raw.startsWith('session_') && raw.length > 8) return raw.slice(8);
+  return raw;
+}
+
+function formatNativeQuestionText(
+  firstPrompt?: { header?: string; question: string },
+  fallback?: string,
+): string {
+  const header = firstPrompt?.header?.trim();
+  const question = firstPrompt?.question?.trim();
+  const raw =
+    header && question && header !== question
+      ? `${header}：${question}`
+      : question || header || fallback?.trim() || '等待回答';
+  return raw.length > NATIVE_QUESTION_TEXT_MAX_LEN
+    ? `${raw.slice(0, NATIVE_QUESTION_TEXT_MAX_LEN)}…`
+    : raw;
+}
 
 function formatAge(prefix: string, iso: string, nowMs: number, suffix = ''): string {
   const diffMs = Math.max(0, nowMs - Date.parse(iso));
@@ -123,8 +148,24 @@ export class TodoRuntime {
     const logs: TodoLogItem[] = [];
     const openAskSessionIds = new Set<string>();
 
-    // 1. 网页提问（只收 source === 'browser' 的待回答问题）& 5. 代答未读
-    for (const q of presence?.questions ?? []) {
+    const allQuestions = presence?.questions ?? [];
+    const activeBrowserQuestions = allQuestions.filter(
+      q => q.source === 'browser' && isQuestionTodo(q) && !isUnreadAutomaticAnswer(q),
+    );
+    const isDuplicatedByBrowserQuestion = (q: (typeof allQuestions)[number]): boolean =>
+      activeBrowserQuestions.some(bq => {
+        if (bq.id === q.id || bq.delegatedTo === q.id || q.delegatedTo === bq.id) return true;
+        if (bq.fingerprint === q.fingerprint) return true;
+        const nativeWebSession = normalizeSessionSuffix(q.webSessionId);
+        const browserSession = normalizeSessionSuffix(bq.sessionId);
+        if (nativeWebSession && browserSession && nativeWebSession === browserSession) {
+          if (!q.toolUseId || !bq.toolUseId || q.toolUseId === bq.toolUseId) return true;
+        }
+        return false;
+      });
+
+    // 1. 网页提问（source === 'browser'）、会话提问（source === 'native' 待答，只显示不作答）& 5. 代答未读
+    for (const q of allQuestions) {
       if (q.answer?.source === 'automatic') {
         const pickedSummary = Object.values(q.answer.answers).flat().join('、') || '推荐项';
         logs.push({
@@ -186,7 +227,26 @@ export class TodoRuntime {
         continue;
       }
 
-      // 原生待答提问不收（在 Paseo 侧栏“需要输入”中处理）
+      if (q.source === 'native') {
+        if (q.state !== 'pending' || q.delegatedTo || q.webRetry) continue;
+        if (isDuplicatedByBrowserQuestion(q)) continue;
+        const firstPrompt = q.prompts[0];
+        items.push({
+          id: `native:${self.id}:${q.id}:${q.fingerprint}`,
+          type: 'native',
+          label: '会话提问',
+          hostId: self.id,
+          hostName: self.name,
+          sourceLabel: `Paseo · ${self.name}`,
+          sessionTitle: q.title || '未命名会话',
+          at: q.at,
+          ageText: formatAge('等待', q.at, nowMs),
+          text: formatNativeQuestionText(firstPrompt, q.reason),
+          agentId: q.sessionId,
+        });
+        continue;
+      }
+
       if (q.source !== 'browser') continue;
 
       openAskSessionIds.add(q.sessionId);

@@ -34,10 +34,19 @@ export function computeTodoCount(controlState: ReturnType<typeof useControlState
     return controlState.todo.items.length;
   }
   const questions = controlState.presence?.questions ?? [];
-  const webQuestions = questions.filter(q => q.source === 'browser' && q.state === 'pending' && !q.delegatedTo).length;
+  const activeBrowser = questions.filter(q => q.source === 'browser' && q.state === 'pending' && !q.delegatedTo);
+  const webQuestions = activeBrowser.length;
+  const nativeQuestions = questions.filter(
+    q =>
+      q.source === 'native' &&
+      q.state === 'pending' &&
+      !q.delegatedTo &&
+      !q.webRetry &&
+      !activeBrowser.some(bq => bq.id === q.id || bq.fingerprint === q.fingerprint || bq.delegatedTo === q.id),
+  ).length;
   const unreadAuto = questions.filter(q => isUnreadAutomaticAnswer(q)).length;
   const webRetry = questions.filter(q => q.webRetry && q.state !== 'resolved').length;
   const stalled = controlState.stalled?.sessions.length ?? 0;
   const escalations = controlState.escalation?.pendingEvents.length ?? 0;
-  return webQuestions + unreadAuto + webRetry + stalled + escalations;
+  return webQuestions + nativeQuestions + unreadAuto + webRetry + stalled + escalations;
 }

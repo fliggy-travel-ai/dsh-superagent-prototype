@@ -723,7 +723,7 @@ export function TodoItemCard({ item }: { item: TodoItem }) {
   };
 
   const badgeTone =
-    item.type === 'ask' || item.type === 'esc'
+    item.type === 'ask' || item.type === 'native' || item.type === 'esc'
       ? 'danger'
       : item.type === 'web' || item.type === 'stall'
         ? 'warning'
@@ -783,7 +783,7 @@ export function TodoItemCard({ item }: { item: TodoItem }) {
                 if (item.url) void Linking.openURL(item.url);
               }}
             />
-          ) : item.type === 'stall' ? (
+          ) : item.type === 'stall' || item.type === 'native' ? (
             <Btn
               small
               primary
@@ -902,6 +902,7 @@ function TodoPage() {
               [
                 ['all', `全部 ${items.length}`],
                 ['ask', `网页提问 ${countByType('ask')}`],
+                ['native', `会话提问 ${countByType('native')}`],
                 ['web', `网页等待 ${countByType('web')}`],
                 ['stall', `停滞会话 ${stalledScanning && countByType('stall') === 0 ? '扫描中' : countByType('stall')}`],
                 ['esc', `升级事件 ${countByType('esc')}`],
