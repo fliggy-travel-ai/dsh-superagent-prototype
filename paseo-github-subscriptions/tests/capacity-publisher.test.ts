@@ -16,3 +16,10 @@ test('同一小时从原余量变化再变回时，使用不同投递键', async
   const value = signature([{ provider: 'claude-1', canAdd: 1, live: true }]);
   assert.notEqual(publicationKey(value), publicationKey(value));
 });
+test('清理过期容量和异常去重键，保留近期记录及其他事件', async () => {
+  const { pruneAutomationSeen } = await import('../server/modules/dispatch-finalize/notifier.ts');
+  const now = 100_000_000;
+  const seen: Record<string, number> = { 'capacity:old': now - 86_400_001, 'lb_exception:old': now - 86_400_000, 'capacity:new': now - 1000, 'main_finalized:old': 1 };
+  assert.equal(pruneAutomationSeen(seen, now), true);
+  assert.deepEqual(seen, { 'capacity:new': now - 1000, 'main_finalized:old': 1 });
+});
