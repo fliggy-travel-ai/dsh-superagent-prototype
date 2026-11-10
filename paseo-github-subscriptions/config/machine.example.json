@@ -7,7 +7,9 @@
     "answer.escalation": true,
     "usage.claudeAccounts": true,
     "providers.antigravity": false,
-    "usage.providerQuotas": false
+    "usage.providerQuotas": false,
+    "dispatch.finalize": false,
+    "capacity.mainSessions": false
   },
   "agentDefaults": [
     {
@@ -128,5 +130,14 @@
       "kimi",
       "zai"
     ]
+  },
+  "capacity": {
+    "accounts": {},
+    "warmup": [],
+    "liveMaxAgeMinutes": 10,
+    "pace": true,
+    "migration": {
+      "mode": "off"
+    }
   }
 }

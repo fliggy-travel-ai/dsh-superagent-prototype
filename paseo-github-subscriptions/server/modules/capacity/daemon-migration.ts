@@ -1,11 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client';
 import { MAIN_PLUGIN_ID } from '../../../shared/instances.ts';
-import { finalize, issueOf } from '../dispatch-finalize/finalize.ts';
-import { finalizePort } from '../dispatch-finalize/index.ts';
+import { issueOf } from '../dispatch-finalize/finalize.ts';
 import type { MigrationAgent, MigrationPort } from './migrate.ts';
 
-const quota = /(?:limit|quota|payment|billing|额度|限额|付款|支付)/i;
+const quota = /(?:usage.?limit|quota (?:reached|exceeded)|hit your.{0,30}limit|payment required|billing (?:issue|error)|额度(?:不足|耗尽)|达到限额|需要付款)/i;
 export function daemonMigrationPort(client: DaemonClient, templatePath: string | undefined, audit: MigrationPort['audit'], notify: MigrationPort['notify'], signal: AbortSignal): MigrationPort {
   const delay = (ms: number) => new Promise<void>((resolve, reject) => {
     if (signal.aborted) return reject(Error('stopped'));
@@ -13,6 +12,7 @@ export function daemonMigrationPort(client: DaemonClient, templatePath: string |
     const stop = () => { clearTimeout(timer); reject(Error('stopped')); }; signal.addEventListener('abort', stop, { once: true });
   });
   const timeline = async (id: string) => (await client.fetchAgentTimeline(id, { direction: 'tail', limit: 100 })).entries.map(e => e.item);
+  const handoffs = new Map<string, { lastUser: string; pending: unknown }>();
   const read = async (id: string) => (await client.fetchAgent(id))?.agent ?? null;
   return {
     read, update: (id, labels) => client.updateAgent(id, { labels }), delay, audit, notify,
@@ -22,6 +22,10 @@ export function daemonMigrationPort(client: DaemonClient, templatePath: string |
     },
     setAutoResume: async (id, enabled) => { const result = await client.invokePluginRpc(MAIN_PLUGIN_ID, 'claude-accounts.set-auto-resume', { agentId: id, enabled }) as { enabled?: boolean }; if (result?.enabled !== enabled) throw Error('resume_unavailable'); },
     stop: async (agent, reason) => {
+      const original = await read(agent.id); if (!original) throw Error('source_unavailable');
+      const messages = await timeline(agent.id);
+      const last = [...messages].reverse().find(i => i.type === 'user_message');
+      handoffs.set(agent.id, { lastUser: last?.type === 'user_message' ? last.text : '无', pending: original.pendingPermissions });
       if (reason === 'five_hour') { await client.cancelAgent(agent.id); return true; }
       const before = new Set((await timeline(agent.id)).filter(i => i.type === 'assistant_message').map(i => JSON.stringify(i)));
       await client.sendAgentMessage(agent.id, '请在安全位置停止当前工作，保存进度，并回复“已停止，可以迁移”。请不要继续执行任务。', { activeTurnBehavior: 'steer' });
@@ -35,15 +39,14 @@ export function daemonMigrationPort(client: DaemonClient, templatePath: string |
     },
     create: async (agent, provider) => {
       const current = await read(agent.id); if (!current || !agent.workspaceId || !agent.model) throw Error('source_unavailable');
-      const items = await timeline(agent.id);
-      const lastUser = [...items].reverse().find(i => i.type === 'user_message');
+      const handoff = handoffs.get(agent.id); if (!handoff) throw Error('source_unavailable');
       const template = templatePath ? await readFile(templatePath, 'utf8') : '请接续原会话的工作。先读需求单及全部评论，再运行 paseo logs 查看原会话最近 150 条记录，核对工作区现状后继续。遵守现行常设授权。';
-      const prompt = `${template}\n\n需求单号：${issueOf(agent)}\n工作区：${agent.workspaceId}\n原会话：${agent.id}\n原会话最后一条用户消息：\n${lastUser?.type === 'user_message' ? lastUser.text : '无'}\n原会话待答请求：\n${JSON.stringify(current.pendingPermissions)}\n`;
+      const prompt = `${template}\n\n需求单号：${issueOf(agent)}\n工作区：${agent.workspaceId}\n原会话：${agent.id}\n原会话最后一条用户消息：\n${handoff.lastUser}\n原会话待答请求：\n${JSON.stringify(handoff.pending)}\n`;
       const issueKey = agent.labels.need ? 'need' : 'issue';
       const created = await client.createAgent({ cwd: agent.cwd, workspaceId: agent.workspaceId, provider, model: agent.model, modeId: 'bypassPermissions', title: agent.title ?? undefined, labels: { [issueKey]: agent.labels[issueKey]!, role: 'main' }, initialPrompt: prompt });
       return created.id;
     },
-    finalize: async id => (await finalize(finalizePort(client), id)).ok,
+    finalize: async id => { const result = await client.invokePluginRpc(MAIN_PLUGIN_ID, 'dispatch.finalize', { agentId: id }) as { ok?: boolean }; return result?.ok === true; },
     verify: async id => {
       await delay(20_000);
       for (let i = 0; i <= 4; i++) {

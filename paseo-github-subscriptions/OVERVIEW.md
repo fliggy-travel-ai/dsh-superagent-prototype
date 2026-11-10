@@ -119,3 +119,7 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
   - `glm`（GLM Coding Plan 额度）：读取会话或 Provider `env.XDG_CONFIG_HOME`、进程环境变量 `XDG_CONFIG_HOME`（默认 `~/.config`）下的 `<XDG_CONFIG_HOME>/glm-acp-agent/credentials.json` 中的 `z_ai_api_key`。
   - `qoder`（Qoder 额度）：调用 Provider `command[0]` 或 `~/.local/bin/qodercli`（以 `--sdk` 协议运行，传入 Provider `env.HOME` 或系统主目录）。
   - `opencode-token-switch`（OpenCode TokenHub 额度）：只读打开 `<HOME>/.token-switch/token-switch.db`（SQLite）、读取 `env.OPENCODE_CONFIG` 或 `<XDG_CONFIG_HOME|~/.config>/opencode/opencode.json`、读取 `~/.paseo/token-hub-browser.json` 并通过 `~/.local/bin/ego-browser` 查询同账号共享额度，脱敏后的观测时间缓存在 `~/.paseo/cache/provider-quotas-usage-source/`。
+
+## 主会话收尾与容量
+
+可选模块自动整理带需求单号的主会话，并按 Claude 实时额度计算可承接数。额度用尽时，可在已核实的 Claude 账号之间迁移主会话；点名账号的会话保留原账号并报告异常。收尾、容量和迁移事件发送到现有总控 webhook。模块默认关闭，迁移默认关闭；配置和联调步骤见 `docs/answer-usage-modules.md`。

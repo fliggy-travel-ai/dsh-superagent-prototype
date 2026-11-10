@@ -83,3 +83,13 @@
 
 - 订阅、钩子和连接部分（`runtime.ts`、`forward.ts`）没有自动化测试：它们依赖运行中的守护进程。投递、时段、配置、迁移、角色判定、清除队列和 RPC 都有单元测试。需要用真实守护进程观察。
 - 额度来源的 `icon` 写成插件内相对路径 `server/vendor/paseo-0.15.0/claude-usage-source/icon.svg`；如果 Paseo 不按插件根目录解析，只是不显示图标。
+
+## 主会话收尾与容量
+
+`dispatch.finalize` 和 `capacity.mainSessions` 默认关闭。在运行 Claude 主会话的主机上，按需要在 `machine.json` 的 `modules` 中开启。迁移模式 `capacity.migration.mode` 默认是 `off`；开发联调使用 `shadow`，确认旧负载均衡职责已停止后再使用 `live`。
+
+带 `role=main` 和 `need` 或 `issue` 标签的会话会自动收尾：解绑父会话、按需置顶工作区并加「主会话」标签。收尾结果按会话和单号保存。之后手动取消置顶不会被收尾任务重新置顶。`dispatch.finalize` RPC 可按会话编号手动重试。
+
+`capacity.snapshot` 返回各账号的实时额度、档次、置顶工作区负载和可承接数。仅使用十分钟内的可用额度报告做决策；档次由实时 `planLabel` 判断，`capacity.accounts` 的档次配置用于核对。预热账号在 `capacity.warmup` 中列出。五小时额度用尽或周额度不超过 5% 时，符合条件的主会话可迁移到有余量的 Claude 账号。点名账号的会话设置 `dsh.lb=manual`，耗尽时发例外事件。
+
+余量变化至少间隔五分钟通知总控，每六小时发送一次心跳。收尾、迁移及异常事件使用现有升级通知 webhook。迁移失败会保留原会话，恢复自动继续设置并发出异常；归档结果无法确认时需人工检查。真实 daemon 联调须核对收尾结果、逐账号容量和影子迁移记录。
