@@ -50,12 +50,19 @@ type RemoteSpeechProbeOutcome =
   | { kind: 'enabled'; enabled: boolean }
   | { kind: 'missing' }
   | { kind: 'unreachable' };
-function immediateObservation(settings: PresenceSettings): PresenceObservation {
+function immediateObservation(
+  settings: PresenceSettings,
+  previousSettings?: PresenceSettings,
+  currentObservation?: PresenceObservation,
+): PresenceObservation {
   if (settings.mode === 'online') {
     return { mode: 'online', observedAt: new Date().toISOString(), source: 'manual', reason: '手动在线：语音提醒，等待回答' };
   }
   if (settings.mode === 'offline') {
     return { mode: 'offline', observedAt: new Date().toISOString(), source: 'manual', reason: '手动离线：选择明确推荐项' };
+  }
+  if (currentObservation && previousSettings?.mode === 'auto' && previousSettings.sourceHostId === settings.sourceHostId) {
+    return currentObservation;
   }
   return { mode: 'unknown', observedAt: null, source: 'bluetooth', reason: '正在读取来源主机在场状态' };
 }
@@ -218,12 +225,14 @@ export class PresenceRuntime {
     }
     this.hostList = nextHosts;
   }
-  private async probeRemoteSpeech(hostId: string): Promise<RemoteSpeechProbeOutcome> {
-    const now = this.clock();
-    const cached = this.remoteSpeechCache.get(hostId);
-    if (cached && now < cached.expiresAt) return cached.outcome;
-    const existing = this.remoteSpeechInflight.get(hostId);
-    if (existing) return existing;
+  private async probeRemoteSpeech(hostId: string, useCache: boolean): Promise<RemoteSpeechProbeOutcome> {
+    if (useCache) {
+      const now = this.clock();
+      const cached = this.remoteSpeechCache.get(hostId);
+      if (cached && now < cached.expiresAt) return cached.outcome;
+      const existing = this.remoteSpeechInflight.get(hostId);
+      if (existing) return existing;
+    }
     const cacheGen = this.remoteSpeechCacheGen;
     const probe = (async (): Promise<RemoteSpeechProbeOutcome> => {
       try {
@@ -244,10 +253,16 @@ export class PresenceRuntime {
         this.remoteSpeechInflight.delete(hostId);
       }
     });
-    this.remoteSpeechInflight.set(hostId, probe);
+    if (useCache) {
+      this.remoteSpeechInflight.set(hostId, probe);
+    }
     const outcome = await probe;
     if (cacheGen === this.remoteSpeechCacheGen) {
-      this.remoteSpeechCache.set(hostId, { outcome, expiresAt: this.clock() + REMOTE_SPEECH_CACHE_TTL_MS });
+      if (outcome.kind !== 'unreachable') {
+        this.remoteSpeechCache.set(hostId, { outcome, expiresAt: this.clock() + REMOTE_SPEECH_CACHE_TTL_MS });
+      } else {
+        this.remoteSpeechCache.delete(hostId);
+      }
     }
     return outcome;
   }
@@ -274,7 +289,7 @@ export class PresenceRuntime {
       this.hasSpeechTarget = true;
       void this.refresh(true);
     } else {
-      await this.updateSpeechTargetState(true);
+      await this.updateSpeechTargetState({ refreshHosts: true, useCache: false });
     }
     return this.snapshot();
   }
@@ -290,14 +305,20 @@ export class PresenceRuntime {
   }
   async configure(value: PresenceSettings) {
     if (this.configuring) throw new Error('设置正在保存，请稍后重试');
-    const settings = PresenceSettingsSchema.parse(value); this.generation++; this.configuring++;
+    const settings = PresenceSettingsSchema.parse(value);
+    const previousSettings = this.state.settings;
+    this.generation++; this.configuring++;
     this.invalidateRemoteSpeechCache();
     const cancelled = new Set(this.decisions.keys()); this.decisions.clear();
     try {
       await this.persist(next => { next.settings = settings; for (const question of next.questions) if (cancelled.has(question.id) && question.state === 'pending') question.reason = '模式已变化，排队回答已取消'; });
-      this.observation = immediateObservation(settings);
+      this.generation++;
+      this.observation = immediateObservation(settings, previousSettings, this.observation);
       if (this.localSpeechEnabled()) this.hasSpeechTarget = true;
-    } finally { this.configuring--; }
+    } finally {
+      this.generation++;
+      this.configuring--;
+    }
     void this.refresh(true);
     return this.snapshot();
   }
@@ -368,13 +389,22 @@ export class PresenceRuntime {
       if (requireFresh) this.rescanNeeded = true;
       return this.cycle;
     }
-    this.cycle = (async () => {
-      do {
-        this.rescanNeeded = false;
-        await this.scan().catch(() => { this.error = '问答同步失败，保留问题等待处理'; });
-      } while (this.rescanNeeded && !this.stopped);
-    })().finally(() => { this.cycle = null; });
-    return this.cycle;
+    let run: Promise<void> | null = null;
+    run = (async () => {
+      try {
+        do {
+          this.rescanNeeded = false;
+          await this.scan().catch(() => { this.error = '问答同步失败，保留问题等待处理'; });
+        } while (this.rescanNeeded && !this.stopped);
+      } finally {
+        if (this.cycle === run) this.cycle = null;
+        if (this.rescanNeeded && !this.stopped) {
+          await this.refresh(true);
+        }
+      }
+    })();
+    this.cycle = run;
+    return run;
   }
   private async scan() {
     const generation = this.generation;
@@ -383,7 +413,7 @@ export class PresenceRuntime {
       this.port.hosts().then(nextHosts => { this.updateHostList(nextHosts); }, () => {}),
       this.port.list(),
     ]);
-    await this.updateSpeechTargetState(false);
+    await this.updateSpeechTargetState({ refreshHosts: false, useCache: true });
     this.error = null;
     const present = new Set<string>(); this.native.clear();
     const nextCloudIds = new Set<string>();
@@ -447,15 +477,16 @@ export class PresenceRuntime {
     try { await this.process(question, generation); }
     catch { this.error = '部分问题暂时无法处理，请打开原会话核查'; }
   }
-  private async updateSpeechTargetState(refreshHosts = true): Promise<void> {
+  private async updateSpeechTargetState(options: { refreshHosts?: boolean; useCache?: boolean } = {}): Promise<void> {
     if (this.localSpeechEnabled()) {
       this.hasSpeechTarget = true;
       return;
     }
-    const targets = await this.resolveSpeechTargets(refreshHosts);
+    const targets = await this.resolveSpeechTargets(options);
     this.hasSpeechTarget = targets.length > 0;
   }
-  private async resolveSpeechTargets(refreshHosts = true): Promise<Array<string | null>> {
+  private async resolveSpeechTargets(options: { refreshHosts?: boolean; useCache?: boolean } = {}): Promise<Array<string | null>> {
+    const { refreshHosts = true, useCache = false } = options;
     if (refreshHosts && (this.hostList.length > 0 || this.port.selfId)) {
       const nextHosts = await this.port.hosts().catch(() => this.hostList);
       this.updateHostList(nextHosts);
@@ -483,7 +514,7 @@ export class PresenceRuntime {
           if (!this.port.remoteSpeechState && !this.port.remoteSpeechEnabled) {
             return isMySourceHost(hostId) ? hostId : null;
           }
-          const outcome = await this.probeRemoteSpeech(hostId);
+          const outcome = await this.probeRemoteSpeech(hostId, useCache);
           let enabled: boolean;
           if (outcome.kind === 'state') {
             enabled = outcome.configured ? outcome.enabled : isMySourceHost(hostId);
@@ -538,7 +569,7 @@ export class PresenceRuntime {
           if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused) return;
           const qBefore = this.state.questions.find(item => item.id === question.id);
           if (qBefore?.state !== 'pending' || qBefore.delegatedTo) return;
-          const rawTargets = await this.resolveSpeechTargets();
+          const rawTargets = await this.resolveSpeechTargets({ refreshHosts: true, useCache: false });
           if (this.stopped || this.configuring || generation !== this.generation || this.state.settings.paused) return;
           const qReady = this.state.questions.find(item => item.id === question.id);
           if (qReady?.state !== 'pending' || qReady.delegatedTo) return;

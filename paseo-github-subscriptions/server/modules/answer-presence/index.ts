@@ -25,7 +25,13 @@ export const presenceModule: Module = {
       return { enabled: current.localSpeechEnabled(), configured: current.localSpeechConfigured() };
     });
     server.handle(presenceRpc.presenceConfigureLocalSpeech, async ({ enabled }) => (await ready()).configureLocalSpeech(enabled));
-    server.handle(presenceRpc.presenceSpeak, async ({ id, text }) => { await ready(); return services.presenceHosts!.localSpeech(id, text); });
+    server.handle(presenceRpc.presenceSpeak, async ({ id, text }) => {
+      const current = await ready();
+      if (!current.localSpeechEnabled()) {
+        return { played: false, cancelled: true, detail: '本机语音提醒已关闭' };
+      }
+      return services.presenceHosts!.localSpeech(id, text);
+    });
     server.handle(presenceRpc.presenceSpeakCancel, async ({ id }) => ({ cancelled: services.presenceHosts?.localCancel(id) ?? false }));
     server.handle(bluetoothRpc.bluetoothLocalList, async () => listBluetoothTargets());
     server.handle(bluetoothRpc.bluetoothLocalSelect, async input => saveBluetoothTarget(input));
