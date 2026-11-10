@@ -42,7 +42,7 @@ function makeFixture() {
           ],
         }],
       },
-      // 2. 原生提问待答（不应收！在侧栏“需要输入”中处理）
+      // 2. 原生提问待答（应收进“会话提问”，只显示不作答）
       {
         id: 'q-native-pending',
         sessionId: 'agent-native-1',
@@ -53,6 +53,7 @@ function makeFixture() {
         state: 'pending',
         reason: '等待回答',
         prompts: [{
+          header: '确认执行',
           question: '是否继续？',
           multiSelect: false,
           options: [{ label: '继续', description: '', recommended: true }],
@@ -302,26 +303,35 @@ function makeFixture() {
   };
 }
 
-test('todo.local 只收网页提问、网页等待、停滞会话、升级事件、代答未读，不收原生提问与原生授权', async () => {
+test('todo.local 收网页提问、会话提问（原生待答）、网页等待、停滞会话、升级事件、代答未读，不收已回答或已转网页的原生提问', async () => {
   const { runtime } = makeFixture();
   const local = await runtime.local();
   assert.equal(local.hostId, 'srv-mini');
   assert.equal(local.hostName, 'Mac mini');
   assert.equal(local.accountsNeedingAttention, 1);
 
-  // 检查 4 条本机待办：网页提问、升级事件、网页等待、停滞会话、代答未读（共 5 类）
+  // 检查 6 条本机待办：网页提问、会话提问、升级事件、网页等待、停滞会话、代答未读（共 6 类）
   assert.deepEqual(
-    local.items.map(item => [item.type, item.sessionTitle]),
+    local.items.map(item => [item.type, item.label, item.sessionTitle]),
     [
-      ['ask', '环境 7 · 退款回调测试'],
-      ['esc', '【额度看板】改版'],
-      ['web', '环境 12 · 文档迁移'],
-      ['stall', '【搜索排序】实验'],
-      ['read', '【订单退款】联调'],
+      ['ask', '网页提问', '环境 7 · 退款回调测试'],
+      ['native', '会话提问', '【整合】原生提问'],
+      ['esc', '升级事件', '【额度看板】改版'],
+      ['web', '网页等待', '环境 12 · 文档迁移'],
+      ['stall', '【搜索排序】实验'].length ? ['stall', '停滞会话', '【搜索排序】实验'] : [],
+      ['read', '代答未读', '【订单退款】联调'],
     ],
   );
-  // 确认不包含原生待答提问 q-native-pending，也不包含已读代答 q-auto-read
-  assert.ok(!local.items.some(item => item.sessionTitle.includes('原生提问')));
+  const nativeItem = local.items.find(item => item.type === 'native')!;
+  assert.equal(nativeItem.label, '会话提问');
+  assert.equal(nativeItem.hostId, 'srv-mini');
+  assert.equal(nativeItem.hostName, 'Mac mini');
+  assert.equal(nativeItem.sessionTitle, '【整合】原生提问');
+  assert.equal(nativeItem.text, '确认执行：是否继续？');
+  assert.equal(nativeItem.ageText, '等待 10 分钟');
+  assert.equal(nativeItem.agentId, 'agent-native-1');
+  assert.equal(nativeItem.question, undefined, '会话提问只显示不作答，不附带 question 作答表单');
+  // 确认不包含已读代答 q-auto-read
   assert.ok(!local.items.some(item => item.sessionTitle.includes('【已读】')));
 
   // 检查处理记录：包含子会话归并、网页权限点击、离线代答、升级投递
@@ -331,11 +341,166 @@ test('todo.local 只收网页提问、网页等待、停滞会话、升级事件
   );
 });
 
+test('1737-todo-native-questions：原生待答提问进待办（问题文字截断、升级事件并存）、已回答/已转网页/网页重复不进、两台合看、回答后消失', async () => {
+  const { port } = makeFixture();
+  const longQuestion = '这是一段非常长的问题描述，用于验证第一题的 header 与 question 在进入待办列表时能够被正确截断而不会无限撑长卡片文字区域，确保在宽屏和窄屏下都清晰可读。'.repeat(2);
+  let nativeState: 'pending' | 'resolved' = 'pending';
+
+  const runtime = new TodoRuntime({
+    ...port,
+    presence: async () => {
+      const base = (await port.presence())!;
+      return {
+        ...base,
+        questions: [
+          ...base.questions,
+          // A. 超长 header/question 的原生待答提问（应收且截断）
+          {
+            id: 'q-native-long',
+            sessionId: 'agent-native-long',
+            fingerprint: 'fp-native-long',
+            source: 'native',
+            title: '【架构评审】长问题会话',
+            at: '2026-11-09T05:55:00Z',
+            state: nativeState,
+            reason: '等待回答',
+            prompts: [{
+              header: '架构选型',
+              question: longQuestion,
+              multiSelect: false,
+              options: [{ label: '方案 A', description: '', recommended: true }],
+            }],
+          },
+          // B. 已回答（resolved / submitted）的原生提问（不应收）
+          {
+            id: 'q-native-answered',
+            sessionId: 'agent-native-ans',
+            fingerprint: 'fp-native-ans',
+            source: 'native',
+            title: '【已回答】原生会话',
+            at: '2026-11-09T05:52:00Z',
+            state: 'resolved',
+            reason: '已回答',
+            answer: { source: 'user', answers: { '问题？': ['是'] } },
+            prompts: [{
+              question: '问题？',
+              multiSelect: false,
+              options: [{ label: '是', description: '', recommended: true }],
+            }],
+          },
+          // C. delegatedTo 已指向网页提问的原生项（不应重复收）
+          {
+            id: 'q-native-delegated',
+            sessionId: 'agent-native-del',
+            fingerprint: 'fp-native-del',
+            source: 'native',
+            title: '【已关联】原生会话',
+            at: '2026-11-09T05:53:00Z',
+            state: 'pending',
+            reason: '等待回答',
+            delegatedTo: 'q-web-1',
+            prompts: [{
+              question: '回调失败时如何重试？',
+              multiSelect: false,
+              options: [{ label: '指数退避，最多 5 次', description: '', recommended: true }],
+            }],
+          },
+          // D. 同一问题已作为未关联的 browser 网页提问（q-web-1，sess_web1）出现（不应重复列为会话提问）
+          {
+            id: 'q-native-dup-browser',
+            sessionId: 'agent-cloud-dup',
+            fingerprint: 'fp-web-1',
+            source: 'native',
+            title: '【重复网页提问】云端会话',
+            webSessionId: 'session_sess_web1',
+            at: '2026-11-09T05:48:00Z',
+            state: 'pending',
+            reason: '等待回答',
+            prompts: [{
+              question: '回调失败时如何重试？',
+              multiSelect: false,
+              options: [{ label: '指数退避，最多 5 次', description: '', recommended: true }],
+            }],
+          },
+          // E. webRetry 的原生项（走“网页等待”重试提示，不进“会话提问”）
+          {
+            id: 'q-native-webretry',
+            sessionId: 'agent-cloud-retry',
+            fingerprint: 'fp-native-retry',
+            source: 'native',
+            title: '【网页重试】云端会话',
+            webSessionId: 'session_retry_1',
+            webRetry: true,
+            at: '2026-11-09T05:51:00Z',
+            state: 'pending',
+            reason: 'claude.ai 页面没有打开，请在 claude.ai 作答',
+            prompts: [{
+              question: '重试问题？',
+              multiSelect: false,
+              options: [{ label: '重试', description: '', recommended: true }],
+            }],
+          },
+        ],
+      };
+    },
+    remoteLocal: async hostId => {
+      const snap = await port.remoteLocal(hostId);
+      return {
+        ...snap,
+        items: [
+          ...snap.items,
+          {
+            id: 'native:srv-book:q-book-1:fp-book-1',
+            type: 'native',
+            label: '会话提问',
+            hostId: 'srv-book',
+            hostName: 'MacBook',
+            sourceLabel: 'Paseo · MacBook',
+            sessionTitle: '【MacBook】远端会话提问',
+            at: '2026-11-09T05:56:00Z',
+            ageText: '等待 4 分钟',
+            text: '分支策略：是否切出新分支？',
+            agentId: 'agent-book-ask-1',
+          },
+        ],
+      };
+    },
+  });
+
+  const merged = await runtime.list();
+  const nativeItems = merged.items.filter(item => item.type === 'native');
+  assert.deepEqual(
+    nativeItems.map(item => [item.hostName, item.sessionTitle, item.agentId]),
+    [
+      ['MacBook', '【MacBook】远端会话提问', 'agent-book-ask-1'],
+      ['Mac mini', '【架构评审】长问题会话', 'agent-native-long'],
+      ['Mac mini', '【整合】原生提问', 'agent-native-1'],
+    ],
+  );
+  const longItem = nativeItems.find(item => item.sessionTitle === '【架构评审】长问题会话')!;
+  assert.match(longItem.text, /^架构选型：这是一段非常长的问题描述/);
+  assert.ok(longItem.text.endsWith('…'), '超长问题文字应截断并带省略号');
+  assert.ok(longItem.text.length <= 125, `截断后长度应受控，实际 ${longItem.text.length}`);
+  assert.equal(longItem.question, undefined);
+
+  // 已转升级通知的提问，会话提问与升级事件各自保留
+  assert.ok(merged.items.some(item => item.type === 'esc' && item.sessionTitle === '【额度看板】改版'));
+
+  // 回答后（state 变为 resolved）下一次刷新立即从待办消失
+  nativeState = 'resolved';
+  const afterAnswered = await runtime.local();
+  assert.equal(
+    afterAnswered.items.some(item => item.sessionTitle === '【架构评审】长问题会话'),
+    false,
+    '回答后应在下一次刷新从待办消失',
+  );
+});
+
 test('todo.list 合并两台主机待办与处理记录，按类别顺序排列', async () => {
   const { runtime } = makeFixture();
   const merged = await runtime.list();
   assert.equal(merged.warning, null);
-  assert.equal(merged.items.length, 6);
+  assert.equal(merged.items.length, 7);
   assert.ok(merged.items.some(item => item.hostName === 'Mac mini'));
   assert.ok(merged.items.some(item => item.hostName === 'MacBook'));
   assert.deepEqual(
@@ -354,7 +519,7 @@ test('todo.list 远端主机超时时只返回本机待办并给出明确提示�
   const { runtime, setRemoteFail } = makeFixture();
   setRemoteFail(true);
   const merged = await runtime.list();
-  assert.equal(merged.items.length, 5);
+  assert.equal(merged.items.length, 6);
   assert.ok(merged.items.every(item => item.hostId === 'srv-mini'));
   assert.equal(merged.warning, 'MacBook 未响应，以下只含 Mac mini 的待办');
   assert.equal(merged.hosts.find(h => h.hostId === 'srv-book')?.responded, false);
@@ -1265,7 +1430,7 @@ test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返�
   // 1. 首次读取缓存远端待办，并附带 timings
   const first = await runtime.list();
   assert.equal(remoteCalls, 1);
-  assert.equal(first.items.length, 6);
+  assert.equal(first.items.length, 7);
   assert.equal(typeof (first as any).timings?.localMs, 'number');
   assert.equal(typeof (first as any).timings?.totalMs, 'number');
 
@@ -1273,7 +1438,7 @@ test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返�
   currentNow += 5_000;
   const cached = await runtime.list();
   assert.equal(remoteCalls, 1, '缓存有效期内不应重复请求远端 todo.local');
-  assert.equal(cached.items.length, 6);
+  assert.equal(cached.items.length, 7);
 
   // 3. 超过常规缓存 TTL（+20 秒），但未超过 60 秒离线/慢响应上限，此时远端挂起 -> list 立即返回缓存结果
   currentNow += 20_000;
@@ -1281,19 +1446,19 @@ test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返�
   const t0 = Date.now();
   const slowFallback = await runtime.list();
   assert.ok(Date.now() - t0 < 400, '远端挂起时 todo.list 应立即返回缓存结果');
-  assert.equal(slowFallback.items.length, 6);
+  assert.equal(slowFallback.items.length, 7);
   assert.equal(slowFallback.warning, null);
 
   // 4. 远端主机短暂离线（仍未超 60 秒缓存上限） -> 沿用缓存不告警
   remoteOnline = false;
   const offlineFallback = await runtime.list();
-  assert.equal(offlineFallback.items.length, 6);
+  assert.equal(offlineFallback.items.length, 7);
   assert.equal(offlineFallback.warning, null);
 
   // 5. 超过 60 秒缓存上限且远端仍离线 -> 丢弃过期缓存并提示未响应
   currentNow += 45_000;
   const expired = await runtime.list();
-  assert.equal(expired.items.length, 5);
+  assert.equal(expired.items.length, 6);
   assert.equal(expired.warning, 'MacBook 未响应，以下只含 Mac mini 的待办');
   releaseHang?.();
 });
@@ -1337,7 +1502,7 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   // 1. 冷启动无任何缓存，远端耗时 220ms (> 50ms 预算)：应等待远端完成，不误报“MacBook 未响应”
   const cold = await runtime.list();
   assert.equal(cold.warning, null, '冷启动无缓存时应等待远端返回，不应因 150ms/50ms 预算误报未响应');
-  assert.equal(cold.items.length, 6);
+  assert.equal(cold.items.length, 7);
   assert.equal(remoteCalls, 1);
 
   // 2. 验证缓存时间记录的是读取开始时刻（t0），而非完成时刻（t0 + 220ms）：
@@ -1374,7 +1539,7 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   // 先触发处理前的慢读取（50ms 超时回退旧缓存，旧读取仍在后台在途）
   const beforeAct = await runtime.list();
   assert.equal(beforeAct.warning, null);
-  assert.equal(beforeAct.items.length, 6);
+  assert.equal(beforeAct.items.length, 7);
 
   // 执行远端 act 成功
   remoteEscalationHandled = true;
@@ -1393,10 +1558,10 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   releaseOldRead();
   await new Promise(resolve => setTimeout(resolve, 20));
 
-  // 等待处理后的新读取（120ms）完成，再次 list() 应看到已移除 esc-remote-1 的新结果（5 条）
+  // 等待处理后的新读取（120ms）完成，再次 list() 应看到已移除 esc-remote-1 的新结果（6 条）
   await new Promise(resolve => setTimeout(resolve, 150));
   const afterNewRead = await runtime.list();
   assert.equal(afterNewRead.warning, null);
-  assert.equal(afterNewRead.items.length, 5, '旧版本在途读取应被丢弃，新读取完成后已处理待办应消失');
+  assert.equal(afterNewRead.items.length, 6, '旧版本在途读取应被丢弃，新读取完成后已处理待办应消失');
   runtime['port'].remoteLocal = origRemoteLocal;
 });

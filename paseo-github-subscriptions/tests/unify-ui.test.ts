@@ -1689,6 +1689,100 @@ test('1737-speech-one-switch：语音提醒卡片与抽屉只保留单个“语�
     const scannedTodoText = collectText(scannedTodoTree);
     assert.ok(scannedTodoText.includes('停滞会话 0'), '扫描完成后筛选按钮应显示“停滞会话 0”');
     assert.ok(scannedTodoText.includes('当前没有需要处理的插件待办项。'), '扫描完成后无待办时应显示“当前没有需要处理的插件待办项。”');
+
+    // 1737-todo-native-questions：筛选条含“会话提问 N”，卡片只有“打开会话”按钮（无回答/提交回答控件），侧栏备用计数也算原生待答提问
+    const { computeTodoCount } = await import('../client/sidebar-state.ts');
+    assert.equal(
+      computeTodoCount({
+        todo: null,
+        presence: {
+          ...daemon.presence,
+          questions: [
+            {
+              id: 'nq-1',
+              sessionId: 'agent-native-1',
+              fingerprint: 'fp-nq-1',
+              source: 'native',
+              title: '原生会话',
+              at: '2026-11-10T07:00:00Z',
+              state: 'pending',
+              reason: '等待回答',
+              prompts: [{ question: '是否继续？', multiSelect: false, options: [{ label: '是', description: '', recommended: true }] }],
+            },
+          ],
+        },
+        stalled: null,
+        escalation: null,
+      } as never),
+      1,
+      'todo 尚未加载时侧栏备用计数应包含原生待答提问',
+    );
+
+    const openedFromNative: Array<{ agentId: string; serverId?: string }> = [];
+    daemon.todo = {
+      items: [
+        {
+          id: 'native:srv_macbook:nq-1:fp-nq-1',
+          type: 'native' as never,
+          label: '会话提问' as never,
+          hostId: 'srv_macbook',
+          hostName: 'MacBook',
+          sourceLabel: 'Paseo · MacBook',
+          sessionTitle: '待办延迟优化执行会话',
+          at: '2026-11-10T07:05:00Z',
+          ageText: '等待 3 分钟',
+          text: '确认方案：是否将会话原生提问只显示不作答列入待办？',
+          agentId: 'agent-native-book',
+        },
+      ],
+      logs: [],
+      hosts: [],
+      warning: null,
+    };
+    await control.refreshUnify();
+    todoRenderer.reset();
+    let nativeTodoTree = todoRenderer.render(() =>
+      React.createElement(Bound, {
+        theme: mockTheme,
+        host: { id: 'h1', label: 'Host' },
+        layout: { compact: false, platform: 'web' },
+        params: { page: 'todo' },
+        navigation: {
+          openAgent: (target: { agentId: string; serverId?: string }) => openedFromNative.push(target),
+          openWorkspace: () => {},
+        },
+      } as never),
+    );
+    const nativeTodoText = collectText(nativeTodoTree);
+    assert.ok(nativeTodoText.includes('会话提问 1'), '筛选条应包含“会话提问 1”');
+    assert.ok(nativeTodoText.includes('待办延迟优化执行会话'), '应显示会话标题');
+    assert.ok(nativeTodoText.includes('确认方案：是否将会话原生提问只显示不作答列入待办？'), '应显示问题文字');
+    assert.ok(nativeTodoText.includes('MacBook'), '应显示主机名');
+    assert.ok(nativeTodoText.includes('等待 3 分钟'), '应显示等待时长');
+    const nativeFilterBtn = findNodes(nativeTodoTree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '会话提问 1')[0];
+    assert.ok(nativeFilterBtn, '应有“会话提问 1”筛选按钮');
+    (nativeFilterBtn.props.onPress as () => void)();
+    nativeTodoTree = todoRenderer.render(() =>
+      React.createElement(Bound, {
+        theme: mockTheme,
+        host: { id: 'h1', label: 'Host' },
+        layout: { compact: false, platform: 'web' },
+        params: { page: 'todo' },
+        navigation: {
+          openAgent: (target: { agentId: string; serverId?: string }) => openedFromNative.push(target),
+          openWorkspace: () => {},
+        },
+      } as never),
+    );
+    assert.equal(
+      findNodes(nativeTodoTree, n => n.type === 'Pressable' && (n.props.accessibilityLabel === '回答' || n.props.accessibilityLabel === '提交回答')).length,
+      0,
+      '会话提问卡片不应提供作答按钮',
+    );
+    const openNativeAgentBtns = findNodes(nativeTodoTree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '打开会话');
+    assert.equal(openNativeAgentBtns.length, 1, '会话提问卡片应只有“打开会话”操作按钮');
+    (openNativeAgentBtns[0]!.props.onPress as () => void)();
+    assert.deepEqual(openedFromNative, [{ agentId: 'agent-native-book', serverId: 'srv_macbook' }]);
   } finally {
     control.dispose();
   }

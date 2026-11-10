@@ -2,10 +2,10 @@ import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 import { QuestionPromptSchema } from './presence.ts';
 
-export const TodoTypeSchema = z.enum(['ask', 'web', 'stall', 'esc', 'read']);
+export const TodoTypeSchema = z.enum(['ask', 'native', 'web', 'stall', 'esc', 'read']);
 export type TodoType = z.infer<typeof TodoTypeSchema>;
 
-export const TodoLabelSchema = z.enum(['网页提问', '网页等待', '停滞会话', '升级事件', '代答未读']);
+export const TodoLabelSchema = z.enum(['网页提问', '会话提问', '网页等待', '停滞会话', '升级事件', '代答未读']);
 export type TodoLabel = z.infer<typeof TodoLabelSchema>;
 
 export const TodoItemSchema = z.strictObject({
