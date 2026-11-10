@@ -51,7 +51,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   }
   if (leaseActive(agent.labels['dsh.migration-lease'], now)) return 'locked';
   const lease = `plugin:${now + 30 * 60_000}:${randomUUID()}`;
-  let acquired = false; let leaseAttempted = false; let lockReleased = false; let started = false; let releaseUncertain = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false; let review = false; let begun = false; let weeklyStopIssued = false; let creating = false; let inCreate = false;
+  let acquired = false; let leaseAttempted = false; let lockReleased = false; let started = false; let releaseUncertain = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false; let review = false; let begun = false; let weeklyStopIssued = false; let creating = false; let inCreate = false; let pendingFailure: string | null = null;
   const moved: string[] = [];
   const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
     const started = Date.now();
@@ -129,6 +129,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
     review = archiveUncertain || rollbackIncomplete || creating || releaseUncertain;
     if (review && begun) { await port.journal.review(agent.id, failure).catch(() => {}); await port.update(agent.id, { 'dsh.migration-state': 'needs_review' }).catch(() => {}); }
     await port.audit({ ...result, result: failure });
+    if (begun && !started && leaseAttempted && !review) { pendingFailure = failure; return failure; }
     await port.notify('lb_exception', { ...result, reason: failure, trigger: reason, autoResume: oldResume ?? null }); return failure;
   } finally {
     if (begun && !review) {
@@ -151,6 +152,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
           await port.notify('lb_exception', { ...result, reason: 'lease_release_failed', trigger: reason, autoResume: oldResume ?? null });
         }
       }
+      if (pendingFailure) await port.notify('lb_exception', { ...result, reason: pendingFailure, trigger: reason, autoResume: oldResume ?? null });
       if (!review) await port.journal.finish(agent.id);
     }
   }

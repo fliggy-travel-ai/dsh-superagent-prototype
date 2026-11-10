@@ -14,7 +14,7 @@ export async function recoverMigrations(journal: MigrationJournal, agents: Migra
     const entry = journal.get(id);
     const agent = byId.get(id);
     if (entry?.state === 'in_progress' && entry.phase === 'locking') {
-      if (!agent) throw Error('无法读取待恢复会话');
+      if (!agent) { await journal.finish(id); continue; }
       if (agent.archivedAt) { await journal.finish(id); continue; }
       if (agent.labels['dsh.migration-lease'] === entry.lease) {
         if (!markAgent) continue;

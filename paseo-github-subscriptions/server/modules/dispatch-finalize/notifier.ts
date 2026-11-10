@@ -11,7 +11,7 @@ import type { EventName } from '../../notify/protocol.ts';
 export function pruneAutomationSeen(seen: Record<string, number>, now: number) {
   let changed = false;
   for (const [key, at] of Object.entries(seen)) {
-    if ((key.startsWith('capacity:') || key.startsWith('lb_exception:')) && now - at >= 24 * 3600_000) { delete seen[key]; changed = true; }
+    if ((key.startsWith('capacity:') || key.startsWith('lb_exception:') || key.startsWith('main_migrated:') || key.startsWith('main_migration_planned:')) && now - at >= 24 * 3600_000) { delete seen[key]; changed = true; }
   }
   return changed;
 }

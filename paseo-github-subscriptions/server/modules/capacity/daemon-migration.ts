@@ -4,12 +4,12 @@ import { MAIN_PLUGIN_ID } from '../../../shared/instances.ts';
 import { issueOf } from '../dispatch-finalize/finalize.ts';
 import type { MigrationAgent, MigrationPort } from './migrate.ts';
 
-const quota = /(?:usage.?limit|quota (?:reached|exceeded)|hit your.{0,30}limit|payment required|billing (?:issue|error)|额度(?:不足|耗尽)|达到限额|需要付款)/i;
-const providerPrefix = /^(?:you(?:'|’)ve hit your|usage_limit_reached|payment required|billing (?:issue|error))/i;
-const shortLimit = /(?:you(?:'|’)ve hit your (?:(?:session|usage|5.hour) )?limit|(?:session|5.hour|usage) (?:limit|quota) (?:reached|exceeded)|usage_limit_reached|payment required|billing (?:issue|error)|额度(?:不足|耗尽)|达到限额|需要付款)/i;
+const quota = /(?:usage.?limit|quota (?:reached|exceeded)|hit your.{0,30}limit|payment required|billing (?:issue|error)|达到限额|需要付款)/i;
+const providerPrefix = /^(?:you(?:'|’)ve hit your|usage_limit_reached|payment required|billing (?:issue|error)|\/upgrade\s+to\s+increase\s+your\s+usage\s+limit|credit balance is too low)/i;
+const shortLimit = /(?:hit your.{0,30}limit|(?:session|5.hour|usage) (?:limit|quota) (?:reached|exceeded)|usage_limit_reached|\/upgrade\s+to\s+increase\s+your\s+usage\s+limit|credit balance is too low|payment required|billing (?:issue|error)|需要(?:付款|支付)|请(?:先)?(?:付款|支付)|(?:需要|请(?:先)?)升级(?:套餐|订阅|账户|账号|计划))/i;
 export function classifyOutput(items: Array<{ type: string; text?: string; message?: string }>): 'ok' | 'quota' | 'unknown' {
   for (const item of items) {
-    if ((item.type === 'error' || item.type === 'notification') && quota.test(item.message ?? '')) return 'quota';
+    if ((item.type === 'error' || item.type === 'notification') && (quota.test(item.message ?? '') || shortLimit.test(item.message ?? ''))) return 'quota';
     if (item.type === 'assistant_message' && item.text?.trim()) {
       const text = item.text.trim();
       if ((text.length <= 240 || providerPrefix.test(text)) && shortLimit.test(text)) return 'quota';

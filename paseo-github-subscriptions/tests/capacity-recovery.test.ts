@@ -117,3 +117,34 @@ test('锁写入后读回失败：重启按未开始恢复，不标待审', async
     assert.ok(agent.labels['dsh.migration-lease'].startsWith('released:')); assert.equal('dsh.migration-state' in agent.labels, false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+test('识别供应商用量、升级和余额提示，不误判迁移复述', () => {
+  const prompts = [
+    "You've hit your weekly limit · resets Mon 3pm",
+    "You've hit your Opus limit",
+    '/upgrade to increase your usage limit',
+    'Credit balance is too low',
+  ];
+  for (const text of prompts) {
+    for (const type of ['assistant_message', 'error', 'notification']) {
+      const item = type === 'assistant_message' ? { type, text } : { type, message: text };
+      assert.equal(classifyOutput([item]), 'quota', `${type}: ${text}`);
+    }
+  }
+  for (const type of ['error', 'notification']) {
+    assert.equal(classifyOutput([{ type, message: '原会话因额度耗尽迁到本会话' }]), 'unknown');
+  }
+  for (const text of ['原会话因额度耗尽迁到本会话', '上一个会话额度不足，现在接续工作', '该需求需要升级组件', '正常工作内容。'.repeat(40) + "You've hit your weekly limit"]) {
+    assert.equal(classifyOutput([{ type: 'assistant_message', text }]), 'ok', text);
+  }
+});
+test('加锁中会话已删除时删除未开始记录，不影响其他待审记录', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'migration-deleted-'));
+  try {
+    const journal = new MigrationJournal(join(dir, 'state.json'));
+    await journal.begin('deleted', 'plugin:1:nonce', 'weekly');
+    await journal.review('review', 'archive_unknown');
+    const notices: string[] = [];
+    await recoverMigrations(journal, [], async () => { throw Error('不应写标签'); }, async (_event, data) => { notices.push(String(data.oldAgentId)); }, true, async () => null);
+    assert.equal(journal.get('deleted'), undefined); assert.equal(journal.get('review')?.state, 'needs_review'); assert.deepEqual(notices, ['review']);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

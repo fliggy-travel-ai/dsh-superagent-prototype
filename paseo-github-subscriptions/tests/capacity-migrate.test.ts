@@ -136,3 +136,22 @@ test('归档前释放锁失败时原会话不归档并转待审', async () => {
   assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'lease_release_failed');
   assert.equal(reason, 'lease_release_failed'); assert.equal(f.calls.includes('archive:old'), false);
 });
+test('锁确认前失败只发一条异常，并报告最终锁确认结果', async () => {
+  for (const readable of [true, false]) {
+    const f = fixture(); const notices: Record<string, unknown>[] = [];
+    f.port.notify = async (event, data) => { if (event === 'lb_exception') notices.push(data); };
+    f.port.delay = async () => { throw Error('stopped'); };
+    if (!readable) f.port.read = async () => { throw Error('offline'); };
+    const outcome = await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now);
+    assert.equal(notices.length, 1); assert.equal(notices[0]?.reason, readable ? 'stopped' : 'lock_unverified');
+    assert.equal(outcome, readable ? 'stopped' : 'lock_unverified');
+  }
+});
+test('锁写入前的记录失败也只发一条异常', async () => {
+  const f = fixture(); const notices: Record<string, unknown>[] = [];
+  f.port.journal.begin = async () => { throw Error('disk'); };
+  f.port.notify = async (event, data) => { if (event === 'lb_exception') notices.push(data); };
+  assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'operation_failed');
+  assert.equal(notices.length, 1); assert.equal(notices[0]?.reason, 'operation_failed');
+  assert.equal(f.agent.labels['dsh.migration-lease'], undefined);
+});
