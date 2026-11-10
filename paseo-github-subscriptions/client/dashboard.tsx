@@ -296,6 +296,9 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const effectiveOnline = settings
     ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
     : false;
+  const lastPlayedSpeech = presence?.speech
+    ? [...presence.speech].reverse().find(item => item.played && item.engine)
+    : undefined;
 
   const escState = escalation?.blockedReason
     ? { label: '旧插件仍启用', tone: 'danger' as const }
@@ -530,7 +533,18 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
                 {settings?.speechEnabled && presence.hasSpeechTarget === false ? (
                   <Chip label="当前没有主机会播放" tone="warning" />
                 ) : null}
+                {lastPlayedSpeech ? (
+                  <Chip
+                    label={lastPlayedSpeech.engine === 'neural' ? '最近：神经语音' : '最近：系统语音'}
+                    tone={lastPlayedSpeech.engine === 'neural' ? 'neutral' : 'warning'}
+                  />
+                ) : null}
                 <Text style={s.small}>{presence.hostName || '本机'}</Text>
+                {lastPlayedSpeech?.engine === 'system' && lastPlayedSpeech.detail ? (
+                  <Text style={[s.small, { color: theme.colors.statusWarning }]}>
+                    {`回退原因：${lastPlayedSpeech.detail}`}
+                  </Text>
+                ) : null}
               </>
             )
           }

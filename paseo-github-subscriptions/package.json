@@ -29,6 +29,7 @@
     "@getpaseo/client": "0.15.0",
     "@getpaseo/plugin": "0.15.0",
     "@getpaseo/protocol": "0.15.0",
+    "node-edge-tts": "1.2.12",
     "zod": "4.4.3"
   },
   "devDependencies": {
