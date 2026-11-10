@@ -9,7 +9,7 @@ export interface FinalizePort {
   label(id: string): Promise<void>;
 }
 export const issueOf = (agent: Agent) => agent.labels?.need || agent.labels?.issue || null;
-export async function finalize(port: FinalizePort, id: string): Promise<{ ok: boolean; reason: string | null; issue: string | null; steps: Step[] }> {
+export async function finalize(port: FinalizePort, id: string, options: { pinHandled?: boolean; onPinHandled?: () => Promise<void> } = {}): Promise<{ ok: boolean; reason: string | null; issue: string | null; steps: Step[] }> {
   const steps: Step[] = [];
   let issue: string | null = null;
   try {
@@ -25,7 +25,8 @@ export async function finalize(port: FinalizePort, id: string): Promise<{ ok: bo
       catch { steps.push({ name, status: 'failed' }); throw Error(`${name}失败`); }
     };
     await step('detach', !!a.labels?.['paseo.parent-agent-id'], () => port.detach(id));
-    await step('pin', !w.pinnedAt, () => port.pin(w.id));
+    await step('pin', !options.pinHandled && !w.pinnedAt, () => port.pin(w.id));
+    if (!options.pinHandled) await options.onPinHandled?.();
     await step('label', !w.labels?.includes('主会话'), () => port.label(w.id));
     const readback = await port.agent(id);
     if (!readback || readback.labels?.['paseo.parent-agent-id']) { steps.push({ name: 'readback', status: 'failed' }); throw Error('解绑读回失败'); }

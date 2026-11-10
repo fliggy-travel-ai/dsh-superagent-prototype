@@ -43,3 +43,12 @@ test('假守护进程：使用守护进程接口解绑、置顶、打标签并�
   assert.equal((await finalize(finalizePort(client as never), 'a')).ok, true);
   assert.deepEqual(f.calls, ['detach', 'pin', 'label']);
 });
+test('置顶后标签失败，用户取消置顶后重试不再次置顶', async () => {
+  const f = fixture(); let handled = false; const label = f.port.label;
+  f.port.label = async () => { throw Error('failed'); };
+  const first = await finalize(f.port, 'a', { onPinHandled: async () => { handled = true; } });
+  assert.equal(first.ok, false); assert.equal(handled, true);
+  f.workspace.pinnedAt = null; f.port.label = label;
+  assert.equal((await finalize(f.port, 'a', { pinHandled: handled })).ok, true);
+  assert.equal(f.calls.filter(c => c === 'pin').length, 1); assert.equal(f.workspace.pinnedAt, null);
+});
