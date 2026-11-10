@@ -221,6 +221,7 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 - 会话：`--title '【需求名】【主会话】…' --mode bypassPermissions（claude 系 provider；codex 用 full-access；glm 系用蛇形 bypass_permissions——驼峰写法会被拒）`，标签 `need=<单号>`、`role=main` 必须有（这是插件收尾的触发条件）。`agent run --label` 会静默丢弃标签：用 create_agent 的 labels，或创建后 `agent update <id> --label` 补上，并读回。派完 `agent open <id>` 让它出现在桌面列表（插件不做这步），会话信息写回 issue。
 - 收尾由插件做：Mac mini 上带 `role=main` 和 `need`/`issue` 标签的会话，插件自动解除父会话绑定、置顶工作区、打「主会话」工作区标签，并发 `main_finalized`。总控只读回：`agent inspect` 里没有 `paseo.parent-agent-id`；工作区列表里该工作区已置顶且有「主会话」标签。读回不对才手工补做（`agent detach`；Mac mini 本机跑 pin-and-label.py），或在 Mac mini 调插件 RPC `dispatch.finalize {agentId}` 重试。插件首次启用前已有的主会话、MacBook 上的主会话不在插件范围内，仍手工收尾。
 - 任务说明写清：要读的文件、用户原话和已定口径、范围和不做的事、底线、记录要求、第一条回复要说什么。
+- 插件 RPC 调用方法（只在 Mac mini 本机）：`cd ~/.paseo/local-plugins/github-subscriptions && node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/rpc.ts <方法> '<JSON 输入>'`。只允许 `capacity.snapshot`、`capacity.clear-review`、`dispatch.finalize` 和已登记的只读快照。
 ```
 
 ### 3.2 替换后的第 8 节
@@ -228,7 +229,7 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 ```markdown
 ## 8. 插件 lb_exception 的处理（Claude 间换号由插件负责）
 
-- 分工：开发自动化插件在 Mac mini 的 Claude 账号之间自动换号：五小时额度用尽或周额度 ≤5% 时，按实时额度和容量（Max 4 个、Pro 2 个，档次取实时额度报告）选目标，新会话正常后改挂子会话、归档旧会话，发 `main_migrated`。总控不再手工做 Claude 间迁移，不再估算容量预算。收到 `main_migrated` 只更新巡检名单和 issue，不通知用户。规则处理不了时插件发 `lb_exception`。
+- 分工：开发自动化插件在 Mac mini 的 Claude 账号之间自动换号：五小时额度用尽或周额度 ≤5% 时，按实时额度和容量（Max 4 个、Pro 2 个，档次取实时额度报告）选目标，新会话正常后改挂子会话、归档旧会话，发 `main_migrated`。总控不再手工做 Claude 间迁移，也不再手工估算各账号能承接几个会话。收到 `main_migrated` 只更新巡检名单和 issue，不通知用户。规则处理不了时插件发 `lb_exception`。
 - 信息来源：本机总控不直接收 webhook。来源是 Grok 总控转达，或巡检时读 Mac mini 的 `~/.paseo/github-subscriptions/capacity/migrations.jsonl`（迁移审计）和 `capacity/migrations-state.json`（进行中和待审记录）。额度一律实时查（`paseo usage ls` 或插件 `capacity.snapshot`），不凭历史记录或旧报错判断。
 - 影子模式（`shadow=true`）的例外只记录，不处理。
 
@@ -309,3 +310,5 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 - 20:01 SGT Yang 确认。总控实际采用的弹窗唤醒 routine 与第 1 部分有一处不同：按 Yang 口径**不设“只能本人回答”类别、不看 `audience.ownerOnly`**；是否代答由总控按手册和选择画像判断，每日任务、复盘审阅和手册写明须本人的事项照旧不代答。另删除了通知「DSH 进度页」的条款（该 bot 已停用）。插件仍按定稿发送 `audience` 字段，总控不使用不影响兼容。
 - 20:02:49 SGT 总控停掉 quota-watch 进程，`/tmp/quota-watch.lock` 可获取；负载均衡 bot 整个停用（Yang：规则要写全，不保留“规则管不到的例外”这一职责）。
 - 20:03 SGT 插件主会话：Mac mini `machine.json` 备份后设 `escalation.quotaAlerts.enabled=false`、`capacity.migration.mode=live`，`capacity/migrations-state.json` 不存在（没有进行中或待审迁移），重载插件；读回 `INSTANCE_ROLE=null`、cloud-session available、新实例日志无错误、`capacity.snapshot` 正常。
+- 21:31 SGT 首次真实换号成功（第 4 部分第 5 步）：插件主会话 `64eb4b07` 在 claude-8 五小时额度用尽，插件自动换到 claude-4 新会话 `83157ab8`。步骤全部成功，没有回滚；`migrations-state.json` 收尾后为 `{}`，审计 `result=migrated`，`main_migrated` 已入队。
+- 21:40 SGT 经 Yang 同意应用第 3 部分（第 4 部分第 6 步，本机部分）：Mac mini 上 9 个账号目录的 `skills/super-agent/SKILL.md` 第 4、8 节已替换，其他章节不动，备份为同目录 `SKILL.md.bak-1808-20261110`。应用前对修改稿补两处：第 4 节加插件 RPC 调用命令（3.4 的前提已由 `scripts/rpc.ts` 满足，部署目录实测可调）；第 8 节“容量预算”改为“手工估算各账号能承接几个会话”，以满足读回标准。读回：9 个副本都不再含“容量预算”“通知负载均衡 bot”、手工 `agent detach` 和 daemon 置顶说明，第 8 节标题为“插件 lb_exception 的处理”。Grok 侧材料（`00-总控-SKILL.md` 第 4、8 节、`00-总控-profile.md`、`README.md`、`dsh-patrol.md` 第 5 条）由 Grok 总控同步。
