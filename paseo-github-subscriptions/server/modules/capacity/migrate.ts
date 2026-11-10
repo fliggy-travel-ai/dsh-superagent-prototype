@@ -46,7 +46,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   const moved: string[] = [];
   const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
     const started = Date.now();
-    try { const value = await action(); await port.audit({ ...result, step: name, ok: true, elapsedMs: Date.now() - started }); return value; }
+    try { const value = await action(); await port.audit({ ...result, step: name, ok: true, elapsedMs: Date.now() - started }).catch(() => {}); return value; }
     catch (error) { await port.audit({ ...result, step: name, ok: false, elapsedMs: Date.now() - started }).catch(() => {}); throw error; }
   };
   try {
@@ -84,13 +84,21 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
     await port.notify('main_migrated', { ...result, newAgentId: newId, toProvider: chosen.provider });
     return 'migrated';
   } catch (error) {
+    let rollbackIncomplete = false;
     if (!archived && !archiveUncertain) {
-      for (const id of moved) await port.update(id, { 'paseo.parent-agent-id': agent.id, 'paseo.parent-server-id': port.serverId() }).catch(() => {});
-      if (newId) await port.archive(newId).catch(() => {});
-      if (oldResume !== undefined) await port.setAutoResume(agent.id, oldResume).catch(() => {});
+      for (const id of moved) {
+        try {
+          const serverId = port.serverId();
+          await port.update(id, { 'paseo.parent-agent-id': agent.id, 'paseo.parent-server-id': serverId });
+          const child = await port.read(id);
+          if (child?.labels['paseo.parent-agent-id'] !== agent.id || child.labels['paseo.parent-server-id'] !== serverId) rollbackIncomplete = true;
+        } catch { rollbackIncomplete = true; }
+      }
+      if (newId && !rollbackIncomplete) await port.archive(newId).catch(() => { rollbackIncomplete = true; });
+      if (oldResume !== undefined) await port.setAutoResume(agent.id, oldResume).catch(() => { rollbackIncomplete = true; });
     }
     const known = ['lease_conflict', 'stop_unconfirmed', 'finalize_failed', 'output_unknown', 'no_healthy_target', 'child_readback_failed', 'resume_unavailable', 'source_unavailable', 'server_unavailable', 'list_incomplete', 'stopped', 'archive_unknown', 'archive_failed'];
-    const failure = error instanceof Error && known.includes(error.message) ? error.message : 'operation_failed';
+    const failure = rollbackIncomplete ? 'rollback_incomplete' : error instanceof Error && known.includes(error.message) ? error.message : 'operation_failed';
     await port.audit({ ...result, result: failure });
     await port.notify('lb_exception', { ...result, reason: failure }); return failure;
   } finally {

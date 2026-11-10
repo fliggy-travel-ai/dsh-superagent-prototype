@@ -1,6 +1,6 @@
 export type Tier = 'max' | 'pro';
 export interface Window { id?: string; remainingPct?: number | null; usedPct?: number | null; resetsAt?: string | null }
-export interface Report { id?: string; sourceId?: string; fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[]; details?: Array<{ id?: string; value?: unknown }> }; lastSuccessful?: unknown }
+export interface Report { id?: string; sourceId?: string; fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[]; details?: Array<{ id?: string; value?: unknown }> }; lastSuccessful?: { fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[] } } | null }
 export interface Input { provider: string; report?: Report; configuredTier?: Tier; warmup?: boolean; agents: Array<{ id: string; status: string }>; now: number; liveMaxAgeMinutes?: number; paceEnabled?: boolean }
 export function tierOf(label: string | null | undefined, configured?: Tier): { tier: Tier | null; reason: string | null } {
   let tier: Tier | null = null;
@@ -21,7 +21,8 @@ export function calculate(input: Input) {
   const at = Date.parse(report?.fetchedAt ?? '');
   const live = report?.report?.status === 'available' && Number.isFinite(at) && at <= now && now - at <= (input.liveMaxAgeMinutes ?? 10) * 60_000;
   const tierResult = tierOf(live ? report?.report?.planLabel : null, input.configuredTier);
-  const fiveHour = windowOf(report, 'five_hour'); const weekly = windowOf(report, 'weekly');
+  const displayed = !live && report?.lastSuccessful?.report ? { ...report, report: report.lastSuccessful.report } : report;
+  const fiveHour = windowOf(displayed, 'five_hour'); const weekly = windowOf(displayed, 'weekly');
   const eligible = live && tierResult.tier !== null && fiveHour !== null && weekly !== null;
   const tier = tierResult.tier;
   const baseCap = tier === 'max' ? 4 : tier === 'pro' ? 2 : 0;

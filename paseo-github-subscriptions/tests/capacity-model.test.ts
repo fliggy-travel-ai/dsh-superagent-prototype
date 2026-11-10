@@ -10,6 +10,8 @@ test('档次以实时 planLabel 为准，并排除冲突和未知 Max', () => {
 test('历史额度不参与决策，窗口未开始时 pace 为零', () => {
   const i = base(); i.report!.fetchedAt = new Date(now - 11 * 60_000).toISOString();
   assert.equal(calculate(i).canAdd, 0); assert.equal(calculate(i).live, false);
+  i.report!.report = { status: 'error' }; i.report!.lastSuccessful = { report: { status: 'available', windows: [{ id: 'five_hour', remainingPct: 72 }, { id: 'weekly', remainingPct: 55 }] } };
+  assert.equal(calculate(i).fiveHour?.remainingPct, 72); assert.equal(calculate(i).canAdd, 0);
   const j = base(); j.report!.report!.windows![0]!.resetsAt = null;
   assert.equal(calculate(j).pace, 0); assert.equal(calculate(j).canAdd, 4);
 });

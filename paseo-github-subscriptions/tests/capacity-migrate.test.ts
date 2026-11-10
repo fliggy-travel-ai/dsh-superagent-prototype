@@ -44,7 +44,7 @@ test('租约被覆盖时不停止或归档会话', async () => {
 });
 test('改挂读回失败时恢复子会话和原会话的自动继续', async () => {
   const f = fixture(); const read = f.port.read;
-  f.port.read = async id => id === 'child' ? { ...f.agents.get('child')!, labels: {} } : read(id);
+  let reads = 0; f.port.read = async id => id === 'child' && reads++ === 0 ? { ...f.agents.get('child')!, labels: {} } : read(id);
   assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'child_readback_failed');
   assert.equal(f.agents.get('child')!.labels['paseo.parent-agent-id'], 'old'); assert.equal(f.resume(), true);
   assert.ok(f.calls.includes('archive:new')); assert.equal(f.calls.includes('archive:old'), false);

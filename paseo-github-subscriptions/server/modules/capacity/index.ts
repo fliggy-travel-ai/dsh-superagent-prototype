@@ -14,9 +14,9 @@ import { isMainInstance, type Module } from '../types.ts';
 import { calculate, targets, type Report } from './model.ts';
 import { CapacitySchema, CAPACITY_DEFAULT, type CapacityConfig } from './config.ts';
 
-export async function snapshot(client: DaemonClient, home: string, config: CapacityConfig, sourceId = 'claude-accounts') {
+export async function snapshot(client: DaemonClient, home: string, config: CapacityConfig, sourceId = 'claude-accounts', deps?: { mapping: Map<string, string>; providers: string[] }) {
   const usage = new ContinuousUsage({ home, directory: join(home, 'github-subscriptions', 'quota'), renewal: false });
-  const [reports, mapping] = await Promise.all([client.listUsageReports(), accountMap(home, usage.discover)]);
+  const [reports, mapping] = await Promise.all([client.listUsageReports(), deps ? Promise.resolve(deps.mapping) : accountMap(home, usage.discover)]);
   const workspaces = new Set<string>(); let cursor: string | undefined;
   do {
     const page = await client.fetchWorkspaces({ includeBackground: true, page: { limit: 100, cursor } });
@@ -35,9 +35,9 @@ export async function snapshot(client: DaemonClient, home: string, config: Capac
     cursor = page.pageInfo.nextCursor;
   } while (true);
   const now = Date.now();
-  const accounts = [...providerEnvs(home).keys()].map(provider => {
+  const accounts = (deps?.providers ?? [...providerEnvs(home).keys()]).map(provider => {
     const key = mapping.get(provider);
-    const report = key ? reports.reports.find(r => (r.sourceId === sourceId || r.sourceId === 'claude') && r.id === `${r.sourceId}:${key}`) : undefined;
+    const report = key ? reports.reports.filter(r => (r.sourceId === sourceId || r.sourceId === 'claude') && r.id === `${r.sourceId}:${key}`).sort((a, b) => Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt))[0] : undefined;
     return calculate({ provider, report: report as Report | undefined, configuredTier: config.accounts[provider]?.tier, warmup: config.warmup.includes(provider), now, liveMaxAgeMinutes: config.liveMaxAgeMinutes, paceEnabled: config.pace,
       agents: agents.filter(a => !a.archivedAt && a.status !== 'closed' && !!a.workspaceId && workspaces.has(a.workspaceId) && a.provider.split('/')[0] === provider) });
   });
