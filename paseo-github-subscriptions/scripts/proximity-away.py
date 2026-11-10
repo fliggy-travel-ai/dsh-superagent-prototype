@@ -147,7 +147,8 @@ def main():
         manual = flag != previous_flag or modified != previous_mtime
         state = advance(state, target, rssi, seen, now, flag, manual, target_error)
         state['sample_error'] = sample_error
-        if state['flag'] != flag:
+        if state['flag'] != flag or not flag_path.exists():
+            # 标志文件缺失时 read_flag 按 '0' 处理，但插件要求两份状态一致，必须写出文件。
             flag_path.write_text(state['flag'] + '\n')
         previous_flag, previous_mtime = read_flag(flag_path)
         atomic_json(state_path, state)
