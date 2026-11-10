@@ -30,7 +30,6 @@ export const QuestionAnswerSchema = z.strictObject({
   answers: z.record(z.string(), z.array(z.string()).max(30)),
   otherAnswers: z.record(z.string(), z.string().max(2000)).optional(),
 });
-export const QuestionReadSchema = z.strictObject({ id: z.string(), fingerprint: z.string() });
 export const QuestionSchema = BrowserQuestionSchema.extend({
   source: z.enum(['native', 'browser']), title: z.string(), instanceId: z.string().optional(),
   url: z.string().optional(), at: z.string(),
@@ -75,15 +74,12 @@ export type QuestionPrompt = z.infer<typeof QuestionPromptSchema>;
 export type BrowserQuestion = z.infer<typeof BrowserQuestionSchema>;
 export type Question = z.infer<typeof QuestionSchema>;
 export type QuestionAnswer = z.infer<typeof QuestionAnswerSchema>;
-export type QuestionRead = z.infer<typeof QuestionReadSchema>;
 export type BrowserDecision = z.infer<typeof BrowserDecisionSchema>;
 export type PresenceSnapshot = z.infer<typeof PresenceSnapshotSchema>;
-export const isUnreadAutomaticAnswer = (question: Question) => question.state === 'resolved' && question.answer?.source === 'automatic' && !question.answer.readAt;
-export const isQuestionTodo = (question: Question) => !question.delegatedTo && (question.state !== 'resolved' || isUnreadAutomaticAnswer(question));
+export const isQuestionTodo = (question: Question) => !question.delegatedTo && question.state !== 'resolved';
 export const presenceSnapshot = defineRpc({ name: 'presence.snapshot', input: z.object({}), output: PresenceSnapshotSchema });
 export const presenceConfigure = defineRpc({ name: 'presence.configure', input: PresenceSettingsSchema, output: PresenceSnapshotSchema });
 export const presenceAnswer = defineRpc({ name: 'presence.answer', input: QuestionAnswerSchema, output: PresenceSnapshotSchema });
-export const presenceRead = defineRpc({ name: 'presence.read', input: QuestionReadSchema, output: PresenceSnapshotSchema });
 export const presenceLocal = defineRpc({ name: 'presence.local', input: z.object({}), output: PresenceObservationSchema });
 export const presenceLocalSpeech = defineRpc({ name: 'presence.local-speech', input: z.object({}), output: LocalSpeechStateSchema });
 export const presenceConfigureLocalSpeech = defineRpc({ name: 'presence.configure-local-speech', input: LocalSpeechInputSchema, output: PresenceSnapshotSchema });

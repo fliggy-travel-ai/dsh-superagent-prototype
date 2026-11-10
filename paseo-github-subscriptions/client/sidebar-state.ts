@@ -1,4 +1,3 @@
-import { isUnreadAutomaticAnswer } from '../shared/presence.ts';
 import type { useControlState, useStoreState } from './ui.tsx';
 
 let lastNonTodoPage = 'providers';
@@ -44,9 +43,8 @@ export function computeTodoCount(controlState: ReturnType<typeof useControlState
       !q.webRetry &&
       !activeBrowser.some(bq => bq.id === q.id || bq.fingerprint === q.fingerprint || bq.delegatedTo === q.id),
   ).length;
-  const unreadAuto = questions.filter(q => isUnreadAutomaticAnswer(q)).length;
   const webRetry = questions.filter(q => q.webRetry && q.state !== 'resolved').length;
   const stalled = controlState.stalled?.sessions.length ?? 0;
   const escalations = controlState.escalation?.pendingEvents.length ?? 0;
-  return webQuestions + nativeQuestions + unreadAuto + webRetry + stalled + escalations;
+  return webQuestions + nativeQuestions + webRetry + stalled + escalations;
 }

@@ -2,6 +2,7 @@ import { Runtime } from '../runtime.ts';
 import { BrowserBridge } from '../browser-bridge.ts';
 import { PresenceRuntime } from '../presence.ts';
 import { PresenceHosts, presencePort } from '../presence-port.ts';
+import { DEFAULT_LOCAL_CONFIRM_KEYWORDS } from '../questions.ts';
 import { StalledRuntime, STALLED_SCAN_INTERVAL_MS } from '../stalled.ts';
 import { stalledPort } from '../stalled-port.ts';
 import { sessionRoles } from './session-roles.ts';
@@ -29,6 +30,7 @@ export class MainServices {
   presenceHosts: PresenceHosts | null = null;
   escalation: EscalationRuntime | null = null;
   quiet: QuietRuntime | null = null;
+  ownerOnlyKeywords: readonly string[] = DEFAULT_LOCAL_CONFIRM_KEYWORDS;
   stalledPaused = false;
   private stalled: StalledRuntime | null = null;
   private stalledGeneration = 0;
@@ -51,7 +53,7 @@ export class MainServices {
     }, {
       browserCandidates: (instanceId, sessionId) => this.presence?.browserCandidates(instanceId, sessionId) ?? [],
       isSessionObserved: (instanceId, sessionId) => this.presence?.isSessionObserved(instanceId, sessionId) ?? false,
-      delegateBrowserAnswer: (id, answers, otherAnswers, source) => this.presence?.delegateBrowserAnswer(id, answers, otherAnswers, source) ?? false,
+      delegateBrowserAnswer: (id, answers, otherAnswers) => this.presence?.delegateBrowserAnswer(id, answers, otherAnswers) ?? false,
       cancelBrowserDecision: id => this.presence?.cancelBrowserDecision(id),
       browserState: id => this.presence?.browserState(id) ?? null,
       noteWebResult: input => this.presence?.noteWebResult(input),
@@ -177,7 +179,12 @@ export class MainServices {
     const stopped = this.guard(); if (stopped) return stopped;
     this.presenceInitializing ??= (async () => {
       const [connection, hosts] = await Promise.all([this.daemon.ready(), this.readyHosts()]);
-      this.presence = new PresenceRuntime(this.directory, presencePort(connection, hosts), Date.now, this.webLedger);
+      this.presence = new PresenceRuntime(this.directory, {
+        ...presencePort(connection, hosts),
+        enqueueExternal: question => this.escalation?.enqueueExternal(question),
+        closeExternal: id => this.escalation?.closeExternal(id),
+        ownerOnlyKeywords: () => this.ownerOnlyKeywords,
+      }, Date.now, this.webLedger);
       await this.presence.start();
       if (this.stopped) await this.presence.stop();
       return this.presence;

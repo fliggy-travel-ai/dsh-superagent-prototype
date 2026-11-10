@@ -2,9 +2,11 @@ import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 import { QuestionPromptSchema } from './presence.ts';
 
+/** `'read'` 已废弃，仅保留用于兼容解析尚未升级的远端主机待办快照；新代码不再写入。 */
 export const TodoTypeSchema = z.enum(['ask', 'native', 'web', 'stall', 'esc', 'read']);
 export type TodoType = z.infer<typeof TodoTypeSchema>;
 
+/** `'代答未读'` 已废弃，仅保留用于兼容解析尚未升级的远端主机待办快照；新代码不再写入。 */
 export const TodoLabelSchema = z.enum(['网页提问', '会话提问', '网页等待', '停滞会话', '升级事件', '代答未读']);
 export type TodoLabel = z.infer<typeof TodoLabelSchema>;
 
@@ -26,6 +28,7 @@ export const TodoItemSchema = z.strictObject({
     fingerprint: z.string().min(1),
     prompts: z.array(QuestionPromptSchema),
   }).optional(),
+  /** @deprecated 仅保留用于兼容解析尚未升级的远端主机待办快照；新代码不再写入。 */
   readReceipt: z.strictObject({
     questionId: z.string().min(1),
     fingerprint: z.string().min(1),
@@ -34,9 +37,11 @@ export const TodoItemSchema = z.strictObject({
 });
 export type TodoItem = z.infer<typeof TodoItemSchema>;
 
+/** `'auto-answer'` 已废弃，仅保留用于兼容解析尚未升级的远端主机待办快照；新代码不再写入。 */
 export const TodoLogKindSchema = z.enum(['web-approval', 'auto-answer', 'escalation', 'quiet-merge']);
 export type TodoLogKind = z.infer<typeof TodoLogKindSchema>;
 
+/** `'离线代答'` 已废弃，仅保留用于兼容解析尚未升级的远端主机待办快照；新代码不再写入。 */
 export const TodoLogLabelSchema = z.enum(['网页权限点击', '离线代答', '升级投递', '子会话归并']);
 export type TodoLogLabel = z.infer<typeof TodoLogLabelSchema>;
 
@@ -95,11 +100,6 @@ export const TodoActionInputSchema = z.strictObject({
       questionId: z.string().min(1),
       answers: z.record(z.string(), z.array(z.string()).max(30)),
       otherAnswers: z.record(z.string(), z.string().max(2000)).optional(),
-    }),
-    z.strictObject({
-      type: z.literal('read'),
-      questionId: z.string().min(1),
-      fingerprint: z.string().min(1),
     }),
     z.strictObject({
       type: z.literal('ack-escalation'),

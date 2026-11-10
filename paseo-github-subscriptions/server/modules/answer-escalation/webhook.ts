@@ -2,6 +2,13 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { Notice } from '../../notify/engine.ts';
+import {
+  classifyAudience,
+  extractQuestionPrompts,
+  toEscalationPrompts,
+  type AnswerVia,
+  type OwnerOnlyOptions,
+} from '../../questions.ts';
 
 const exec = promisify(execFile);
 
@@ -22,15 +29,82 @@ export type WebhookConfig = z.infer<typeof WebhookConfigSchema>;
 
 export interface WebhookCredentials { url: string; auth: string }
 
+export interface AskedExtraContext extends OwnerOnlyOptions {
+  serverId?: string | null;
+  needId?: string | null;
+  presence?: {
+    mode: 'online' | 'offline' | 'unknown';
+    source: 'bluetooth' | 'manual' | 'unavailable';
+  } | null;
+}
+
+export function buildAskedExtra(notice: Notice, context?: AskedExtraContext): Record<string, unknown> {
+  const d = (notice.data && typeof notice.data === 'object' ? notice.data : null) as Record<string, unknown> | null;
+  const isBrowserOnly = !notice.agentId || d?.source === 'browser';
+  const isCloudSession = !isBrowserOnly && Boolean(
+    notice.provider === 'cloud-session' ||
+    d?.provider === 'cloud-session' ||
+    context?.agentLabels?.['cloud-session.id'] ||
+    typeof (d?.metadata as Record<string, unknown> | undefined)?.webSessionId === 'string',
+  );
+  const answerVia: AnswerVia = isBrowserOnly ? 'browser-only' : isCloudSession ? 'cloud-session' : 'paseo-permission';
+  const rawPrompts = extractQuestionPrompts(notice.data);
+  const requestName = typeof d?.name === 'string' ? d.name : null;
+  const prompts = toEscalationPrompts(rawPrompts, { requestName, answerVia });
+  const workspaceTitle = context?.workspaceTitle !== undefined
+    ? context.workspaceTitle
+    : typeof d?.workspaceTitle === 'string'
+      ? d.workspaceTitle
+      : null;
+  const audience = classifyAudience(rawPrompts, {
+    workspaceTitle: workspaceTitle ?? notice.title,
+    agentLabels: context?.agentLabels,
+    parentLabels: context?.parentLabels,
+    localKeywords: context?.localKeywords,
+  });
+  const needId = context?.needId !== undefined
+    ? context.needId
+    : context?.agentLabels?.need ?? context?.agentLabels?.issue ?? context?.parentLabels?.need ?? context?.parentLabels?.issue ?? null;
+  const requestId = notice.permissionId ?? notice.requestId ?? (typeof d?.id === 'string' ? d.id : null);
+  return {
+    serverId: context?.serverId ?? null,
+    needId: needId ?? null,
+    workspaceTitle: workspaceTitle ?? null,
+    requestId: requestId ?? null,
+    answerVia,
+    prompts,
+    audience,
+    presence: context?.presence ?? null,
+    features: ['prompts', 'audience', 'serverId'],
+    ...(isBrowserOnly && d
+      ? {
+          ...(d.instanceId !== undefined ? { instanceId: d.instanceId } : {}),
+          ...(d.sessionId !== undefined ? { sessionId: d.sessionId } : {}),
+          ...(d.url !== undefined ? { url: d.url } : {}),
+          ...(typeof d.id === 'string' && typeof d.fingerprint === 'string'
+            ? { correlationKey: `browser:${d.id}:${d.fingerprint}` }
+            : {}),
+        }
+      : {}),
+  };
+}
+
 export function webhookPayload(notice: Notice): Record<string, unknown> {
-  const { target, requestId, key, ...event } = notice;
+  const { target, requestId, key, extra, ...event } = notice;
+  const askedDefaults = notice.event === 'asked' ? buildAskedExtra(notice) : undefined;
+  const correlationKey =
+    (typeof extra?.correlationKey === 'string' ? extra.correlationKey : undefined) ??
+    (typeof askedDefaults?.correlationKey === 'string' ? askedDefaults.correlationKey : undefined) ??
+    key;
   return {
     schemaVersion: 1,
     source: 'paseo-event-notifications',
     ...event,
+    ...(askedDefaults ?? {}),
+    ...(extra ?? {}),
     agentId: notice.agentId || null,
     paseo_agent_id: notice.agentId || null,
-    correlationKey: key,
+    correlationKey,
     ...(notice.events ? { events: notice.events.map(webhookPayload) } : {}),
   };
 }

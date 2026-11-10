@@ -285,9 +285,6 @@ function makeFixture() {
     answerQuestion: async input => {
       actions.push({ target: 'local:answer', payload: input });
     },
-    markQuestionRead: async input => {
-      actions.push({ target: 'local:read', payload: input });
-    },
     ackEscalation: async input => {
       actions.push({ target: 'local:ack-escalation', payload: input });
     },
@@ -303,14 +300,14 @@ function makeFixture() {
   };
 }
 
-test('todo.local 收网页提问、会话提问（原生待答）、网页等待、停滞会话、升级事件、代答未读，不收已回答或已转网页的原生提问', async () => {
+test('todo.local 收网页提问、会话提问（原生待答）、网页等待、停滞会话、升级事件，不收已回答或旧代答记录', async () => {
   const { runtime } = makeFixture();
   const local = await runtime.local();
   assert.equal(local.hostId, 'srv-mini');
   assert.equal(local.hostName, 'Mac mini');
   assert.equal(local.accountsNeedingAttention, 1);
 
-  // 检查 6 条本机待办：网页提问、会话提问、升级事件、网页等待、停滞会话、代答未读（共 6 类）
+  // 检查 5 条本机待办：网页提问、会话提问、升级事件、网页等待、停滞会话（已删除代答未读）
   assert.deepEqual(
     local.items.map(item => [item.type, item.label, item.sessionTitle]),
     [
@@ -318,8 +315,7 @@ test('todo.local 收网页提问、会话提问（原生待答）、网页等待
       ['native', '会话提问', '【整合】原生提问'],
       ['esc', '升级事件', '【额度看板】改版'],
       ['web', '网页等待', '环境 12 · 文档迁移'],
-      ['stall', '【搜索排序】实验'].length ? ['stall', '停滞会话', '【搜索排序】实验'] : [],
-      ['read', '代答未读', '【订单退款】联调'],
+      ['stall', '停滞会话', '【搜索排序】实验'],
     ],
   );
   const nativeItem = local.items.find(item => item.type === 'native')!;
@@ -331,13 +327,14 @@ test('todo.local 收网页提问、会话提问（原生待答）、网页等待
   assert.equal(nativeItem.ageText, '等待 10 分钟');
   assert.equal(nativeItem.agentId, 'agent-native-1');
   assert.equal(nativeItem.question, undefined, '会话提问只显示不作答，不附带 question 作答表单');
-  // 确认不包含已读代答 q-auto-read
+  // 确认不包含旧代答记录 q-auto-unread / q-auto-read
+  assert.ok(!local.items.some(item => item.sessionTitle.includes('【订单退款】联调')));
   assert.ok(!local.items.some(item => item.sessionTitle.includes('【已读】')));
 
-  // 检查处理记录：包含子会话归并、网页权限点击、离线代答、升级投递
+  // 检查处理记录：包含子会话归并、网页权限点击、升级投递（不再产生离线代答记录）
   assert.deepEqual(
     local.logs.map(log => log.kind),
-    ['quiet-merge', 'web-approval', 'auto-answer', 'escalation', 'auto-answer'],
+    ['quiet-merge', 'web-approval', 'escalation'],
   );
 });
 
@@ -500,7 +497,7 @@ test('todo.list 合并两台主机待办与处理记录，按类别顺序排列'
   const { runtime } = makeFixture();
   const merged = await runtime.list();
   assert.equal(merged.warning, null);
-  assert.equal(merged.items.length, 7);
+  assert.equal(merged.items.length, 6);
   assert.ok(merged.items.some(item => item.hostName === 'Mac mini'));
   assert.ok(merged.items.some(item => item.hostName === 'MacBook'));
   assert.deepEqual(
@@ -519,7 +516,7 @@ test('todo.list 远端主机超时时只返回本机待办并给出明确提示�
   const { runtime, setRemoteFail } = makeFixture();
   setRemoteFail(true);
   const merged = await runtime.list();
-  assert.equal(merged.items.length, 6);
+  assert.equal(merged.items.length, 5);
   assert.ok(merged.items.every(item => item.hostId === 'srv-mini'));
   assert.equal(merged.warning, 'MacBook 未响应，以下只含 Mac mini 的待办');
   assert.equal(merged.hosts.find(h => h.hostId === 'srv-book')?.responded, false);
@@ -529,10 +526,10 @@ test('todo.act 本机操作直接执行，跨主机操作经 core/hosts 转发',
   const { runtime, actions } = makeFixture();
   const res1 = await runtime.act({
     hostId: 'srv-mini',
-    action: { type: 'read', questionId: 'q-auto-unread', fingerprint: 'fp-auto-1' },
+    action: { type: 'answer', questionId: 'q-web-1', answers: { '回调失败时如何重试？': ['指数退避，最多 5 次'] } },
   });
   assert.equal(res1.ok, true);
-  assert.equal(actions[0]?.target, 'local:read');
+  assert.equal(actions[0]?.target, 'local:answer');
 
   const res2 = await runtime.act({
     hostId: 'srv-book',
@@ -569,7 +566,7 @@ test('todo.list 按主机 ID 与条目 ID 去重，防止本机当远端时待�
   // hostId 为 local、空字符串或未知主机时拒绝执行
   const badLocal = await runtime.act({
     hostId: 'local',
-    action: { type: 'read', questionId: 'q-auto-unread', fingerprint: 'fp-auto-1' },
+    action: { type: 'answer', questionId: 'q-web-1', answers: { '回调失败时如何重试？': ['指数退避，最多 5 次'] } },
   });
   assert.equal(badLocal.ok, false);
 
@@ -1393,7 +1390,6 @@ test('自动结束的升级事件不在待办中，处理记录写明结束原�
     remoteLocal: async () => { throw new Error('unused'); },
     remoteAct: async () => { throw new Error('unused'); },
     answerQuestion: async () => ({}),
-    markQuestionRead: async () => ({}),
   });
   const local = await runtime.local();
   assert.deepEqual(local.items, []);
@@ -1430,7 +1426,7 @@ test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返�
   // 1. 首次读取缓存远端待办，并附带 timings
   const first = await runtime.list();
   assert.equal(remoteCalls, 1);
-  assert.equal(first.items.length, 7);
+  assert.equal(first.items.length, 6);
   assert.equal(typeof (first as any).timings?.localMs, 'number');
   assert.equal(typeof (first as any).timings?.totalMs, 'number');
 
@@ -1438,7 +1434,7 @@ test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返�
   currentNow += 5_000;
   const cached = await runtime.list();
   assert.equal(remoteCalls, 1, '缓存有效期内不应重复请求远端 todo.local');
-  assert.equal(cached.items.length, 7);
+  assert.equal(cached.items.length, 6);
 
   // 3. 超过常规缓存 TTL（+20 秒），但未超过 60 秒离线/慢响应上限，此时远端挂起 -> list 立即返回缓存结果
   currentNow += 20_000;
@@ -1446,19 +1442,19 @@ test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返�
   const t0 = Date.now();
   const slowFallback = await runtime.list();
   assert.ok(Date.now() - t0 < 400, '远端挂起时 todo.list 应立即返回缓存结果');
-  assert.equal(slowFallback.items.length, 7);
+  assert.equal(slowFallback.items.length, 6);
   assert.equal(slowFallback.warning, null);
 
   // 4. 远端主机短暂离线（仍未超 60 秒缓存上限） -> 沿用缓存不告警
   remoteOnline = false;
   const offlineFallback = await runtime.list();
-  assert.equal(offlineFallback.items.length, 7);
+  assert.equal(offlineFallback.items.length, 6);
   assert.equal(offlineFallback.warning, null);
 
   // 5. 超过 60 秒缓存上限且远端仍离线 -> 丢弃过期缓存并提示未响应
   currentNow += 45_000;
   const expired = await runtime.list();
-  assert.equal(expired.items.length, 6);
+  assert.equal(expired.items.length, 5);
   assert.equal(expired.warning, 'MacBook 未响应，以下只含 Mac mini 的待办');
   releaseHang?.();
 });
@@ -1502,7 +1498,7 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   // 1. 冷启动无任何缓存，远端耗时 220ms (> 50ms 预算)：应等待远端完成，不误报“MacBook 未响应”
   const cold = await runtime.list();
   assert.equal(cold.warning, null, '冷启动无缓存时应等待远端返回，不应因 150ms/50ms 预算误报未响应');
-  assert.equal(cold.items.length, 7);
+  assert.equal(cold.items.length, 6);
   assert.equal(remoteCalls, 1);
 
   // 2. 验证缓存时间记录的是读取开始时刻（t0），而非完成时刻（t0 + 220ms）：
@@ -1539,7 +1535,7 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   // 先触发处理前的慢读取（50ms 超时回退旧缓存，旧读取仍在后台在途）
   const beforeAct = await runtime.list();
   assert.equal(beforeAct.warning, null);
-  assert.equal(beforeAct.items.length, 7);
+  assert.equal(beforeAct.items.length, 6);
 
   // 执行远端 act 成功
   remoteEscalationHandled = true;
@@ -1558,10 +1554,63 @@ test('1737-todo-latency 审阅修复：冷启动无缓存时等待慢远端不�
   releaseOldRead();
   await new Promise(resolve => setTimeout(resolve, 20));
 
-  // 等待处理后的新读取（120ms）完成，再次 list() 应看到已移除 esc-remote-1 的新结果（6 条）
+  // 等待处理后的新读取（120ms）完成，再次 list() 应看到已移除 esc-remote-1 的新结果（5 条）
   await new Promise(resolve => setTimeout(resolve, 150));
   const afterNewRead = await runtime.list();
   assert.equal(afterNewRead.warning, null);
-  assert.equal(afterNewRead.items.length, 6, '旧版本在途读取应被丢弃，新读取完成后已处理待办应消失');
+  assert.equal(afterNewRead.items.length, 5, '旧版本在途读取应被丢弃，新读取完成后已处理待办应消失');
   runtime['port'].remoteLocal = origRemoteLocal;
+});
+
+test('远端旧版待办含 read/代答未读 与 auto-answer/离线代答 时仍能解析其余有效条目，旧条目自动丢弃', async () => {
+  const { port } = makeFixture();
+  const baseRemote = await port.remoteLocal('srv-book');
+  port.remoteLocal = async hostId => {
+    const snap = await (hostId === 'srv-book' ? Promise.resolve(baseRemote) : Promise.reject(new Error('unknown')));
+    return {
+      ...snap,
+      items: [
+        ...snap.items,
+        {
+          id: 'read:srv-book:legacy-q-1:fp-1',
+          type: 'read' as const,
+          label: '代答未读' as const,
+          hostId: 'srv-book',
+          hostName: 'MacBook',
+          sourceLabel: 'Paseo · MacBook',
+          sessionTitle: '旧版自动代答会话',
+          at: '2026-11-10T09:50:00.000Z',
+          ageText: '5 分钟前已代答',
+          text: '旧版已代答未读条目',
+          readReceipt: {
+            questionId: 'legacy-q-1',
+            fingerprint: 'fp-1',
+          },
+        },
+      ],
+      logs: [
+        ...snap.logs,
+        {
+          id: 'auto-answer:srv-book:legacy-q-1:fp-1',
+          at: '2026-11-10T09:50:00.000Z',
+          kind: 'auto-answer' as const,
+          label: '离线代答' as const,
+          hostId: 'srv-book',
+          hostName: 'MacBook',
+          detail: '旧版自动代答日志',
+        },
+      ],
+    };
+  };
+
+  const runtime = new TodoRuntime(port);
+  const merged = await runtime.list();
+  assert.equal(merged.warning, null, '远端快照含旧版枚举值时不应整包拒收报错');
+  const bookStatus = merged.hosts.find(h => h.hostId === 'srv-book');
+  assert.equal(bookStatus?.responded, true);
+  assert.equal(bookStatus?.error, null);
+  assert.ok(merged.items.some(i => i.hostId === 'srv-book'), '远端其余有效待办条目应正常保留');
+  assert.equal(merged.items.some(i => i.type === 'read' || i.label === '代答未读'), false, '远端旧版 read 条目应被丢弃');
+  assert.ok(merged.logs.some(l => l.hostId === 'srv-book'), '远端其余有效日志应正常保留');
+  assert.equal(merged.logs.some(l => l.kind === 'auto-answer' || l.label === '离线代答'), false, '远端旧版 auto-answer 日志应被丢弃');
 });

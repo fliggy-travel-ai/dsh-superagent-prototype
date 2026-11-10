@@ -1,4 +1,4 @@
-import { isQuestionTodo, isUnreadAutomaticAnswer, type PresenceSnapshot, type QuestionAnswer, type QuestionRead } from '../shared/presence.ts';
+import { isQuestionTodo, type PresenceSnapshot, type QuestionAnswer } from '../shared/presence.ts';
 import type { BrowserSnapshot } from '../shared/browser.ts';
 import type { StalledSnapshot } from '../shared/stalled.ts';
 import type { EscalationSnapshot } from '../shared/escalation.ts';
@@ -27,7 +27,6 @@ export interface TodoPort {
   remoteLocal(hostId: string): Promise<TodoLocalSnapshot>;
   remoteAct(hostId: string, input: TodoActionInput): Promise<TodoActionOutput>;
   answerQuestion(input: QuestionAnswer): Promise<unknown>;
-  markQuestionRead(input: QuestionRead): Promise<unknown>;
   ackEscalation?(input: { id: string; agentId?: string }): Promise<unknown>;
 }
 
@@ -117,7 +116,13 @@ export class TodoRuntime {
     const startedAt = this.now();
     const version = currentVersion;
     const promise = (async () => {
-      const remote = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
+      const parsed = TodoLocalSnapshotSchema.parse(await this.port.remoteLocal(hostId));
+      // 丢弃旧版远端主机发来的已废弃代答未读条目与离线代答日志，保留其余有效条目。
+      const remote: TodoLocalSnapshot = {
+        ...parsed,
+        items: parsed.items.filter(item => item.type !== 'read' && item.label !== '代答未读'),
+        logs: parsed.logs.filter(log => log.kind !== 'auto-answer' && log.label !== '离线代答'),
+      };
       if ((this.remoteVersion.get(hostId) ?? 0) === version) {
         this.remoteCache.set(hostId, { at: startedAt, expired: false, snapshot: remote });
       }
@@ -150,7 +155,7 @@ export class TodoRuntime {
 
     const allQuestions = presence?.questions ?? [];
     const activeBrowserQuestions = allQuestions.filter(
-      q => q.source === 'browser' && isQuestionTodo(q) && !isUnreadAutomaticAnswer(q),
+      q => q.source === 'browser' && isQuestionTodo(q),
     );
     const isDuplicatedByBrowserQuestion = (q: (typeof allQuestions)[number]): boolean =>
       activeBrowserQuestions.some(bq => {
@@ -164,45 +169,9 @@ export class TodoRuntime {
         return false;
       });
 
-    // 1. 网页提问（source === 'browser'）、会话提问（source === 'native' 待答，只显示不作答）& 5. 代答未读
+    // 1. 网页提问（source === 'browser'）、会话提问（source === 'native' 待答，只显示不作答）
     for (const q of allQuestions) {
-      if (q.answer?.source === 'automatic') {
-        const pickedSummary = Object.values(q.answer.answers).flat().join('、') || '推荐项';
-        logs.push({
-          id: `auto:${q.id}:${q.fingerprint}`,
-          at: q.at,
-          kind: 'auto-answer',
-          label: '离线代答',
-          hostId: self.id,
-          hostName: self.name,
-          detail: `${q.title || '会话'} · 选择推荐项“${pickedSummary}”`,
-        });
-      }
-
       if (!isQuestionTodo(q)) continue;
-
-      if (isUnreadAutomaticAnswer(q)) {
-        const pickedSummary = Object.values(q.answer?.answers ?? {}).flat().join('、') || '推荐项';
-        items.push({
-          id: `read:${self.id}:${q.id}:${q.fingerprint}`,
-          type: 'read',
-          label: '代答未读',
-          hostId: self.id,
-          hostName: self.name,
-          sourceLabel: `${q.source === 'browser' ? 'claude.ai 网页' : 'Paseo'} · ${self.name}`,
-          sessionTitle: q.title || '未命名会话',
-          at: q.at,
-          ageText: formatAge('', q.at, nowMs, '前').trim(),
-          text: `离线代答：选择了推荐项“${pickedSummary}”，是否生效未确认。`,
-          ...(q.url ? { url: q.url } : {}),
-          ...(q.source === 'native' ? { agentId: q.sessionId } : {}),
-          readReceipt: {
-            questionId: q.id,
-            fingerprint: q.fingerprint,
-          },
-        });
-        continue;
-      }
 
       // 云端提问在 Paseo 作答后网页提交未确认：Paseo 侧栏已不再列出它，在这里提示去原网页重试（不提供作答表单）。
       // 沿用“网页等待”标签，不新增枚举值：旧版插件严格校验远端待办，未知标签会让整包解析失败。
@@ -441,11 +410,13 @@ export class TodoRuntime {
     const mergeRemoteSnapshot = (host: { id: string; name: string; online: boolean }, remote: TodoLocalSnapshot) => {
       if (remote.hostId === local.hostId) return;
       for (const item of remote.items) {
+        if (item.type === 'read' || item.label === '代答未读') continue;
         if (seenItemIds.has(item.id)) continue;
         seenItemIds.add(item.id);
         items.push(item);
       }
       for (const log of remote.logs) {
+        if (log.kind === 'auto-answer' || log.label === '离线代答') continue;
         if (seenLogIds.has(log.id)) continue;
         seenLogIds.add(log.id);
         logs.push(log);
@@ -604,13 +575,6 @@ export class TodoRuntime {
           ...(action.otherAnswers ? { otherAnswers: action.otherAnswers } : {}),
         });
         return { ok: true, message: '已提交，等待网页确认' };
-      }
-      if (action.type === 'read') {
-        await this.port.markQuestionRead({
-          id: action.questionId,
-          fingerprint: action.fingerprint,
-        });
-        return { ok: true, message: '已读' };
       }
       if (action.type === 'ack-escalation') {
         if (!this.port.ackEscalation) {

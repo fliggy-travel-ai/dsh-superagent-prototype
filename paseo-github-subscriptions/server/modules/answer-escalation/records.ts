@@ -105,8 +105,8 @@ export class EscalationRecords {
 
   /** 记录还在等的会话：出错事件看成员会话，提问看未结束的请求；旧记录只看 agentId。 */
   private members(item: EscalationRecord): string[] {
-    if (item.event === 'error' && item.sessions?.length) return item.sessions.filter(s => !s.done).map(s => s.agentId);
-    if (item.requests?.length) return item.requests.filter(r => !r.done).map(r => r.agentId);
+    if (item.event === 'error' && item.sessions?.length) return item.sessions.filter(s => !s.done).map(s => s.agentId).filter(Boolean);
+    if (item.requests?.length) return item.requests.filter(r => !r.done).map(r => r.agentId).filter(Boolean);
     return item.agentId ? [item.agentId] : [];
   }
 

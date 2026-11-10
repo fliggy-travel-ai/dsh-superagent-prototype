@@ -200,28 +200,26 @@ test('归档检查读取所有分页，失败时隐藏无法确认的旧卡片',
   } finally { store.dispose(); }
 });
 
-test('已读写入不被较早快照覆盖，失败时保留未读状态', async () => {
-  const original = deferred<PresenceSnapshot>();
+test('客户端不再暴露 markQuestionRead，手动离线乐观更新原因显示通知总控', async () => {
   const initial = makePresence();
-  initial.questions[0].state = 'resolved';
-  initial.questions[0].answer = { source: 'automatic', answers: { '本次发布包含哪些模块？': ['仅后端'] } };
-  let rejectRead = false;
+  const writing = deferred<PresenceSnapshot>();
   const store = createControlStore({ rpc: (async (contract: { name: string }) => {
-    if (contract.name === 'presence.snapshot') return original.promise;
-    if (contract.name === 'presence.read') {
-      if (rejectRead) throw new Error('写入失败');
-      return { ...initial, questions: initial.questions.map(question => ({ ...question, answer: { ...question.answer, readAt: '2026-11-07T01:00:00Z' } })) };
-    }
+    if (contract.name === 'presence.snapshot') return initial;
+    if (contract.name === 'presence.configure') return writing.promise;
     return makeBrowser();
   }) as Parameters<typeof createControlStore>[0]['rpc'] });
   try {
-    const refresh = store.refresh();
-    await store.markQuestionRead({ id: 'q-1', fingerprint: 'f1' });
-    original.resolve(initial); await refresh;
-    assert.ok(store.getState().presence?.questions[0].answer?.readAt);
-    await store.refresh(); rejectRead = true;
-    await assert.rejects(store.markQuestionRead({ id: 'q-1', fingerprint: 'f1' }), /写入失败/);
-    assert.equal(store.getState().presence?.questions[0].answer?.readAt, undefined);
+    await store.refresh();
+    assert.equal('markQuestionRead' in store, false);
+    const pending = store.configurePresence({ ...initial.settings, mode: 'offline' });
+    assert.equal(store.getState().presence?.observation.reason, '手动离线：不播语音，通知总控');
+    writing.resolve({
+      ...initial,
+      settings: { ...initial.settings, mode: 'offline' },
+      observation: { mode: 'offline', observedAt: new Date(0).toISOString(), reason: '手动离线：不播语音，通知总控', source: 'manual' },
+    });
+    await pending;
+    assert.equal(store.getState().presence?.settings.mode, 'offline');
   } finally { store.dispose(); }
 });
 

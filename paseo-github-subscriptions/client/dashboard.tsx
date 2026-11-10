@@ -316,7 +316,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
       <View style={{ gap: 4 }}>
         <Text style={s.h1}>问题答复</Text>
         <Text style={s.muted}>
-          代答和升级是两套独立规则：问答模式决定是否代答，时段规则决定是否通知 Grok。同一道题可能先被代答，之后仍被升级。
+          插件不代答。问答模式控制是否播报语音提醒，升级通知按时段规则把未答提问发给总控（Grok），由总控按你的选择画像决定。
         </Text>
       </View>
 
@@ -358,7 +358,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
               <Chip label={presenceError ? '读取失败' : '正在读取'} tone={presenceError ? 'danger' : 'neutral'} />
             )
           }
-          description="会话向你提问时，等待本人回答或自动选推荐项。开关同时控制问答模式、蓝牙在场判定和语音提醒。"
+          description="会话向你提问时，插件不代答；在线时语音提醒，离线时不播语音并通知总控。开关同时控制问答模式、蓝牙在场判定和语音提醒。"
           kv={
             presenceModOff ? (
               <ModuleOffHint />
@@ -426,7 +426,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
           moduleId="answer.escalation"
           label="升级通知"
           featureEnabled={escalation?.enabled}
-          description="主会话有提问未回答时，按时段规则通知 Grok（不代答）。"
+          description="主会话有提问未回答时，按时段规则通知 Grok（不代答，代答由总控决定）。"
           kv={
             escModOff ? (
               <ModuleOffHint />
@@ -680,27 +680,6 @@ export function TodoItemCard({ item }: { item: TodoItem }) {
     }
   };
 
-  const markRead = async () => {
-    if (!item.readReceipt) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await control.actTodo({
-        hostId: item.hostId,
-        action: {
-          type: 'read',
-          questionId: item.readReceipt.questionId,
-          fingerprint: item.readReceipt.fingerprint,
-        },
-      });
-      if (!res.ok) setError(res.message || '标记已读未成功');
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const ackEscalation = async () => {
     if (!item.escalationId) return;
     setBusy(true);
@@ -792,9 +771,7 @@ export function TodoItemCard({ item }: { item: TodoItem }) {
                 if (item.agentId) openItemAgent(item.agentId);
               }}
             />
-          ) : (
-            <Btn small label="已读" busy={busy} onPress={() => void markRead()} />
-          )}
+          ) : null}
         </View>
       </View>
 
@@ -906,7 +883,6 @@ function TodoPage() {
                 ['web', `网页等待 ${countByType('web')}`],
                 ['stall', `停滞会话 ${stalledScanning && countByType('stall') === 0 ? '扫描中' : countByType('stall')}`],
                 ['esc', `升级事件 ${countByType('esc')}`],
-                ['read', `代答未读 ${countByType('read')}`],
               ] as const
             ).map(([key, label]) => (
               <Btn

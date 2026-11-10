@@ -64,12 +64,6 @@ export const todoModule: Module = {
         }
         return (await services.readyPresence()).answer(input);
       },
-      async markQuestionRead(input) {
-        if (!isRunning('answer.presence', true)) {
-          throw new Error('问答模式模块未启用');
-        }
-        return (await services.readyPresence()).markRead(input);
-      },
       async ackEscalation({ id }) {
         if (!services.escalation) return { ok: false };
         return { ok: services.escalation.acknowledge(id) };

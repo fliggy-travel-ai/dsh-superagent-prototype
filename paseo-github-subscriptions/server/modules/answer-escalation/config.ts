@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { DeliverySchema } from '../../../shared/escalation.ts';
 import { EscalationScheduleSchema, ImmediateWindowSchema, type EscalationSchedule } from '../../notify/schedule.ts';
+import { OwnerOnlyConfigSchema } from '../../questions.ts';
 import { WebhookConfigSchema } from './webhook.ts';
 
 /**
@@ -26,6 +27,8 @@ export const EscalationSectionSchema = z.strictObject({
   prefilter: z.strictObject({ command: z.string().min(1).default('/usr/bin/python3'), script: z.string().min(1) }).optional(),
   /** 旧插件状态目录，默认 `<Paseo 目录>/event-notifications`。 */
   legacyDirectory: z.string().min(1).optional(),
+  /** 可选：本机确认关键词覆盖（也可在 machine.json 顶层 ownerOnly.localKeywords 配置）。 */
+  ownerOnly: OwnerOnlyConfigSchema.optional(),
 });
 export type EscalationSection = z.infer<typeof EscalationSectionSchema>;
 export const ESCALATION_FALLBACK: EscalationSection = EscalationSectionSchema.parse({});
