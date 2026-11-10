@@ -7,6 +7,7 @@ import type { AgentPermissionRequest } from '@getpaseo/protocol/agent-types';
 import { AgentPermissionResponseSchema } from '@getpaseo/protocol/messages';
 import { ProviderInputSchema } from '@getpaseo/plugin/server/provider';
 import { PresenceRuntime, type PresencePort, type QuestionAgent } from '../server/presence.ts';
+import type { PresenceObservation } from '../shared/presence.ts';
 import {
   classifyAudience,
   DEFAULT_LOCAL_CONFIRM_KEYWORDS,
@@ -502,9 +503,9 @@ test('未知蓝牙状态与离线状态均保留人工待办，不自动代答',
   } finally { await setup.close(); }
 });
 
-test('过期蓝牙离线状态不能触发回答', async () => {
-  const setup = await fixture({ observe: async () => ({ mode: 'offline', observedAt: new Date(Date.now() - 121_000).toISOString(), reason: '旧状态', source: 'manual' }) });
-  try { setup.agents.push(agent()); await setup.runtime.refresh(); assert.equal(setup.runtime.snapshot().observation.mode, 'unknown'); assert.equal(setup.responses.length, 0); }
+test('过期蓝牙状态按没识别到处理：判离线，不能触发回答', async () => {
+  const setup = await fixture({ observe: async () => ({ mode: 'online', observedAt: new Date(Date.now() - 121_000).toISOString(), reason: '旧状态', source: 'bluetooth' }) });
+  try { setup.agents.push(agent()); await setup.runtime.refresh(); assert.equal(setup.runtime.snapshot().observation.mode, 'offline'); assert.equal(setup.responses.length, 0); }
   finally { await setup.close(); }
 });
 
@@ -1504,7 +1505,7 @@ test('1737-presence-fast-switch：scan 并行执行 observe/hosts/list，远程�
     trackConcurrency = true;
     await runtime.refresh();
     trackConcurrency = false;
-    assert.equal(maxConcurrentSteps, 3, 'scan 内的 observe、hosts、list 应同时并发执行');
+    assert.ok(maxConcurrentSteps >= 3, 'scan 内的 observe、hosts、list 应同时并发执行（自动模式按主机数并发 observe）');
 
     // 3. 超过 60 秒后缓存过期重新探测
     now += 15_000; // 累计 65s > 60s
@@ -1721,4 +1722,47 @@ test('PR #31 审阅项 2：configure 写盘期间启动的旧设置扫描不会�
     await runtime.stop();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('1808 自动模式：任一主机识别到设备即在线，其余情况一律离线', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'presence-merge-'));
+  let readings: Record<string, () => Promise<PresenceObservation>> = {};
+  let hostList = [{ id: 'srv_mini', name: 'Mac Mini', online: true }, { id: 'srv_macbook', name: 'MacBook', online: true }];
+  const observed: Array<string | null> = [];
+  const fresh = () => new Date().toISOString();
+  const port: PresencePort = {
+    list: async () => [], refresh: async () => null, respond: async () => {},
+    observe: async id => { observed.push(id); return readings[id ?? '']!(); },
+    speak: async () => ({ played: true, engine: 'neural' }), cancelSpeech: async () => {},
+    hosts: async () => structuredClone(hostList), selfId: () => 'srv_mini',
+  };
+  const runtime = new PresenceRuntime(dir, port);
+  readings = { srv_mini: async () => ({ mode: 'unknown', observedAt: null, reason: '状态文件不可用或无效', source: 'unavailable' }), srv_macbook: async () => ({ mode: 'online', observedAt: fresh(), reason: '蓝牙采样状态', source: 'bluetooth' }) };
+  await runtime.start();
+  try {
+    await runtime.configure({ mode: 'auto', paused: false, speechEnabled: true, sourceHostId: 'srv_macbook' });
+    await runtime.refresh(); await runtime.refresh();
+    assert.equal(runtime.snapshot().observation.mode, 'online');
+    assert.match(runtime.snapshot().observation.reason, /MacBook识别到设备/);
+
+    readings.srv_macbook = async () => { throw new Error('host_offline'); };
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().observation.mode, 'offline', '拿不到蓝牙状态不能算在线');
+    assert.match(runtime.snapshot().observation.reason, /MacBook：无法连接/);
+    assert.match(runtime.snapshot().observation.reason, /Mac Mini：状态文件不可用或无效/);
+
+    readings.srv_macbook = async () => ({ mode: 'offline', observedAt: fresh(), reason: '蓝牙采样状态', source: 'bluetooth' });
+    readings.srv_mini = async () => ({ mode: 'online', observedAt: fresh(), reason: '蓝牙采样状态', source: 'bluetooth' });
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().observation.mode, 'online', '任一主机识别到即在线');
+
+    hostList = [{ id: 'srv_mini', name: 'Mac Mini', online: true }, { id: 'srv_macbook', name: 'MacBook', online: false }];
+    readings.srv_mini = async () => ({ mode: 'unknown', observedAt: fresh(), reason: '设备未发现或蓝牙信号不可用', source: 'bluetooth' });
+    await runtime.refresh(); // 主机列表与读取并行更新，下一轮才用新列表
+    observed.length = 0;
+    await runtime.refresh();
+    assert.equal(runtime.snapshot().observation.mode, 'offline');
+    assert.match(runtime.snapshot().observation.reason, /MacBook：主机离线/);
+    assert.ok(!observed.includes('srv_macbook'), '离线主机不发起跨主机读取');
+  } finally { await runtime.stop(); }
 });

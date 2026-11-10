@@ -294,7 +294,7 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
   const settings = presence?.settings ?? null;
   const observedMode = presence?.observation.mode ?? 'unknown';
   const effectiveOnline = settings
-    ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode !== 'offline')
+    ? settings.mode === 'online' || (settings.mode === 'auto' && observedMode === 'online')
     : false;
   const localHostId = presence?.hosts[0]?.id ?? null;
   const lastPlayedSpeech = presence?.speech
