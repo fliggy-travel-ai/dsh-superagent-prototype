@@ -411,7 +411,15 @@ function AnswerPage({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
               <Text style={s.small}>正在读取…</Text>
             ) : (
               <>
-                <Text style={s.small}>{presence.observation.reason || '未配置蓝牙设备'}</Text>
+                {presence.observation.hosts?.length ? (
+                  presence.observation.hosts.map(host => (
+                    <Text key={host.name} style={s.small}>
+                      {host.name}：{host.mode === 'online' ? '已识别到锚定设备' : `未识别（${host.reason}）`}
+                    </Text>
+                  ))
+                ) : (
+                  <Text style={s.small}>{presence.observation.reason || '未配置蓝牙设备'}</Text>
+                )}
                 <Text style={s.small}>
                   {settings.mode === 'auto' ? '问答模式正在跟随蓝牙' : '问答模式当前为手动'}
                 </Text>
