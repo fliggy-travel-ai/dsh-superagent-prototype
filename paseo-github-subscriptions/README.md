@@ -32,7 +32,7 @@ macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app
 - 每仓库读取 Issue、对话评论、代码评论和最近 100 条 Actions runs。详情流支持分页、五秒重叠窗口、ETag 和十四天追读上限。首次启动只建立基线。
 - `opened`、`comment`、`review_comment`、`state` 可按仓库或具体对象匹配。整仓库 `ci` 只监听默认分支；`push`、`review` 需要指定 PR，仓库范围选择会返回明确错误。
 - 已跟踪 PR 每五分钟补读详情和评审，每十分钟核对 CI；默认分支每十分钟核对 CI。这些核对用于补充列表更新信号，可能增加请求数。额度偏低、429 或额度耗尽时降速，按重置时间恢复。
-- CI 使用 Actions runs、jobs 和提交状态，不调用 `check-runs`。新提交出现同名失败、恢复后再次失败、取消后重订都有独立事件编号。
+- CI 使用 Actions runs、jobs 和提交状态，不调用 `check-runs`。同一 `workflow_id + event` 分组下优先取最新的非 `cancelled` 运行，仅当该组全部为 `cancelled` 时才取最新的 `cancelled`。首次观测即存在失败项（如新订阅或丢失来源状态重启）会发出一次 `failed`，带已保存状态正常重启不重复发送；新提交出现同名失败、恢复后再次失败、取消后重订都有独立事件编号。
 - 同轮按会话合并。通知最多展开二十条、总长小于四千字符，超出部分给出数量和读取提示。送达记录仍保留全部事件编号。发送使用固定 `messageId` 与 `activeTurnBehavior: 'steer'`。
 - 失败最多尝试三次；重试沿用相同编号和正文。结果未知时停止自动重发并记录原因。提供方设置「跳过本轮」时直接跳过，不等待空闲。
 - 订阅工具描述提示会话使用 `gh issue comment` 或 `gh pr comment` 发评论时，从 `PASEO_AGENT_ID` 读取当前会话 ID，在正文末尾另起一行添加 `<!-- paseo-ghsub agent=<当前会话ID> -->`。只过滤写评论的会话，其他订阅者仍能收到。插件不再提供评论发布工具；未按格式加标记的评论照常送达。

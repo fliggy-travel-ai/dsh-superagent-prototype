@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { GithubEvent, Subscription } from '../shared/model.ts';
+import { latestRuns, parseRuns } from '../server/github/ci.ts';
 import { GithubSource } from '../server/github/source.ts';
 import {
   commentItem, createFixture, issueItem, preferences, repository, subscription, type Fixture,
@@ -465,7 +466,9 @@ test('CI：新提交上同名失败也要发送，不会因失败集合相同被
   pullFixture(world);
   world.runs['org/app'] = [ciRun(1, 'aaa1111', 'failure', -5)];
   world.jobs['org/app#1'] = failing;
-  assert.deepEqual((await poll(subscriptions)).events, []);
+  const initial = await poll(subscriptions);
+  assert.deepEqual(types(initial.events), ['ci']);
+  assert.match(initial.events[0]!.text, /aaa1111/);
   advance(60_000);
   pullFixture(world, { head: { sha: 'bbb2222' } });
   world.issues['org/app'] = [issueItem(7, { created_at: '2026-11-05T00:00:00.000Z', updated_at: iso(50), pull_request: { url: 'x' } })];
@@ -568,4 +571,197 @@ test('组织变更且目录读取失败时保留旧目录、旧游标和旧仓�
   fixture.world.issues['org/app'] = [issueItem(1, { created_at: iso(100), updated_at: iso(100) })];
   const recovered = await source.poll(preferences(), []);
   assert.deepEqual(types(recovered.events), ['opened']);
+});
+
+const PR_1785_HEAD = '8ce2ded4f50d599fa3390ff9ec182696b4c1f585';
+
+function pr1785Runs(options: { forkRunning?: boolean; allPolicyCancelled?: boolean } = {}) {
+  const { forkRunning = false, allPolicyCancelled = false } = options;
+  return [
+    {
+      id: 42753708887, name: 'weighted-approval', workflow_id: 356526643, event: 'pull_request_target',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'success',
+      created_at: '2026-11-10T04:06:33Z', updated_at: '2026-11-10T04:07:10Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708677, name: 'Issue policy', workflow_id: 356526631, event: 'pull_request',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'success',
+      created_at: '2026-11-10T04:06:33Z', updated_at: '2026-11-10T04:07:14Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708885, name: 'Fork CI', workflow_id: 357009113, event: 'pull_request',
+      head_sha: PR_1785_HEAD, status: forkRunning ? 'in_progress' : 'completed', conclusion: forkRunning ? null : 'success',
+      created_at: '2026-11-10T04:06:33Z', updated_at: forkRunning ? '2026-11-10T04:07:00Z' : '2026-11-10T04:10:21Z',
+      pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708599, name: 'Build PR preview', workflow_id: 356526622, event: 'pull_request',
+      head_sha: PR_1785_HEAD, status: forkRunning ? 'in_progress' : 'completed', conclusion: forkRunning ? null : 'success',
+      created_at: '2026-11-10T04:06:33Z', updated_at: forkRunning ? '2026-11-10T04:07:00Z' : '2026-11-10T04:09:44Z',
+      pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708724, name: 'Policy', workflow_id: 399890969, event: 'pull_request_target',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'cancelled',
+      created_at: '2026-11-10T04:06:33Z', updated_at: '2026-11-10T04:06:34Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708926, name: 'Policy', workflow_id: 399890966, event: 'pull_request_target',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'skipped',
+      created_at: '2026-11-10T04:06:33Z', updated_at: '2026-11-10T04:06:34Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708643, name: 'Policy', workflow_id: 399890969, event: 'pull_request_target',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: allPolicyCancelled ? 'cancelled' : 'skipped',
+      created_at: '2026-11-10T04:06:32Z', updated_at: '2026-11-10T04:06:47Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708490, name: 'Issue lifecycle', workflow_id: 356526630, event: 'pull_request',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'success',
+      created_at: '2026-11-10T04:06:32Z', updated_at: '2026-11-10T04:07:08Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708569, name: 'Issue policy', workflow_id: 356526631, event: 'pull_request',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'success',
+      created_at: '2026-11-10T04:06:32Z', updated_at: '2026-11-10T04:06:54Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708414, name: 'Issue policy', workflow_id: 356526631, event: 'pull_request',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'success',
+      created_at: '2026-11-10T04:06:32Z', updated_at: '2026-11-10T04:07:55Z', pull_requests: [{ number: 1785 }],
+    },
+    {
+      id: 42753708524, name: 'Policy', workflow_id: 399890969, event: 'pull_request_target',
+      head_sha: PR_1785_HEAD, status: 'completed', conclusion: 'cancelled',
+      created_at: '2026-11-10T04:06:32Z', updated_at: '2026-11-10T04:06:40Z', pull_requests: [{ number: 1785 }],
+    },
+  ];
+}
+
+test('CI（#1785 真实运行）：同 workflow_id+event 下优先取非 cancelled 运行，全部完成后发出 passed 8/8', async () => {
+  const sameSecond = latestRuns(parseRuns({
+    workflow_runs: [
+      { id: 20, name: 'Policy', workflow_id: 399890969, event: 'pull_request_target', status: 'completed', conclusion: 'cancelled', created_at: '2026-11-10T04:06:32Z' },
+      { id: 10, name: 'Policy', workflow_id: 399890969, event: 'pull_request_target', status: 'completed', conclusion: 'skipped', created_at: '2026-11-10T04:06:32Z' },
+    ],
+  }));
+  assert.equal(sameSecond[0]?.id, 10);
+
+  const picked = latestRuns(parseRuns({ workflow_runs: pr1785Runs() }));
+  assert.equal(picked.length, 7);
+  assert.equal(picked.find(run => run.workflow_id === 399890969)?.id, 42753708643);
+  assert.equal(picked.find(run => run.workflow_id === 399890969)?.conclusion, 'skipped');
+
+  const { fixture, source, poll, advance } = setup();
+  const world = fixture.world;
+  const sub = subscription({ key: 'org/app#1785', number: 1785, events: ['ci', 'review', 'review_comment', 'comment', 'state'] });
+  world.pulls['org/app#1785'] = {
+    title: 'docs(odd): 等 GitHub 结果先建订阅，轮询只做兜底', state: 'open',
+    html_url: 'https://github.com/org/app/pull/1785', user: { login: 'alice' }, head: { sha: PR_1785_HEAD },
+  };
+  world.issues['org/app'] = [issueItem(1785, {
+    created_at: '2026-11-05T00:00:00.000Z', updated_at: '2026-11-05T00:00:00.000Z', pull_request: { url: 'x', merged_at: null },
+  })];
+  world.statuses[`org/app@${PR_1785_HEAD}`] = [{ context: 'weighted approval', state: 'success' }];
+  world.runs['org/app'] = pr1785Runs({ forkRunning: true });
+  world.jobs['org/app#42753708885'] = [{ name: 'test', status: 'in_progress', conclusion: null }];
+  world.jobs['org/app#42753708599'] = [{ name: 'preview', status: 'in_progress', conclusion: null }];
+
+  const first = await poll([sub]);
+  assert.deepEqual(first.events, []);
+
+  advance(60_000);
+  world.runs['org/app'] = pr1785Runs({ forkRunning: false });
+  const completed = await poll([sub]);
+  assert.equal(completed.events.length, 1);
+  assert.equal(completed.events[0]!.type, 'ci');
+  assert.deepEqual(completed.events[0]!.ci?.failed, []);
+  assert.equal(completed.events[0]!.ci?.running, false);
+  assert.match(completed.events[0]!.text, /^CI 全部通过 8\/8（PR #1785，提交 8ce2ded）/);
+
+  const checks = await source.readResource('org/app', 1785, 'checks') as { failed: number; running: number; summary: string };
+  assert.equal(checks.failed, 0);
+  assert.equal(checks.running, 0);
+  assert.match(checks.summary, /^CI passed 8\/8/);
+});
+
+test('CI：同一 workflow_id+event 组全部为 cancelled 时取最新的 cancelled，仍判为失败', async () => {
+  const allCancelled = latestRuns(parseRuns({ workflow_runs: pr1785Runs({ allPolicyCancelled: true }) }));
+  assert.equal(allCancelled.find(run => run.workflow_id === 399890969)?.id, 42753708724);
+  assert.equal(allCancelled.find(run => run.workflow_id === 399890969)?.conclusion, 'cancelled');
+
+  const { fixture, source, poll, advance } = setup();
+  const world = fixture.world;
+  const sub = subscription({ key: 'org/app#1785', number: 1785, events: ['ci'] });
+  world.pulls['org/app#1785'] = {
+    title: 'PR 1785', state: 'open', html_url: 'https://github.com/org/app/pull/1785', user: { login: 'alice' }, head: { sha: PR_1785_HEAD },
+  };
+  world.statuses[`org/app@${PR_1785_HEAD}`] = [{ context: 'weighted approval', state: 'success' }];
+  world.runs['org/app'] = pr1785Runs({ forkRunning: true, allPolicyCancelled: true });
+  world.jobs['org/app#42753708885'] = [{ name: 'test', status: 'in_progress', conclusion: null }];
+  world.jobs['org/app#42753708599'] = [{ name: 'preview', status: 'in_progress', conclusion: null }];
+
+  const result = await poll([sub]);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0]!.type, 'ci');
+  assert.deepEqual(result.events[0]!.ci?.failed, ['Policy']);
+  assert.equal(result.events[0]!.ci?.running, true);
+  assert.match(result.events[0]!.text, /^CI 失败 1\/8：Policy，另有 2 项运行中（PR #1785，提交 8ce2ded）/);
+
+  advance(60_000);
+  world.runs['org/app'] = pr1785Runs({ forkRunning: false, allPolicyCancelled: true });
+  assert.deepEqual((await poll([sub])).events, []);
+
+  const checks = await source.readResource('org/app', 1785, 'checks') as { failed: number; running: number; summary: string };
+  assert.equal(checks.failed, 1);
+  assert.equal(checks.running, 0);
+  assert.match(checks.summary, /^CI failed 1\/8/);
+});
+
+test('CI：新订阅或丢失源状态重启首次看到已失败 CI 至少发一次 failed，带状态正常重启不重发', async () => {
+  const subscriptions = [subscription({ events: ['ci'] })];
+  const { fixture, source, poll, advance, clock } = setup();
+  const world = fixture.world;
+  pullFixture(world);
+  world.runs['org/app'] = [
+    ciRun(1, 'aaa1111', 'failure', -5, { workflow_id: 1, name: 'lint' }),
+    { id: 2, name: 'e2e', status: 'in_progress', conclusion: null, head_sha: 'aaa1111', head_branch: 'feature', workflow_id: 2, event: 'pull_request', created_at: iso(-5), updated_at: iso(-5), pull_requests: [{ number: 7 }] },
+  ];
+  world.jobs['org/app#1'] = [{ name: 'lint', status: 'completed', conclusion: 'failure' }];
+  world.jobs['org/app#2'] = [{ name: 'e2e', status: 'in_progress', conclusion: null }];
+
+  const first = await poll(subscriptions);
+  assert.equal(first.events.length, 1);
+  assert.deepEqual(first.events[0]!.ci?.failed, ['lint']);
+  assert.equal(first.events[0]!.ci?.running, true);
+  assert.match(first.events[0]!.text, /CI 失败 1\/2：lint，另有 1 项运行中/);
+  assert.equal(first.events[0]!.revision, '1');
+
+  advance(60_000);
+  world.runs['org/app']![1] = ciRun(2, 'aaa1111', 'success', 50, { workflow_id: 2, name: 'e2e' });
+  assert.deepEqual((await poll(subscriptions)).events, []);
+
+  const saved = JSON.parse(JSON.stringify(source.serialize()));
+  const normalRestart = new GithubSource({ getToken: async () => TOKEN, fetch: fixture.fetch, now: () => clock.value + 60_000, state: saved });
+  assert.deepEqual((await normalRestart.poll(preferences(), subscriptions)).events, []);
+
+  const coldRestart = new GithubSource({ getToken: async () => TOKEN, fetch: fixture.fetch, now: () => clock.value + 120_000 });
+  const coldResult = await coldRestart.poll(preferences(), subscriptions);
+  assert.equal(coldResult.events.length, 1);
+  assert.deepEqual(coldResult.events[0]!.ci?.failed, ['lint']);
+  assert.equal(coldResult.events[0]!.ci?.running, false);
+  assert.deepEqual((await coldRestart.poll(preferences(), subscriptions)).events, []);
+
+  const repoSub = subscription({ key: 'org/app', scope: 'repo', number: null, isPr: null, events: ['ci'] });
+  world.commits['org/app@main'] = 'mainbad';
+  world.runs['org/app']!.push({
+    id: 99, name: 'main-ci', status: 'completed', conclusion: 'failure', head_sha: 'mainbad', head_branch: 'main',
+    workflow_id: 9, event: 'push', created_at: iso(130), updated_at: iso(130), pull_requests: [],
+  });
+  world.jobs['org/app#99'] = [{ name: 'deploy', status: 'completed', conclusion: 'failure' }];
+  const branchResult = await coldRestart.poll(preferences(), [repoSub]);
+  assert.equal(branchResult.events.length, 1);
+  assert.equal(branchResult.events[0]!.number, null);
+  assert.deepEqual(branchResult.events[0]!.ci?.failed, ['deploy']);
+  assert.deepEqual((await coldRestart.poll(preferences(), [repoSub])).events, []);
 });
