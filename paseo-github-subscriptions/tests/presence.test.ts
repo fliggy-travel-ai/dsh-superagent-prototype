@@ -7,9 +7,18 @@ import type { AgentPermissionRequest } from '@getpaseo/protocol/agent-types';
 import { AgentPermissionResponseSchema } from '@getpaseo/protocol/messages';
 import { ProviderInputSchema } from '@getpaseo/plugin/server/provider';
 import { PresenceRuntime, type PresencePort, type QuestionAgent } from '../server/presence.ts';
-import { nativePrompts, nativeResponse, recommendedAnswers, validateAnswers } from '../server/questions.ts';
+import {
+  classifyAudience,
+  DEFAULT_LOCAL_CONFIRM_KEYWORDS,
+  extractQuestionPrompts,
+  nativePrompts,
+  nativeResponse,
+  ownerOnlyReason,
+  toEscalationPrompts,
+  validateAnswers,
+} from '../server/questions.ts';
 import { summarizeWebAnswer, WebRequestLedger } from '../server/web-request/ledger.ts';
-import { isQuestionTodo, isUnreadAutomaticAnswer, QuestionSchema, type BrowserQuestion } from '../shared/presence.ts';
+import { isQuestionTodo, QuestionSchema, type BrowserQuestion, type Question } from '../shared/presence.ts';
 import type { SpeechResult } from '../shared/speech.ts';
 
 const prompt = { question: '先验证哪个模块？', header: '验证范围', multiSelect: false, options: [{ label: '当前模块（推荐）', description: '', recommended: true }, { label: '所有模块', description: '', recommended: false }] };
@@ -19,13 +28,59 @@ const webpage = (sessionId = 'session_one'): BrowserQuestion => ({ id: 'web-ques
 const sessions = [{ sessionId: 'session_one', title: '网页开发', url: 'https://claude.ai/code/session_one' }, { sessionId: 'session_two', title: '另一网页', url: 'https://claude.ai/code/session_two' }];
 const answer = { [prompt.question]: [prompt.options[0].label] };
 
-test('验收方式和合并建议不能作为用户本人授权自动选择', () => {
-  for (const question of ['验收方式如何选择？', '按现在的证据验收（推荐）', '记为已知限制，先合并（推荐）', '是否合并 PR #1706？', 'Merge pull request after checks?']) {
+test('classifyAudience 与 ownerOnlyReason：按优先级识别 7 类仅限本人确认问题，合并与发布不标 ownerOnly', () => {
+  // 1. 最终验收标 final_acceptance，但合并与发布不标 ownerOnly
+  for (const question of ['验收方式如何选择？', '按现在的证据验收（推荐）']) {
     const prompts = [{ ...prompt, question }];
-    assert.equal(recommendedAnswers(prompts), null);
-    assert.deepEqual(nativeResponse({ ...request(), input: { questions: prompts } }, { [question]: [prompt.options[0].label] }), { behavior: 'allow', updatedInput: { answers: { [question]: prompt.options[0].label } } });
+    const aud = classifyAudience(prompts);
+    assert.equal(aud.ownerOnly, true, question);
+    assert.equal(aud.category, 'final_acceptance', question);
+    assert.match(ownerOnlyReason(prompts) ?? '', /最终验收/);
   }
-  assert.deepEqual(recommendedAnswers([prompt]), answer);
+  for (const question of ['记为已知限制，先合并（推荐）', '是否合并 PR #1706？', 'Merge pull request after checks?', '发布到哪个环境？']) {
+    const prompts = [{ ...prompt, question }];
+    assert.deepEqual(classifyAudience(prompts), { ownerOnly: false, category: null, reason: null }, question);
+    assert.equal(ownerOnlyReason(prompts), null, question);
+    assert.deepEqual(
+      nativeResponse({ ...request(), input: { questions: prompts } }, { [question]: [prompt.options[0].label] }),
+      { behavior: 'allow', updatedInput: { answers: { [question]: prompt.options[0].label } } },
+    );
+  }
+
+  // 2. 优先级顺序：daily_task > retro_review > local_confirm > final_acceptance > login_verification > payment > destructive_cleanup
+  assert.deepEqual(
+    classifyAudience([{ ...prompt, question: '请审阅复盘并删除旧目录' }], {
+      workspaceTitle: '【每日】屎山代码清理',
+    }),
+    { ownerOnly: true, category: 'daily_task', reason: '每日任务弹窗须 Yang 本人查看' },
+  );
+  assert.equal(
+    classifyAudience([prompt], { agentLabels: { 'paseo.schedule-id': 'sched_daily_1' } }).category,
+    'daily_task',
+  );
+  assert.equal(
+    classifyAudience([prompt], { parentLabels: { 'paseo.schedule-id': 'sched_daily_parent' } }).category,
+    'daily_task',
+  );
+  assert.deepEqual(
+    classifyAudience([{ ...prompt, question: '是否删除旧分支？' }], {
+      workspaceTitle: '1808【复盘待审】问答与通知',
+    }),
+    { ownerOnly: true, category: 'retro_review', reason: '问题涉及复盘审阅，请用户本人确认' },
+  );
+  assert.equal(
+    classifyAudience([{ ...prompt, question: '请对本次复盘结论提出审阅意见或通过' }]).category,
+    'retro_review',
+  );
+  for (const kw of DEFAULT_LOCAL_CONFIRM_KEYWORDS) {
+    const aud = classifyAudience([{ ...prompt, question: `系统弹窗提示：${kw}，请确认后继续` }]);
+    assert.equal(aud.ownerOnly, true, kw);
+    assert.equal(aud.category, 'local_confirm', kw);
+  }
+  assert.equal(
+    classifyAudience([{ ...prompt, question: '请在宿主机点击自定义按钮' }], { localKeywords: ['自定义按钮'] }).category,
+    'local_confirm',
+  );
 });
 
 test('人工回答完成自动移出，未知结果继续保留', async () => {
@@ -40,31 +95,60 @@ test('人工回答完成自动移出，未知结果继续保留', async () => {
     assert.deepEqual(completed.answer?.answers, answer);
     assert.equal(isQuestionTodo({ ...completed, state: 'submitted' }), true);
     assert.equal(isQuestionTodo({ ...completed, state: 'unknown' }), true);
-    await assert.rejects(setup.runtime.markRead({ id: completed.id, fingerprint: completed.fingerprint }));
   } finally { await setup.close(); }
 });
 
-test('代答完成显示选项，已读幂等持久化，重启后不会复活', async () => {
+test('离线模式不自动代答、不播语音、进入人工待办；旧版 automatic 记录兼容读取且不计入待办', async () => {
   const setup = await fixture();
   try {
-    setup.agents.push(agent());
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
-    await setup.runtime.refresh();
-    const question = setup.runtime.snapshot().questions[0];
-    assert.equal(isUnreadAutomaticAnswer(question), true);
-    assert.deepEqual(question.answer?.answers, answer);
-    await assert.rejects(setup.runtime.markRead({ id: question.id, fingerprint: 'changed' }));
-    await setup.runtime.markRead({ id: question.id, fingerprint: question.fingerprint });
-    const readAt = setup.runtime.snapshot().questions[0].answer?.readAt;
-    await setup.runtime.markRead({ id: question.id, fingerprint: question.fingerprint });
-    assert.equal(setup.runtime.snapshot().questions[0].answer?.readAt, readAt);
     await setup.runtime.stop();
+    await writeFile(
+      join(setup.directory, 'presence.json'),
+      JSON.stringify({
+        settings: { mode: 'offline', paused: false, speechEnabled: true, sourceHostId: null },
+        questions: [
+          {
+            id: 'legacy-auto-1',
+            sessionId: 'agent-legacy',
+            fingerprint: 'fp-legacy',
+            source: 'native',
+            title: '历史代答会话',
+            at: new Date(0).toISOString(),
+            state: 'resolved',
+            reason: '离线：已自动选择明确推荐项',
+            prompts: [prompt],
+            answer: {
+              source: 'automatic',
+              answers: answer,
+            },
+          },
+        ],
+        notified: [],
+      }),
+    );
     const restarted = new PresenceRuntime(setup.directory, setup.port);
+    await restarted.start();
     try {
-      await restarted.start();
-      assert.equal(isQuestionTodo(restarted.snapshot().questions[0]), false);
-      assert.equal(setup.responses.length, 1);
-    } finally { await restarted.stop(); }
+      // 旧记录兼容解析不报错，且已 resolved 的旧代答不再计入待办
+      const legacyLoaded = restarted.snapshot().questions.find(q => q.id === 'legacy-auto-1')!;
+      assert.ok(legacyLoaded);
+      assert.equal(legacyLoaded.answer?.source, 'automatic');
+      assert.equal(isQuestionTodo(legacyLoaded), false);
+
+      // 离线模式下新提问到达：不调 respond、不播语音、保持 pending 留在待办，原因为“离线：已通知总控，等待回答”
+      setup.agents.push(agent());
+      await restarted.refresh();
+      assert.equal(setup.responses.length, 0);
+      assert.equal(setup.speech.length, 0);
+      const activeQ = restarted.snapshot().questions.find(q => q.state === 'pending')!;
+      assert.ok(activeQ);
+      assert.equal(activeQ.sessionId, 'agent-one');
+      assert.equal(activeQ.state, 'pending');
+      assert.equal(activeQ.reason, '离线：已通知总控，等待回答');
+      assert.equal(isQuestionTodo(activeQ), true);
+    } finally {
+      await restarted.stop();
+    }
   } finally { await setup.close(); }
 });
 
@@ -74,7 +158,10 @@ test('网页点击提交仍保留，只有完整读取同一会话且问题消�
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
     await setup.runtime.browserSync('browser-one', [webpage()], [], sessions, ['session_one']);
     const question = setup.runtime.snapshot().questions[0];
-    await assert.rejects(setup.runtime.markRead({ id: question.id, fingerprint: question.fingerprint }));
+    assert.equal(question.state, 'pending');
+    await setup.runtime.answer({ id: question.id, answers: answer });
+    const dispatched = await setup.runtime.browserSync('browser-one', [webpage()], [], sessions, ['session_one']);
+    assert.equal(dispatched.length, 1);
     await setup.runtime.browserSync('browser-one', [webpage()], [{ ...webpage(), status: 'submitted' }], sessions, ['session_one']);
     assert.equal(setup.runtime.snapshot().questions[0].state, 'submitted');
     await setup.runtime.browserSync('browser-one', [], [], []);
@@ -82,23 +169,32 @@ test('网页点击提交仍保留，只有完整读取同一会话且问题消�
     await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_two']);
     assert.equal(setup.runtime.snapshot().questions[0].state, 'submitted');
     await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_one']);
-    assert.equal(isUnreadAutomaticAnswer(setup.runtime.snapshot().questions[0]), true);
+    assert.equal(setup.runtime.snapshot().questions[0].state, 'resolved');
+    assert.equal(isQuestionTodo(setup.runtime.snapshot().questions[0]), false);
   } finally { await setup.close(); }
 });
 
-test('历史已结束的问题不推测代答来源，超过百条的未读代答全部保留', async () => {
-  const setup = await fixture();
+test('独立网页提问通过 enqueueExternal 接入升级通道，问题结束或转交原生提问时调用 closeExternal', async () => {
+  const enqueued: Question[] = [];
+  const closed: string[] = [];
+  const setup = await fixture({
+    enqueueExternal: question => { enqueued.push(structuredClone(question)); },
+    closeExternal: id => { closed.push(id); },
+  });
   try {
-    for (let index = 0; index < 105; index++) setup.agents.push({ ...agent(), id: `agent-${index}` });
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
-    await setup.runtime.refresh();
-    assert.equal(setup.runtime.snapshot().questions.filter(isUnreadAutomaticAnswer).length, 105);
-    const { answer: _answer, ...legacy } = setup.runtime.snapshot().questions[0];
+    await setup.runtime.browserSync('browser-one', [webpage()], [], sessions, ['session_one']);
+    assert.equal(enqueued.length, 1);
+    assert.match(enqueued[0]!.id, /^browser:/);
+    assert.equal(enqueued[0]!.source, 'browser');
+    assert.equal(closed.length, 0);
+
+    // 同一网页提问被完整扫描确认消失后，触发 closeExternal
+    await setup.runtime.browserSync('browser-one', [], [], sessions, ['session_one']);
+    assert.deepEqual(closed, [enqueued[0]!.id]);
+
+    // 历史无 answer 字段的已结束记录仍不计入待办
+    const legacy = { ...enqueued[0]!, state: 'resolved' as const };
     assert.equal(isQuestionTodo(QuestionSchema.parse(legacy)), false);
-    await setup.runtime.stop();
-    const restarted = new PresenceRuntime(setup.directory, setup.port);
-    try { await restarted.start(); assert.equal(restarted.snapshot().questions.filter(isUnreadAutomaticAnswer).length, 105); }
-    finally { await restarted.stop(); }
   } finally { await setup.close(); }
 });
 
@@ -193,8 +289,15 @@ test('原生问答只接受合法问题，保留提供方的答案映射并支�
   assert.throws(() => validateAnswers([prompt], { [prompt.question]: [] }, { [prompt.question]: '不支持其他' }), /选项已变化/);
   assert.throws(() => validateAnswers([{ ...prompt, allowOther: true }], { [prompt.question]: [prompt.options[0].label] }, { [prompt.question]: '单选互斥' }), /选项已变化/);
   assert.deepEqual(nativeResponse({ ...request(), name: 'request_user_input', provider: 'codex' }, answer), { behavior: 'allow', updatedInput: { answers: { [prompt.header]: prompt.options[0].label } } });
-  assert.equal(recommendedAnswers([{ ...prompt, options: prompt.options.map(option => ({ ...option, recommended: false })) }]), null);
-  assert.equal(recommendedAnswers([{ ...prompt, question: '请关闭安全验证' }]), null);
+  const extractedAsk = extractQuestionPrompts(request());
+  assert.equal(extractedAsk.length, 1);
+  assert.deepEqual(toEscalationPrompts(extractedAsk, { requestName: 'AskUserQuestion', answerVia: 'paseo-permission' }), [{ ...prompt, allowOther: true, answerKey: prompt.question }]);
+  const extractedCodex = extractQuestionPrompts({
+    name: 'request_user_input_async',
+    input: { questions: [{ id: '0', header: 'Question 1', question: prompt.question, options: prompt.options, isOther: true }] },
+  });
+  assert.equal(extractedCodex.length, 1);
+  assert.equal(toEscalationPrompts(extractedCodex, { requestName: 'request_user_input_async', answerVia: 'paseo-permission' })[0]?.answerKey, 'Question 1');
 });
 
 const cleanupPrompts = [
@@ -202,14 +305,17 @@ const cleanupPrompts = [
   { ...prompt, question: '工作树里面如果还有未提交或未推送的改动，怎么处理？', options: [{ label: '逐个审查后决定（推荐）', description: '先列出内容：运行数据、生成物直接丢弃；手写内容再问。', recommended: true }, { label: '全部保留', description: '', recommended: false }] },
 ];
 
-test('备份后释放和先审查再丢弃仍需人工确认，整组问题不自动作答', () => {
-  for (const question of cleanupPrompts) assert.equal(recommendedAnswers([question]), null);
-  assert.equal(recommendedAnswers([prompt, ...cleanupPrompts]), null);
-  for (const question of ['Delete the sandbox after backing up evidence?', 'Remove the worktree and discard uncommitted changes?', '删除数据库备份？', '清空云端测试日志？', 'Run git reset --hard?', '登录账号并输入验证码？', 'Grant admin access?', '支付续费并充值？', 'Transfer funds now?']) {
-    assert.equal(recommendedAnswers([{ ...prompt, question }]), null, question);
+test('备份后释放、先审查再丢弃、登录验证与资金操作均标为 ownerOnly，普通技术题不标 ownerOnly', () => {
+  for (const question of cleanupPrompts) {
+    assert.equal(classifyAudience([question]).ownerOnly, true);
+    assert.equal(classifyAudience([question]).category, 'destructive_cleanup');
+  }
+  assert.equal(classifyAudience([prompt, ...cleanupPrompts]).ownerOnly, true);
+  for (const question of ['Delete the sandbox after backing up evidence?', 'Remove the worktree and discard uncommitted changes?', '删除数据库备份？', '清空云端测试日志？', 'Run git reset --hard?', '登录账号并输入验证码？', 'Grant admin access?', '支付续费并充值？', 'Transfer funds now?', '请关闭安全验证']) {
+    assert.notEqual(ownerOnlyReason([{ ...prompt, question }]), null, question);
   }
   for (const question of ['先验证哪个模块？', '修复内存释放逻辑后运行测试？', '先重录并遮挡店铺名？']) {
-    assert.deepEqual(recommendedAnswers([{ ...prompt, question }]), { [question]: [prompt.options[0].label] });
+    assert.equal(ownerOnlyReason([{ ...prompt, question }]), null, question);
   }
 });
 
@@ -232,15 +338,13 @@ test('离线模式下原生与网页资源清理保留待办，用户仍可显�
       assert.equal(isQuestionTodo(question), true);
     }
     const manual = questions.find(question => question.source === 'native')!;
-    await setup.runtime.answer({ id: manual.id, answers: Object.fromEntries(cleanupPrompts.map(question => [question.question, [question.options[0].label]])) }, true);
-    assert.equal(setup.responses.length, 0);
     await setup.runtime.answer({ id: manual.id, answers: Object.fromEntries(cleanupPrompts.map(question => [question.question, [question.options[1].label]])) });
     assert.equal(setup.responses.length, 1);
     assert.equal(setup.runtime.snapshot().questions.find(question => question.id === manual.id)?.answer?.source, 'user');
   } finally { await setup.close(); }
 });
 
-test('异步原生提问按宿主标题回传多题答案，逗号标签保持完整且仅代答一次', async () => {
+test('异步原生提问在离线模式不自动代答，人工回答时按宿主标题回传多题答案且逗号标签保持完整', async () => {
   const setup = await fixture();
   const questions = [
     { id: '0', header: 'Question 1', question: '先验证哪个模块？', options: [{ label: '当前模块（推荐）' }, { label: '所有模块' }], isOther: true },
@@ -250,12 +354,22 @@ test('异步原生提问按宿主标题回传多题答案，逗号标签保持�
     setup.agents.push({ ...agent(), pendingPermissions: [{ ...request(), provider: 'codex', name: 'request_user_input_async', input: { questions } }] });
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
     await setup.runtime.refresh();
-    assert.deepEqual(setup.responses, [['agent-one', 'request-one', { behavior: 'allow', updatedInput: { answers: { 'Question 1': '当前模块（推荐）', 'Question 2': '记录结果, 等待审核（推荐）' } } }]]);
-    const question = setup.runtime.snapshot().questions[0];
-    assert.equal(question.state, 'resolved');
-    assert.equal(isUnreadAutomaticAnswer(question), true);
+    assert.equal(setup.responses.length, 0);
+    let question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'pending');
     assert.equal(question.prompts[0].multiSelect, false);
     assert.equal(question.prompts[0].options[0].description, '');
+    await setup.runtime.answer({
+      id: question.id,
+      answers: {
+        '先验证哪个模块？': ['当前模块（推荐）'],
+        '验证后做什么？': ['记录结果, 等待审核（推荐）'],
+      },
+    });
+    assert.deepEqual(setup.responses, [['agent-one', 'request-one', { behavior: 'allow', updatedInput: { answers: { 'Question 1': '当前模块（推荐）', 'Question 2': '记录结果, 等待审核（推荐）' } } }]]);
+    question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'resolved');
+    assert.equal(isQuestionTodo(question), false);
   } finally { await setup.close(); }
 });
 
@@ -367,7 +481,7 @@ test('切换来源主机后，旧主机的失败回执只记历史，不影响�
   } finally { for (const resolve of pending) resolve({ played: false, cancelled: true }); await setup.close(); }
 });
 
-test('离线自动回答明确推荐，未知蓝牙状态保留待办', async () => {
+test('未知蓝牙状态与离线状态均保留人工待办，不自动代答', async () => {
   const setup = await fixture();
   try {
     setup.agents.push(agent());
@@ -375,10 +489,9 @@ test('离线自动回答明确推荐，未知蓝牙状态保留待办', async ()
     assert.equal(setup.responses.length, 0);
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
     await setup.runtime.refresh();
-    assert.equal(setup.responses.length, 1);
-    assert.equal(setup.runtime.snapshot().questions[0].state, 'resolved');
-    await setup.runtime.refresh();
-    assert.equal(setup.responses.length, 1);
+    assert.equal(setup.responses.length, 0);
+    assert.equal(setup.runtime.snapshot().questions[0].state, 'pending');
+    assert.equal(setup.runtime.snapshot().questions[0].reason, '离线：已通知总控，等待回答');
   } finally { await setup.close(); }
 });
 
@@ -426,8 +539,9 @@ test('原生回执失败标记未知，重启后不会重试', async () => {
   const setup = await fixture({ respond: async () => { submissions++; throw new Error('timeout'); } });
   try {
     setup.agents.push(agent());
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
     await setup.runtime.refresh();
+    const q = setup.runtime.snapshot().questions[0];
+    await setup.runtime.answer({ id: q.id, answers: answer });
     assert.equal(setup.runtime.snapshot().questions[0].state, 'unknown');
     await setup.runtime.stop();
     const restarted = new PresenceRuntime(setup.directory, setup.port);
@@ -439,7 +553,9 @@ test('原生回执失败标记未知，重启后不会重试', async () => {
 test('重启时未确认的网页提交变为未知', async () => {
   const setup = await fixture();
   try {
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.browserSync('browser-one', [webpage()], [], sessions);
+    const q = setup.runtime.snapshot().questions[0];
+    await setup.runtime.answer({ id: q.id, answers: answer });
     assert.equal((await setup.runtime.browserSync('browser-one', [webpage()], [], sessions)).length, 1);
     await setup.runtime.stop();
     const restarted = new PresenceRuntime(setup.directory, setup.port);
@@ -451,8 +567,14 @@ test('重启时未确认的网页提交变为未知', async () => {
 test('原生发送前再次核对请求，变化后不批准', async () => {
   const setup = await fixture();
   let reads = 0;
-  setup.port.refresh = async () => { const current = agent(); if (++reads === 2) current.pendingPermissions[0].input = { questions: [{ ...prompt, question: '修改后的问题' }] }; return current; };
-  try { setup.agents.push(agent()); await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' }); await setup.runtime.refresh(); assert.equal(setup.responses.length, 0); assert.equal(setup.runtime.snapshot().questions[0].state, 'pending'); }
+  setup.port.refresh = async () => { const current = agent(); if (++reads === 1) current.pendingPermissions[0].input = { questions: [{ ...prompt, question: '修改后的问题' }] }; return current; };
+  try {
+    setup.agents.push(agent());
+    await setup.runtime.refresh();
+    const q = setup.runtime.snapshot().questions[0];
+    await assert.rejects(setup.runtime.answer({ id: q.id, answers: answer }), /原会话的问题已经变化/);
+    assert.equal(setup.responses.length, 0);
+  }
   finally { await setup.close(); }
 });
 
@@ -471,7 +593,8 @@ test('丢失的网页问题清理待发答案', async () => {
 test('并发网页同步只下发一次答案，停止后不再同步', async () => {
   const setup = await fixture();
   try {
-    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
+    await setup.runtime.browserSync('browser-one', [webpage()], [], sessions);
+    await setup.runtime.answer({ id: setup.runtime.snapshot().questions[0].id, answers: answer });
     const responses = await Promise.all([setup.runtime.browserSync('browser-one', [webpage()], [], sessions), setup.runtime.browserSync('browser-one', [webpage()], [], sessions)]);
     assert.equal(responses.flat().length, 1);
     await setup.runtime.stop();
@@ -480,7 +603,7 @@ test('并发网页同步只下发一次答案，停止后不再同步', async ()
   } finally { await setup.close(); }
 });
 
-test('云端提问离线时自动选明确推荐项、在线时只提醒、拦截词仍生效，答复后保持已提交并在云端关闭后结束，且登记答案来源', async () => {
+test('云端提问在线时提醒、离线时不自动代答、仅限本人题目显示原因，人工答复后保持已提交并在云端关闭后结束', async () => {
   const setup = await fixture();
   try {
     const cloudRequest: AgentPermissionRequest = {
@@ -499,29 +622,37 @@ test('云端提问离线时自动选明确推荐项、在线时只提醒、拦�
     assert.equal(setup.speech.length, 1);
     assert.equal(setup.responses.length, 0);
 
+    // 切到离线：不自动代答，保持 pending
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
     await setup.runtime.refresh();
     question = setup.runtime.snapshot().questions[0];
+    assert.equal(question.state, 'pending');
+    assert.equal(question.reason, '离线：已通知总控，等待回答');
+    assert.equal(setup.responses.length, 0);
+
+    // 人工回答提交给云端会话
+    await setup.runtime.answer({ id: question.id, answers: answer });
+    question = setup.runtime.snapshot().questions[0];
     assert.equal(question.state, 'submitted');
     assert.equal(question.reason, '已交给浏览器执行，等待云端确认');
-    assert.equal(question.answer?.source, 'automatic');
+    assert.equal(question.answer?.source, 'user');
     assert.deepEqual(setup.responses, [[
       'agent-one',
       'toolu_cloud_1',
       { behavior: 'allow', updatedInput: { answers: answer } },
     ]]);
-    const autoSummary = summarizeWebAnswer({ kind: 'question', answers: answer });
-    assert.equal(setup.ledger.lookup({ webSessionId: 'session_one', toolUseId: 'toolu_cloud_1', digest: autoSummary.digest }), 'automatic');
+    const userSummary = summarizeWebAnswer({ kind: 'question', answers: answer });
+    assert.equal(setup.ledger.lookup({ webSessionId: 'session_one', toolUseId: 'toolu_cloud_1', digest: userSummary.digest }), 'user');
 
     setup.agents[0].pendingPermissions = [];
     await setup.runtime.refresh();
     question = setup.runtime.snapshot().questions[0];
     assert.equal(question.state, 'resolved');
     assert.equal(question.reason, '云端已记录结果');
-    assert.equal(isUnreadAutomaticAnswer(question), true);
+    assert.equal(isQuestionTodo(question), false);
 
-    // Blocked keywords still prevent automatic answer on cloud requests, while manual answer with "other" text succeeds and records source=user
-    const sensitivePrompt = { ...prompt, question: '是否合并 PR #1704？' };
+    // 最终验收题目显示 ownerOnly 原因，带“其他”文本的人工回答正常提交并记为 user
+    const sensitivePrompt = { ...prompt, question: '验收方式如何选择？' };
     const sensitiveRequest: AgentPermissionRequest = {
       ...cloudRequest,
       id: 'toolu_cloud_2',
@@ -532,23 +663,23 @@ test('云端提问离线时自动选明确推荐项、在线时只提醒、拦�
     await setup.runtime.refresh();
     const pendingSensitive = setup.runtime.snapshot().questions.find(item => item.state === 'pending')!;
     assert.ok(pendingSensitive);
-    assert.match(pendingSensitive.reason, /验收或合并授权/);
+    assert.match(pendingSensitive.reason, /最终验收/);
     assert.equal(setup.responses.length, 1);
 
     await setup.runtime.answer({
       id: pendingSensitive.id,
       answers: { [sensitivePrompt.question]: [] },
-      otherAnswers: { [sensitivePrompt.question]: '先人工复核后再合并' },
+      otherAnswers: { [sensitivePrompt.question]: '先人工复核后再验收' },
     });
     const manualSubmitted = setup.runtime.snapshot().questions.find(item => item.id === pendingSensitive.id)!;
     assert.equal(manualSubmitted.state, 'submitted');
     assert.equal(manualSubmitted.reason, '已交给浏览器执行，等待云端确认');
     assert.equal(manualSubmitted.answer?.source, 'user');
-    assert.deepEqual(manualSubmitted.answer?.otherAnswers, { [sensitivePrompt.question]: '先人工复核后再合并' });
+    assert.deepEqual(manualSubmitted.answer?.otherAnswers, { [sensitivePrompt.question]: '先人工复核后再验收' });
     const manualSummary = summarizeWebAnswer({
       kind: 'question',
       answers: { [sensitivePrompt.question]: [] },
-      otherAnswers: { [sensitivePrompt.question]: '先人工复核后再合并' },
+      otherAnswers: { [sensitivePrompt.question]: '先人工复核后再验收' },
     });
     assert.equal(setup.ledger.lookup({ webSessionId: 'session_one', toolUseId: 'toolu_cloud_2', digest: manualSummary.digest }), 'user');
   } finally { await setup.close(); }
@@ -592,10 +723,9 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
     assert.equal(candidates[0]!.id, browserQ.id);
     assert.equal(candidates[0]!.observed, true);
 
-    // Paused -> automatic delegation returns false, manual delegation and manual answer still work
+    // Paused -> manual delegation and manual answer still work
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, paused: true });
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'automatic'), false);
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined), true);
     setup.runtime.cancelBrowserDecision(browserQ.id);
 
     // Paused -> manual answer via runtime.answer is queued and dispatched on next browserSync
@@ -612,7 +742,7 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, paused: false });
 
     // Mode change after delegation cancels queued decision
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined), true);
     assert.equal(setup.runtime.browserState(browserQ.id)?.queued, true);
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'offline' });
     assert.equal(setup.runtime.browserState(browserQ.id)?.queued, false);
@@ -620,7 +750,7 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
     // Normal delegation dispatches decision with source and otherAnswers even in online mode
     await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online', speechEnabled: false });
     assert.equal(
-      setup.runtime.delegateBrowserAnswer(browserQ.id, { [prompt.question]: [] }, { [prompt.question]: '转交其他' }, 'manual'),
+      setup.runtime.delegateBrowserAnswer(browserQ.id, { [prompt.question]: [] }, { [prompt.question]: '转交其他' }),
       true,
     );
     const dispatched = await setup.runtime.browserSync('browser-one', [webpage('one')], [], [{ sessionId: 'one', title: '网页开发', url: 'https://claude.ai/code/session_one' }], ['one']);
@@ -636,7 +766,7 @@ test('云端会话网页提问在同步前不自动作答，有对应云端提�
 
     // Stop prevents delegation
     await setup.runtime.stop();
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), false);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined), false);
   } finally { await setup.close(); }
 });
 
@@ -1249,9 +1379,10 @@ test('1737-presence-fast-switch：慢端口（observe/远程探测各延迟 2 �
     assert.equal(snapOffline.observation.source, 'manual');
     assert.match(snapOffline.observation.reason, /手动离线/);
 
-    // 不额外手动调 refresh()：在途旧扫描结束后必须自动补跑新扫描并在离线模式下完成代答
+    // 不额外手动调 refresh()：在途旧扫描结束后必须自动补跑新扫描，在离线模式下更新原因且不自动代答
     await inflightOldScan;
-    await eventually(() => responses.length === 1);
+    await eventually(() => runtime.snapshot().questions[0]?.reason === '离线：已通知总控，等待回答');
+    assert.equal(responses.length, 0);
 
     // 2. 切回自动模式：configure 也不等待慢端口，且 observation 立即标为“正在读取来源主机在场状态”
     const tAuto = performance.now();

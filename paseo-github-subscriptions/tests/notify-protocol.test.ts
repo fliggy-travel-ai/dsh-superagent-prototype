@@ -33,13 +33,16 @@ test('子会话完成无现任主会话才转 Grok，其他无归属事件只记
   await assert.rejects(deliverToCurrentMain({ target: { agentId: 'old' }, event: 'subagent_done' } as Notice, { ...actions, resolve: async () => { throw Error('离线'); } }), /离线/);
 });
 
-test('问题选项及推荐项完整保留，master 与复盘必须用户确认', () => {
-  const data = { kind: 'question', input: { questions: [{ question: '合并master？', options: [{ label: '等待（推荐）', description: '先验收' }, { label: '继续' }] }] } };
+test('问题选项及推荐项完整保留，questionSummary.text 优先取首题正文而非固定标题 Question，master 与复盘必须用户确认', () => {
+  const data = { title: 'Question', kind: 'question', input: { questions: [{ question: '合并master？', options: [{ label: '等待（推荐）', description: '先验收' }, { label: '继续' }] }, { question: '第二题？', options: [] }] } };
   assert.equal(needsUser(data), true);
   assert.equal(needsUser({ title: '复盘审阅' }), true);
   const q = questionSummary(data);
+  assert.equal(q.text, '合并master？');
+  assert.equal(q.questions.length, 2);
   assert.equal(q.options.length, 2);
   assert.equal(q.recommended.length, 1);
+  assert.equal(questionSummary({ title: '回退标题', input: {} }).text, '回退标题');
 });
 
 test('重复工作区路径排除自身', () => {

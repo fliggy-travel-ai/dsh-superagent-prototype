@@ -235,7 +235,7 @@ function BrowserDrawer({ onOpenDrawer }: { onOpenDrawer(id: DrawerId): void }) {
 
       <RuleNote>
         扩展默认在标签页可见且满 800 毫秒后只点 Allow once，永不点 Always allow 或 Deny；单卡最多点 4 次。网页提问转交到
-        Paseo，在线时进待办，离线时自动选推荐项。
+        Paseo 进入人工待办并按时段规则通知总控；插件不自动代答。
       </RuleNote>
     </View>
   );
@@ -482,9 +482,9 @@ function QaModeDrawer() {
         <Text style={s.muted}>{presenceError ? `读取失败：${presenceError}` : '正在读取问答设置…'}</Text>
       )}
       <View style={[s.row, { justifyContent: 'space-between' }]}>
-        <Text style={s.text}>暂停问答代答与转发</Text>
+        <Text style={s.text}>暂停问答提醒与转发</Text>
         <Switch
-          accessibilityLabel="暂停问答代答与转发"
+          accessibilityLabel="暂停问答提醒与转发"
           disabled={moduleReloading || !settings}
           value={settings?.paused ?? false}
           onValueChange={paused => {
@@ -500,17 +500,17 @@ function QaModeDrawer() {
       <SectionTitle>三种模式怎么工作</SectionTitle>
       <View style={{ gap: 6 }}>
         <Text style={s.small}>
-          • <Text style={s.strong}>在线</Text>：网页提问进入待办总览并语音提醒；原生提问由 Paseo 原生界面处理。
+          • <Text style={s.strong}>在线</Text>：网页提问与会话提问进入待办总览并语音提醒，等待你或总控回答。
         </Text>
         <Text style={s.small}>
-          • <Text style={s.strong}>离线</Text>：插件在满 5 秒后自动选择带“(Recommended)”的选项；选择结果记入待办总览“代答未读”。
+          • <Text style={s.strong}>离线</Text>：不播语音，提问进入人工待办并按升级规则通知总控；插件不自动选择推荐项。
         </Text>
         <Text style={s.small}>
-          • <Text style={s.strong}>自动</Text>：按蓝牙在场判定切换在线或离线；蓝牙未知时按在线处理，不盲目代答。
+          • <Text style={s.strong}>自动</Text>：按蓝牙在场判定切换在线或离线；蓝牙未知时按在线处理。
         </Text>
       </View>
       <RuleNote>
-        必须本人确认的题目（涉及生产环境、删除数据、架构变更、安全凭据或没有推荐项）无论在线离线都不代答，直接触发升级通知。
+        插件不代答，代答由总控按你的选择画像决定。涉及每日任务、复盘审阅、本机现场确认、最终验收、登录验证、资金操作或破坏性清理的题目会标记为仅限本人确认（ownerOnly）。
       </RuleNote>
     </View>
   );
@@ -956,7 +956,7 @@ function EscalationDrawer() {
       {err ? <Text style={{ color: theme.colors.statusDanger, fontSize: 12 }}>{err}</Text> : null}
 
       <RuleNote>
-        主会话有提问未回答时，按时段规则通知 Grok（不代答）。同一问题只通知一次。通知记录在“待办总览”的处理记录中查看。
+        主会话有提问未回答时，按时段规则通知 Grok（独立网页提问同样升级通知；插件不代答，代答由总控决定）。同一问题只通知一次。通知记录在“待办总览”的处理记录中查看。
       </RuleNote>
     </View>
   );

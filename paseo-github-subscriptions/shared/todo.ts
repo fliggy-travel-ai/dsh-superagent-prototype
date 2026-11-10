@@ -2,10 +2,10 @@ import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 import { QuestionPromptSchema } from './presence.ts';
 
-export const TodoTypeSchema = z.enum(['ask', 'native', 'web', 'stall', 'esc', 'read']);
+export const TodoTypeSchema = z.enum(['ask', 'native', 'web', 'stall', 'esc']);
 export type TodoType = z.infer<typeof TodoTypeSchema>;
 
-export const TodoLabelSchema = z.enum(['网页提问', '会话提问', '网页等待', '停滞会话', '升级事件', '代答未读']);
+export const TodoLabelSchema = z.enum(['网页提问', '会话提问', '网页等待', '停滞会话', '升级事件']);
 export type TodoLabel = z.infer<typeof TodoLabelSchema>;
 
 export const TodoItemSchema = z.strictObject({
@@ -26,18 +26,14 @@ export const TodoItemSchema = z.strictObject({
     fingerprint: z.string().min(1),
     prompts: z.array(QuestionPromptSchema),
   }).optional(),
-  readReceipt: z.strictObject({
-    questionId: z.string().min(1),
-    fingerprint: z.string().min(1),
-  }).optional(),
   escalationId: z.string().optional(),
 });
 export type TodoItem = z.infer<typeof TodoItemSchema>;
 
-export const TodoLogKindSchema = z.enum(['web-approval', 'auto-answer', 'escalation', 'quiet-merge']);
+export const TodoLogKindSchema = z.enum(['web-approval', 'escalation', 'quiet-merge']);
 export type TodoLogKind = z.infer<typeof TodoLogKindSchema>;
 
-export const TodoLogLabelSchema = z.enum(['网页权限点击', '离线代答', '升级投递', '子会话归并']);
+export const TodoLogLabelSchema = z.enum(['网页权限点击', '升级投递', '子会话归并']);
 export type TodoLogLabel = z.infer<typeof TodoLogLabelSchema>;
 
 export const TodoLogItemSchema = z.strictObject({
@@ -95,11 +91,6 @@ export const TodoActionInputSchema = z.strictObject({
       questionId: z.string().min(1),
       answers: z.record(z.string(), z.array(z.string()).max(30)),
       otherAnswers: z.record(z.string(), z.string().max(2000)).optional(),
-    }),
-    z.strictObject({
-      type: z.literal('read'),
-      questionId: z.string().min(1),
-      fingerprint: z.string().min(1),
     }),
     z.strictObject({
       type: z.literal('ack-escalation'),

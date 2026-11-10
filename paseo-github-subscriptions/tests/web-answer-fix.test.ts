@@ -50,7 +50,7 @@ test('网页同步不等待远端在场采样：来源主机卡住时仍立即�
     await setup.runtime.refresh();
     await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
     const browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined), true);
     hang = true;
     const decisions = await within(setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']), 1000);
     assert.notEqual(decisions, 'timeout', '同步被远端采样卡住');
@@ -65,7 +65,7 @@ test('同步超过时间预算时不标记已下发，答案留在队列里，�
     await setup.runtime.refresh();
     await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
     const browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined), true);
     const late = await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one'], { deadline: Date.now() - 1 });
     assert.deepEqual(late, []);
     assert.equal(setup.runtime.browserState(browserQ.id)?.state, 'pending');
@@ -256,7 +256,7 @@ async function todoItems(runtime: PresenceRuntime) {
     selfHost: async () => ({ id: 'srv-mini', name: 'Mac mini' }), hosts: async () => [{ id: 'srv-mini', name: 'Mac mini', online: true }],
     presence: async () => runtime.snapshot(), browser: async () => null, stalled: async () => null,
     remoteLocal: async () => { throw new Error('no remote'); }, remoteAct: async () => ({ ok: false, message: 'no' }),
-    answerQuestion: async () => ({}), markQuestionRead: async () => ({}),
+    answerQuestion: async () => ({}),
   });
   return (await todo.local()).items;
 }
@@ -377,7 +377,7 @@ test('审阅 6：下发答案写盘期间执行器看到的状态始终是“排
     await setup.runtime.refresh();
     await setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']);
     const browserQ = setup.runtime.snapshot().questions.find(item => item.source === 'browser')!;
-    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined, 'manual'), true);
+    assert.equal(setup.runtime.delegateBrowserAnswer(browserQ.id, answer, undefined), true);
     let done = false;
     const seen: string[] = [];
     const sync = setup.runtime.browserSync('browser-one', [webpage()], [], syncSessions, ['one']).finally(() => { done = true; });

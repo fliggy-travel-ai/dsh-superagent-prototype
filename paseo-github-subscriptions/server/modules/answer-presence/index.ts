@@ -2,23 +2,28 @@ import * as presenceRpc from '../../../shared/presence.ts';
 import * as bluetoothRpc from '../../../shared/bluetooth.ts';
 import { readGuardPresence } from '../../guard-presence.ts';
 import { listBluetoothTargets, saveBluetoothTarget } from '../../bluetooth-target.ts';
+import { OWNER_ONLY_FALLBACK, OwnerOnlyConfigSchema, type OwnerOnlyConfig } from '../../questions.ts';
 import { isMainInstance, mainOf, type Module } from '../types.ts';
 
 /** 问答模式与蓝牙在场判定、语音提醒。 */
-export const presenceModule: Module = {
+export const presenceModule: Module<OwnerOnlyConfig> = {
   id: 'answer.presence',
   label: '问答模式与蓝牙',
   defaultEnabled: true,
   appliesTo: isMainInstance,
+  config: {
+    section: 'ownerOnly',
+    spec: { schema: OwnerOnlyConfigSchema, fallback: OWNER_ONLY_FALLBACK },
+  },
   register(context) {
-    const { server } = context;
+    const { server, config } = context;
     const services = mainOf(context);
+    if (config?.localKeywords) services.ownerOnlyKeywords = config.localKeywords;
     const ready = () => services.readyPresence();
     void ready().catch(() => {});
     server.handle(presenceRpc.presenceSnapshot, async () => (await ready()).snapshot());
     server.handle(presenceRpc.presenceConfigure, async input => (await ready()).configure(input));
     server.handle(presenceRpc.presenceAnswer, async input => (await ready()).answer(input));
-    server.handle(presenceRpc.presenceRead, async input => (await ready()).markRead(input));
     server.handle(presenceRpc.presenceLocal, async () => readGuardPresence());
     server.handle(presenceRpc.presenceLocalSpeech, async () => {
       const current = await ready();

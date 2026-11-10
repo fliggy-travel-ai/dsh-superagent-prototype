@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginServerContext } from '@getpaseo/plugin/server';
 import type { EscalationSnapshot } from '../../../shared/escalation.ts';
+import type { Question } from '../../../shared/presence.ts';
 import type { SharedDaemon } from '../../core/daemon.ts';
 import { isMainSession, type RolesReader, type WorkspaceRoles, parseWorkspaceRoles } from '../../core/session-roles.ts';
 import type { SettingsStore } from '../../core/settings-store.ts';
@@ -15,13 +16,14 @@ import { duplicateWorkspaceIds, type AgentInfo, type WorkspaceInfo } from '../..
 import { questionRequest } from '../../notify/routing.ts';
 import { EscalationScheduleSchema, holdAsked } from '../../notify/schedule.ts';
 import { loadState, saveState } from '../../notify/store.ts';
+import { DEFAULT_LOCAL_CONFIRM_KEYWORDS } from '../../questions.ts';
 import type { RuntimeSettings, EscalationSection } from './config.ts';
 import { createSender } from './deliver.ts';
 import { prefilter } from './prefilter.ts';
 import { QuotaAlerts, isQuotaError, postQuotaAlert, quotaWebhookConfigPath, quotaWebhookCredentials, quotaWebhookFileDir } from './quota.ts';
 import { CLOSED_REASON_TEXT, EscalationRecords } from './records.ts';
 import { EscalationReconciler, agentView } from './reconcile.ts';
-import { credentialFingerprint, postNotice, storeWebhookCredentials, webhookCredentials, type WebhookCredentials } from './webhook.ts';
+import { buildAskedExtra, credentialFingerprint, postNotice, storeWebhookCredentials, webhookCredentials, type WebhookCredentials } from './webhook.ts';
 
 export interface EscalationOptions {
   server: PluginServerContext;
@@ -39,6 +41,13 @@ export interface EscalationOptions {
   log?: (line: string) => void;
   /** 测试用：替换凭据读取和投递。 */
   credentials?: () => Promise<WebhookCredentials>;
+  /** 本机确认关键词（来自 machine.json 的 ownerOnly.localKeywords）。 */
+  localKeywords?: () => readonly string[];
+  /** 在场状态快照读取，填入 asked 通知的 presence 字段。 */
+  presence?: () => {
+    mode: 'online' | 'offline' | 'unknown';
+    source: 'bluetooth' | 'manual' | 'unavailable';
+  } | null;
 }
 
 const WEBHOOK_CACHE_MS = 60_000;
@@ -58,6 +67,9 @@ export class EscalationRuntime {
   private readonly lifetime = new AbortController();
   private attempt: Attempt | null = null;
   private engine: Engine | null = null;
+  private reconciler: EscalationReconciler | null = null;
+  private enrichNoticeFn: ((notice: Notice) => void) | null = null;
+  private readonly openExternal = new Map<string, Question>();
   private readonly statePath: string;
   private quotaAlerts: QuotaAlerts | null = null;
   private roles: WorkspaceRoles = parseWorkspaceRoles(null);
@@ -111,8 +123,9 @@ export class EscalationRuntime {
       },
       log: line => this.log(line),
     });
+    this.reconciler = reconciler;
     const config: NotifyConfig = {
-      hostId: machineName, machine: machineName, delivery: 'live', mains: [], children: {}, coalesceWindowSeconds: 60,
+      hostId: machineName, machine: machineName, delivery: 'live', mains: [''], children: {}, coalesceWindowSeconds: 60,
       hold: (first, now) => holdAsked(EscalationScheduleSchema.parse(this.schedule()))(first, now),
     };
     // 重载不补发旧事件：清掉早于本次启动的积压；仍待答的问题由 pending 重建后正常投递。
@@ -121,7 +134,33 @@ export class EscalationRuntime {
     if (bootDrops.length) await saveState(this.statePath, state);
     attempt.check();
 
-    const send = createSender({
+    const workspaces = new Map<string, WorkspaceInfo>();
+    const enrichNotice = (notice: Notice) => {
+      if (notice.events?.length) {
+        for (const member of notice.events) enrichNotice(member);
+      }
+      if (notice.event !== 'asked') return;
+      const agent = notice.agentId ? engine.state.agents?.[notice.agentId] : undefined;
+      const parent = agent?.parentAgentId ? engine.state.agents?.[agent.parentAgentId] : undefined;
+      const serverId = (client as { getLastServerInfoMessage?: () => { serverId?: string } | null }).getLastServerInfoMessage?.()?.serverId ?? null;
+      const workspaceTitle = notice.workspaceId ? (workspaces.get(notice.workspaceId)?.name ?? null) : null;
+      const localKeywords = this.options.localKeywords?.() ?? section.ownerOnly?.localKeywords ?? DEFAULT_LOCAL_CONFIRM_KEYWORDS;
+      const presence = this.options.presence?.() ?? null;
+      notice.extra = {
+        ...(notice.extra ?? {}),
+        ...buildAskedExtra(notice, {
+          serverId,
+          workspaceTitle,
+          agentLabels: agent?.labels ?? null,
+          parentLabels: parent?.labels ?? null,
+          localKeywords,
+          presence,
+        }),
+      };
+    };
+    this.enrichNoticeFn = enrichNotice;
+
+    const rawSend = createSender({
       audit,
       isMain: id => config.mains.includes(id),
       prefilter: payload => prefilter(section.prefilter, payload),
@@ -130,7 +169,12 @@ export class EscalationRuntime {
       records: this.records,
       log: line => console.log(line),
     });
+    const send = async (notice: Notice) => {
+      enrichNotice(notice);
+      await rawSend(notice);
+    };
     const engine = new Engine(config, state, next => saveState(this.statePath, next), send, async (id, request) => {
+      if (!id) return this.openExternal.has(request);
       const ref = paseo.agents.ref(id);
       const snapshot = await ref.refresh();
       if (!snapshot) return false;
@@ -138,8 +182,6 @@ export class EscalationRuntime {
     }, audit);
     engine.onResolved = (agentId, requestId) => reconciler.closeRequest(agentId, requestId).then(() => {});
     this.engine = engine;
-
-    const workspaces = new Map<string, WorkspaceInfo>();
     const refreshRoles = async () => {
       try { this.roles = await this.options.roles.read(); this.rolesError = null; }
       catch (error) {
@@ -168,6 +210,9 @@ export class EscalationRuntime {
     const asked = async (agent: { id: string }, request: { id: string; kind?: string; name?: string }) => {
       if (config.mains.includes(agent.id) && questionRequest(request)) await engine.asked(agent.id, request.id, request);
     };
+
+    await this.watchWorkspaces(attempt, paseo, engine, workspaces, run, refreshRoles, section.newObjects);
+    attempt.check();
 
     attempt.add(server.addHook('agent.permission.before', async e => {
       await engine.serial(async () => { await refreshRoles(); updateAgent(e.agent as never); await asked(e.agent, e.request as never); await tick(); });
@@ -229,8 +274,12 @@ export class EscalationRuntime {
       },
     }));
 
-    if (section.newObjects) await this.watchNewObjects(attempt, paseo, engine, workspaces, run, refreshRoles);
-    attempt.check();
+    for (const question of this.openExternal.values()) {
+      run(async () => {
+        await this.enqueueExternalInEngine(question);
+        await tick();
+      });
+    }
     const timer = setInterval(() => run(async () => { await tick(); }), 1000);
     attempt.add(() => clearInterval(timer));
     // 存量记录：回填请求编号后立即对账一次（只结束已归档或不存在的），之后定时对账。
@@ -262,7 +311,7 @@ export class EscalationRuntime {
     this.log('已启动');
   }
 
-  private async watchNewObjects(attempt: Attempt, paseo: Awaited<ReturnType<SharedDaemon['ready']>>['paseo'], engine: Engine, workspaces: Map<string, WorkspaceInfo>, run: (fn: () => Promise<unknown>) => void, refreshRoles: () => Promise<void>) {
+  private async watchWorkspaces(attempt: Attempt, paseo: Awaited<ReturnType<SharedDaemon['ready']>>['paseo'], engine: Engine, workspaces: Map<string, WorkspaceInfo>, run: (fn: () => Promise<unknown>) => void, refreshRoles: () => Promise<void>, announceNewObjects: boolean) {
     const pathOf = async (path: string) => { try { return await realpath(path); } catch { return path.replace(/\/$/, ''); } };
     const announce = async (workspace: { id: string; name: string | null }, path: string, duplicates: string[]) => {
       await engine.enqueue('new_workspace', '', { workspaceId: workspace.id, title: workspace.name ?? '', path, duplicateWorkspaceIds: duplicates }, `workspace:${workspace.id}`);
@@ -270,32 +319,35 @@ export class EscalationRuntime {
       if (job) { job.notice.workspaceId = workspace.id; job.notice.title = workspace.name ?? null; }
       if (this.settings().enabled) await engine.tick();
     };
-    const baseline = await paseo.workspaces.list({ subscribe: {} });
-    if (baseline.subscription) { const owned = baseline.subscription; attempt.add(() => { void owned.release().catch(() => {}); }); }
-    attempt.check();
-    for (const w of baseline.entries) workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path: await pathOf(w.workspaceDirectory || w.projectRootPath) });
-    const stopWorkspaces = baseline.subscription?.subscribe({
-      snapshot: ({ entries }) => {
-        void (async () => {
-          workspaces.clear();
-          for (const w of entries) workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path: await pathOf(w.workspaceDirectory || w.projectRootPath) });
-        })().catch(() => this.log('工作区快照处理失败'));
-      },
-      update: message => {
-        if (message.type !== 'workspace_update') return;
-        const update = message.payload;
-        if (update.kind === 'remove') { workspaces.delete(update.id); return; }
-        run(async () => {
-          const w = update.workspace;
-          const known = workspaces.has(w.id);
-          const path = await pathOf(w.workspaceDirectory || w.projectRootPath);
-          const duplicates = duplicateWorkspaceIds(workspaces, w.id, path);
-          workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path });
-          if (!known) await announce(w, path, duplicates);
-        });
-      },
-    });
-    if (stopWorkspaces) attempt.add(stopWorkspaces);
+    if (paseo.workspaces?.list) {
+      const baseline = await paseo.workspaces.list({ subscribe: {} });
+      if (baseline.subscription) { const owned = baseline.subscription; attempt.add(() => { void owned.release().catch(() => {}); }); }
+      attempt.check();
+      for (const w of baseline.entries) workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path: await pathOf(w.workspaceDirectory || w.projectRootPath) });
+      const stopWorkspaces = baseline.subscription?.subscribe({
+        snapshot: ({ entries }) => {
+          void (async () => {
+            workspaces.clear();
+            for (const w of entries) workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path: await pathOf(w.workspaceDirectory || w.projectRootPath) });
+          })().catch(() => this.log('工作区快照处理失败'));
+        },
+        update: message => {
+          if (message.type !== 'workspace_update') return;
+          const update = message.payload;
+          if (update.kind === 'remove') { workspaces.delete(update.id); return; }
+          run(async () => {
+            const w = update.workspace;
+            const known = workspaces.has(w.id);
+            const path = await pathOf(w.workspaceDirectory || w.projectRootPath);
+            const duplicates = duplicateWorkspaceIds(workspaces, w.id, path);
+            workspaces.set(w.id, { id: w.id, name: w.name, labels: w.labels, path });
+            if (!known && announceNewObjects) await announce(w, path, duplicates);
+          });
+        },
+      });
+      if (stopWorkspaces) attempt.add(stopWorkspaces);
+    }
+    if (!announceNewObjects) return;
     // 创建钩子覆盖创建瞬间；订阅用于补漏。相同工作区共用去重键。
     attempt.add(this.options.server.addHook('workspace.create.after', async e => {
       await engine.serial(async () => {
@@ -305,6 +357,7 @@ export class EscalationRuntime {
         await announce(w, path, duplicateWorkspaceIds(workspaces, w.id, path));
       });
     }));
+    if (!paseo.projects?.list) return;
     const projects = await paseo.projects.list();
     attempt.check();
     const known = new Set(projects.projects.map(p => p.projectId));
@@ -318,6 +371,64 @@ export class EscalationRuntime {
         if (this.settings().enabled) await engine.tick();
       });
     }));
+  }
+
+  private async enqueueExternalInEngine(question: Question) {
+    const engine = this.engine;
+    if (!engine || question.source !== 'browser' || question.delegatedTo) return;
+    const key = `browser:${question.id}:${question.fingerprint}`;
+    if (engine.state.seen[key] !== undefined || engine.state.outbox.some(item => item.notice.key === key)) return;
+    delete engine.state.seen[`permission:${question.id}`];
+    const data = {
+      kind: 'question',
+      name: 'AskUserQuestion',
+      source: 'browser',
+      id: question.id,
+      fingerprint: question.fingerprint,
+      instanceId: question.instanceId ?? null,
+      sessionId: question.sessionId,
+      url: question.url ?? null,
+      title: question.title,
+      input: { questions: question.prompts },
+    };
+    const firstSeen = Date.parse(question.at) || Date.now();
+    await engine.enqueue('asked', '', data, key, undefined, undefined, Date.now(), null, firstSeen);
+    const job = engine.state.outbox.find(item => item.notice.key === key);
+    if (job) {
+      job.notice.title = question.title || '网页会话提问';
+      job.notice.requestId = question.id;
+      job.notice.permissionId = question.id;
+      this.enrichNoticeFn?.(job.notice);
+      await saveState(this.statePath, engine.state);
+    }
+  }
+
+  /** 将非委托的网页提问（source === 'browser' 且无 delegatedTo）送入升级通道。 */
+  enqueueExternal(question: Question): void {
+    if (this.stopped || question.source !== 'browser' || question.delegatedTo) return;
+    const snapshot = structuredClone(question);
+    this.openExternal.set(snapshot.id, snapshot);
+    const engine = this.engine;
+    if (!engine) return;
+    void engine.serial(async () => {
+      await this.enqueueExternalInEngine(snapshot);
+      if (this.settings().enabled) await engine.tick();
+    }).catch(error => this.log(`网页提问升级入队失败：${summarizeError(error)}`));
+  }
+
+  /** 网页提问结束或被关联到云端原生提问时，结束对应的升级记录。 */
+  closeExternal(questionId: string): void {
+    this.openExternal.delete(questionId);
+    if (this.reconciler) {
+      void this.reconciler.closeRequest('', questionId).catch(() => {});
+    } else {
+      this.records.closeRequest('', questionId, 'resolved');
+    }
+    const engine = this.engine;
+    if (!engine) return;
+    void engine.serial(async () => {
+      await engine.resolved('', questionId, undefined, false);
+    }).catch(() => {});
   }
 
   private quotaCredentials() {

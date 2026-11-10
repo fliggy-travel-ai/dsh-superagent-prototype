@@ -77,11 +77,25 @@ test("单事件 HTTP 使用现有鉴权头、稳定标识并包含完整字段",
       "questionSummary",
       "firstSeenAt",
       "answeredBy",
+      "serverId",
+      "needId",
+      "workspaceTitle",
+      "requestId",
+      "answerVia",
+      "prompts",
+      "audience",
+      "presence",
+      "features",
     ])
       assert.ok(Object.hasOwn(received!, field), field);
+    assert.equal(received!.schemaVersion, 1);
     assert.equal(received!.needsUser, true);
     assert.equal(received!.event, "asked");
     assert.equal(received!.machine, "macmini");
+    assert.equal(received!.requestId, "问题");
+    assert.equal(received!.answerVia, "paseo-permission");
+    assert.equal((received!.questionSummary as { text: string }).text, "是否合并");
+    assert.equal("extra" in received!, false);
     assert.match(received!.firstSeenAt as string, /Z$/);
     assert.equal(Array.isArray(received), false);
     assert.equal(webhookPayload(notices[0]).correlationKey, notices[0].key);
@@ -124,4 +138,340 @@ test("保存 webhook 失败时只抛通用提示，不带地址、鉴权头或�
     });
   }
   await assert.rejects(storeWebhookCredentials(undefined, { url: SECRET_URL, auth: SECRET_AUTH }, async () => {}), /Keychain/);
+});
+
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildAskedExtra } from "../server/modules/answer-escalation/webhook.ts";
+import { EscalationRecords } from "../server/modules/answer-escalation/records.ts";
+import { EscalationRuntime } from "../server/modules/answer-escalation/runtime.ts";
+
+test("asked 负载扩展字段：覆盖 AskUserQuestion、request_user_input、request_user_input_async 与云端会话，并正确标注 answerKey、audience 与 presence", () => {
+  const baseNotice: Notice = {
+    id: "n-1",
+    key: "asked:agent-1:perm-1",
+    event: "asked",
+    firstSeenAt: "2026-11-10T10:00:00.000Z",
+    hostId: "macmini",
+    machine: "macmini",
+    agentId: "agent-1",
+    workspaceId: "ws-1",
+    title: "1808【开发中】问答与通知",
+    provider: "claude",
+    permissionId: "perm-1",
+    answeredBy: null,
+    provenance: "not_applicable",
+    questionSummary: { text: "", questions: [], options: [], recommended: [] },
+    needsUser: false,
+    wake: "immediate",
+    coalesceWindowSeconds: 0,
+    at: 1000,
+    data: {
+      id: "perm-1",
+      kind: "question",
+      name: "AskUserQuestion",
+      input: {
+        questions: [
+          {
+            question: "先验证哪个模块？",
+            header: "验证范围",
+            multiSelect: false,
+            options: [
+              { label: "问答与通知（Recommended）", description: "工作包 A" },
+              { label: "容量与迁移", description: "工作包 B" },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  // 1. AskUserQuestion -> answerVia = paseo-permission, answerKey = question
+  const askExtra = buildAskedExtra(baseNotice, {
+    serverId: "srv_demo_1",
+    needId: "1808",
+    workspaceTitle: "1808【开发中】开发自动化插件一期",
+    presence: { mode: "offline", source: "bluetooth" },
+  });
+  const payload1 = webhookPayload({ ...baseNotice, extra: askExtra });
+  assert.equal(payload1.schemaVersion, 1);
+  assert.equal(payload1.serverId, "srv_demo_1");
+  assert.equal(payload1.needId, "1808");
+  assert.equal(payload1.workspaceTitle, "1808【开发中】开发自动化插件一期");
+  assert.equal(payload1.requestId, "perm-1");
+  assert.equal(payload1.answerVia, "paseo-permission");
+  assert.deepEqual(payload1.presence, { mode: "offline", source: "bluetooth" });
+  assert.deepEqual(payload1.features, ["prompts", "audience", "serverId"]);
+  assert.deepEqual(payload1.audience, { ownerOnly: false, category: null, reason: null });
+  const prompts1 = payload1.prompts as Array<Record<string, unknown>>;
+  assert.equal(prompts1.length, 1);
+  assert.equal(prompts1[0]!.answerKey, "先验证哪个模块？");
+  assert.equal(prompts1[0]!.allowOther, true);
+  assert.equal((prompts1[0]!.options as Array<{ recommended: boolean }>)[0]!.recommended, true);
+
+  // 2. request_user_input_async (Codex) -> answerVia = paseo-permission, answerKey = header
+  const codexNotice: Notice = {
+    ...baseNotice,
+    provider: "codex",
+    data: {
+      id: "perm-codex",
+      kind: "question",
+      name: "request_user_input_async",
+      input: {
+        questions: [
+          {
+            id: "0",
+            header: "Question 1",
+            question: "系统提示仍要运行，请在本机点确认后继续？",
+            isOther: true,
+            options: [{ label: "已点击", description: "" }],
+          },
+        ],
+      },
+    },
+  };
+  const codexExtra = buildAskedExtra(codexNotice, {
+    serverId: "srv_demo_1",
+    workspaceTitle: "【每日】屎山代码清理",
+  });
+  assert.equal(codexExtra.answerVia, "paseo-permission");
+  assert.equal((codexExtra.prompts as Array<{ answerKey: string }>)[0]!.answerKey, "Question 1");
+  // daily_task 优先级高于 local_confirm
+  assert.deepEqual(codexExtra.audience, {
+    ownerOnly: true,
+    category: "daily_task",
+    reason: "每日任务弹窗须 Yang 本人查看",
+  });
+
+  // 3. cloud-session -> answerVia = cloud-session, answerKey = question
+  const cloudNotice: Notice = {
+    ...baseNotice,
+    provider: "cloud-session",
+  };
+  const cloudExtra = buildAskedExtra(cloudNotice, { serverId: "srv_demo_1" });
+  assert.equal(cloudExtra.answerVia, "cloud-session");
+  assert.equal((cloudExtra.prompts as Array<{ answerKey: string }>)[0]!.answerKey, "先验证哪个模块？");
+});
+
+test("EscalationRuntime：独立网页提问 enqueueExternal 与 closeExternal 生命周期，且 newObjects=false 时仍维护工作区标题", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "esc-ext-test-"));
+  let workspacesListed = false;
+  let serverRef: ReturnType<typeof createServer> | null = null;
+  const receivedPayloads: Array<Record<string, unknown>> = [];
+
+  serverRef = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    receivedPayloads.push(JSON.parse(body));
+    res.end("ok");
+  });
+  serverRef.listen(0, "127.0.0.1");
+  await once(serverRef, "listening");
+  const port = (serverRef.address() as { port: number }).port;
+
+  try {
+    const fakeServer = {
+      addHook: () => () => {},
+    };
+
+    const fakePaseo = {
+      workspaces: {
+        list: async () => {
+          workspacesListed = true;
+          return {
+            entries: [
+              {
+                id: "ws-pinned",
+                name: "1808【开发中】问答与通知工作区",
+                workspaceDirectory: "/tmp/ws",
+                projectRootPath: "/tmp/ws",
+              },
+            ],
+            subscription: {
+              subscribe: () => () => {},
+              release: async () => {},
+            },
+          };
+        },
+      },
+      agents: {
+        list: async () => ({
+          entries: [],
+          subscription: {
+            subscribe: ({ snapshot }: { snapshot: (arg: { entries: any[] }) => void }) => {
+              snapshot({
+                entries: [
+                  {
+                    agent: {
+                      id: "agent-main-1",
+                      title: "1808【开发中】主会话",
+                      workspaceId: "ws-pinned",
+                      provider: "claude",
+                      status: "idle",
+                      archivedAt: null,
+                      labels: { need: "1808" },
+                      pendingPermissions: [],
+                    },
+                  },
+                ],
+              });
+              return () => {};
+            },
+            release: async () => {},
+          },
+        }),
+        ref: () => ({
+          refresh: async () => true,
+          current: () => ({
+            id: "agent-main-1",
+            status: "idle",
+            archivedAt: null,
+            pendingPermissions: [],
+          }),
+          pendingPermissions: [],
+        }),
+      },
+    };
+
+    const fakeDaemon = {
+      ready: async () => ({
+        paseo: fakePaseo,
+        client: {
+          getLastServerInfoMessage: () => ({ serverId: "srv_test_mini" }),
+        },
+      }),
+    };
+
+    const fakeRoles = {
+      read: async () => ({ pinnedIds: new Set(["ws-pinned"]), activeIds: new Set(["ws-pinned"]) }),
+    };
+
+    const runtimeSettings = {
+      enabled: true,
+      timezone: "Asia/Singapore",
+      immediate: [{ days: "daily" as const, from: "00:00", to: "23:59" }],
+      delayMinutes: 0,
+    };
+
+    const runtime = new EscalationRuntime({
+      directory: dir,
+      machineName: "macmini",
+      section: {
+        timezone: "Asia/Singapore",
+        immediate: [{ days: "daily", from: "00:00", to: "23:59" }],
+        delayMinutes: 0,
+        newObjects: false,
+        quotaAlerts: { enabled: false },
+      },
+      settings: {
+        read: () => runtimeSettings,
+        write: async () => {},
+        error: () => undefined,
+      } as never,
+      server: fakeServer as never,
+      daemon: fakeDaemon as never,
+      roles: fakeRoles as never,
+      credentials: async () => ({
+        url: `http://127.0.0.1:${port}`,
+        auth: "X-Test-Auth: ok",
+      }),
+      presence: () => ({ mode: "offline", source: "manual" }),
+      localKeywords: () => ["本机特别确认词"],
+      log: () => {},
+    });
+
+    await runtime.start();
+    try {
+      // 1. 验证 newObjects=false 时工作区表仍通过 watchWorkspaces 建立
+      assert.equal(workspacesListed, true, "newObjects=false 时也应订阅工作区列表以维护 workspaceTitle");
+
+      // 2. 独立网页提问通过 enqueueExternal 进入升级通道并投递到 Webhook
+      runtime.enqueueExternal({
+        id: "browser:q-ext-1",
+        sessionId: "sess_ext_1",
+        instanceId: "env-27",
+        fingerprint: "fp-ext-1",
+        source: "browser",
+        title: "网页独立开发会话",
+        url: "https://claude.ai/code/session_sess_ext_1",
+        at: new Date().toISOString(),
+        state: "pending",
+        reason: "等待回答",
+        prompts: [
+          {
+            question: "出现本机特别确认词时如何处理？",
+            header: "确认方式",
+            multiSelect: false,
+            allowOther: true,
+            options: [{ label: "本人确认（Recommended）", description: "", recommended: true }],
+          },
+        ],
+      });
+
+      for (let i = 0; i < 60 && receivedPayloads.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      assert.equal(receivedPayloads.length, 1, "独立网页提问应投递到 Webhook");
+      const extPayload = receivedPayloads[0]!;
+      assert.equal(extPayload.event, "asked");
+      assert.equal(extPayload.agentId, null);
+      assert.equal(extPayload.paseo_agent_id, null);
+      assert.equal(extPayload.answerVia, "browser-only");
+      assert.equal(extPayload.serverId, "srv_test_mini");
+      assert.equal(extPayload.instanceId, "env-27");
+      assert.equal(extPayload.sessionId, "sess_ext_1");
+      assert.equal(extPayload.url, "https://claude.ai/code/session_sess_ext_1");
+      assert.equal(extPayload.requestId, "browser:q-ext-1");
+      assert.deepEqual(extPayload.presence, { mode: "offline", source: "manual" });
+      assert.deepEqual(extPayload.audience, {
+        ownerOnly: true,
+        category: "local_confirm",
+        reason: "问题涉及本机确认或本人现场操作，请用户本人确认",
+      });
+
+      // 待办升级记录已生成，且在问题结束时由 closeExternal 自动结束
+      const snapBefore = await runtime.snapshot();
+      assert.equal(snapBefore.pendingEvents.length, 1);
+      assert.equal(snapBefore.pendingEvents[0]!.agentId, "");
+      runtime.closeExternal("browser:q-ext-1");
+      const snapAfter = await runtime.snapshot();
+      assert.equal(snapAfter.pendingEvents.length, 0, "closeExternal 应结束对应的升级待办记录");
+      assert.equal(snapAfter.recentClosures?.[0]?.reason, "提问已回答或已取消");
+    } finally {
+      await runtime.stop();
+    }
+  } finally {
+    serverRef.closeAllConnections();
+    await new Promise<void>((resolve) => serverRef!.close(() => resolve()));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("EscalationRecords：外部网页提问（agentId 为空）不被 agentsWithOpen 纳入 Paseo 会话清扫，且可通过 closeRequest('', id) 精确关闭", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "esc-records-ext-"));
+  try {
+    const records = new EscalationRecords(join(dir, "records.json"));
+    records.upsert({
+      id: "notice-ext-1",
+      event: "asked",
+      agentId: "",
+      sessionTitle: "独立网页会话",
+      workspaceId: null,
+      questionText: "网页提问正文",
+      summary: "网页提问正文",
+      at: new Date().toISOString(),
+      delivery: "live",
+      status: "delivered",
+      acknowledged: false,
+      requests: [{ agentId: "", requestId: "browser:q-1" }],
+    });
+    assert.deepEqual(records.agentsWithOpen(), [], "agentId 为空的外部网页提问不应进入 Paseo 会话轮询列表");
+    assert.equal(records.pending().length, 1);
+    const closed = records.closeRequest("", "browser:q-1", "resolved");
+    assert.equal(closed.length, 1);
+    assert.equal(records.pending().length, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

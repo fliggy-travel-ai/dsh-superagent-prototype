@@ -3,12 +3,12 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { z } from 'zod';
 import type { AgentPermissionRequest, AgentPermissionResponse } from '@getpaseo/protocol/agent-types';
-import { PresenceSettingsSchema, QuestionSchema, type PresenceSettings, type PresenceObservation, type PresenceSnapshot, type Question, type QuestionAnswer, type QuestionPrompt, type QuestionRead, type BrowserQuestion, type BrowserDecision } from '../shared/presence.ts';
+import { PresenceSettingsSchema, QuestionSchema, type PresenceSettings, type PresenceObservation, type PresenceSnapshot, type Question, type QuestionAnswer, type QuestionPrompt, type BrowserQuestion, type BrowserDecision } from '../shared/presence.ts';
 import { atomicWrite } from './storage.ts';
 import { CLOUD_SESSION_LABEL, CLOUD_SESSION_PROVIDER_ID } from '../shared/cloud-session.ts';
 import { CLOUD_MANUAL_REQUEST_MARKER } from './cloud-session/index.ts';
 import { SPEECH_COOLDOWN_MS, SpeechEventSchema, type SpeechResult } from '../shared/speech.ts';
-import { automaticAnswerBlockReason, browserQuestionMatchesPrompts, nativePrompts, nativeResponse, questionFingerprint, recommendedAnswers, validateAnswers } from './questions.ts';
+import { browserQuestionMatchesPrompts, nativePrompts, nativeResponse, ownerOnlyReason, questionFingerprint, validateAnswers } from './questions.ts';
 import type { WebRequestLedger } from './web-request/ledger.ts';
 import { webRequestDetailReason, type CloudRequestOutcome, type WebRequestResult } from '../shared/web-request.ts';
 
@@ -31,6 +31,9 @@ export interface PresencePort {
   selfId?(): string | null;
   remoteSpeechEnabled?(hostId: string): Promise<boolean>;
   remoteSpeechState?(hostId: string): Promise<{ enabled: boolean; configured: boolean }>;
+  enqueueExternal?(question: Question): void;
+  closeExternal?(id: string): void;
+  ownerOnlyKeywords?(): readonly string[];
 }
 
 export function isMissingRpcMethodError(error: unknown): boolean {
@@ -59,7 +62,7 @@ function immediateObservation(
     return { mode: 'online', observedAt: new Date().toISOString(), source: 'manual', reason: '手动在线：语音提醒，等待回答' };
   }
   if (settings.mode === 'offline') {
-    return { mode: 'offline', observedAt: new Date().toISOString(), source: 'manual', reason: '手动离线：选择明确推荐项' };
+    return { mode: 'offline', observedAt: new Date().toISOString(), source: 'manual', reason: '手动离线：不播语音，通知总控' };
   }
   if (currentObservation && previousSettings?.mode === 'auto' && previousSettings.sourceHostId === settings.sourceHostId) {
     return currentObservation;
@@ -133,7 +136,7 @@ export class PresenceRuntime {
   private cloudSessionIds = new Set<string>();
   private observedSessions = new Map<string, Set<string>>();
   private browser = new Map<string, { question: BrowserQuestion; seen: number }>();
-  private decisions = new Map<string, { decision: BrowserDecision; generation: number; automatic: boolean; delegated?: boolean }>();
+  private decisions = new Map<string, { decision: BrowserDecision; generation: number; delegated?: boolean }>();
   private directory: string;
   private port: PresencePort;
   private clock: () => number;
@@ -201,7 +204,7 @@ export class PresenceRuntime {
     const operation = this.writes.then(async () => {
       const before = options?.skipIfUnchanged ? JSON.stringify(this.state) : null;
       const next = structuredClone(this.state); change(next);
-      const retained = (question: Question) => question.state !== 'resolved' || question.answer?.source === 'automatic' && !question.answer.readAt;
+      const retained = (question: Question) => question.state !== 'resolved';
       const finished = next.questions.filter(question => !retained(question)).slice(-100);
       next.questions = [...finished, ...next.questions.filter(retained)];
       next.notified = next.notified.filter(id => next.questions.some(question => question.id === id));
@@ -293,16 +296,6 @@ export class PresenceRuntime {
     }
     return this.snapshot();
   }
-  async markRead(input: QuestionRead): Promise<PresenceSnapshot> {
-    if (this.stopped) throw new Error('问答服务已停止，请稍后再试');
-    await this.persist(next => {
-      const question = next.questions.find(question => question.id === input.id);
-      if (!question || question.fingerprint !== input.fingerprint) throw new Error('问题已变化，请刷新待办');
-      if (question.state !== 'resolved' || question.answer?.source !== 'automatic') throw new Error('只能将已完成的代答标为已读');
-      question.answer.readAt ??= new Date().toISOString();
-    });
-    return this.snapshot();
-  }
   async configure(value: PresenceSettings) {
     if (this.configuring) throw new Error('设置正在保存，请稍后重试');
     const settings = PresenceSettingsSchema.parse(value);
@@ -370,7 +363,7 @@ export class PresenceRuntime {
     if (previous?.fingerprint === question.fingerprint && previous.title === question.title && previous.url === question.url && previous.delegatedTo === question.delegatedTo) return;
     await this.persist(next => { this.applyUpsert(next, question); });
   }
-  private pendingReasonIfNotAutoAnswered(question: Question): string | null {
+  private pendingReason(question: Question): string | null {
     if (this.decisions.has(question.id) || this.activeAnswers.has(question.id)) return null;
     if (question.delegatedTo) return null;
     if (question.source === 'browser' && Date.now() - (this.browser.get(question.id)?.seen ?? 0) > 60_000) return null;
@@ -378,10 +371,13 @@ export class PresenceRuntime {
       return '多题提问，请在 Paseo 云端提问或 claude.ai 作答';
     }
     const cloudBrowser = question.source === 'browser' && this.isCloudBrowserQuestion(question.sessionId);
-    const answers = recommendedAnswers(question.prompts);
-    if (!cloudBrowser && this.observation.mode === 'offline' && answers) return null;
-    return (cloudBrowser ? '云端会话提问，等待同步到 Paseo；只接受人工回答' : automaticAnswerBlockReason(question.prompts))
-      ?? (this.observation.mode === 'offline' ? '没有唯一明确的推荐项，请人工选择' : this.observation.mode === 'unknown' ? '在场状态未知，等待用户回答' : '在线：等待用户回答');
+    const nativeEntry = this.native.get(question.id);
+    return (cloudBrowser ? '云端会话提问，等待同步到 Paseo；只接受人工回答' : ownerOnlyReason(question.prompts, {
+      workspaceTitle: question.title,
+      agentLabels: nativeEntry?.agent.labels,
+      localKeywords: this.port.ownerOnlyKeywords?.(),
+    }))
+      ?? (this.observation.mode === 'offline' ? '离线：已通知总控，等待回答' : this.observation.mode === 'unknown' ? '在场状态未知，等待用户回答' : '在线：等待用户回答');
   }
   refresh(requireFresh = false): Promise<void> {
     if (this.stopped) return Promise.resolve();
@@ -439,6 +435,7 @@ export class PresenceRuntime {
     }
     this.cloudSessionIds = nextCloudIds;
     const activeAgents = new Set(agents.filter(agent => !agent.archivedAt).map(agent => agent.id));
+    const newlyDelegatedBrowserIds: string[] = [];
     await this.persist(next => {
       for (const item of discovered) this.applyUpsert(next, item);
       for (const question of next.questions) {
@@ -458,18 +455,22 @@ export class PresenceRuntime {
         }
         if (question.source === 'browser' && !question.delegatedTo) {
           const match = this.findMatchingCloudNativeId(question, next.questions);
-          if (match) question.delegatedTo = match;
+          if (match) {
+            question.delegatedTo = match;
+            newlyDelegatedBrowserIds.push(question.id);
+          }
         }
         if (question.source === 'browser' && question.state === 'submitted' && Date.now() - Date.parse(question.at) > 30_000) { question.state = 'unknown'; question.reason = '网页未确认提交结果，请在原网页检查'; }
       }
       if (!this.stopped && !this.configuring && !next.settings.paused && generation === this.generation) {
         for (const question of next.questions) {
           if (question.state !== 'pending') continue;
-          const nextReason = this.pendingReasonIfNotAutoAnswered(question);
+          const nextReason = this.pendingReason(question);
           if (nextReason !== null && question.reason !== nextReason) question.reason = nextReason;
         }
       }
     }, { skipIfUnchanged: true });
+    for (const id of newlyDelegatedBrowserIds) this.port.closeExternal?.(id);
     if (generation !== this.generation || this.stopped) return;
     for (const question of this.state.questions.filter(item => item.state === 'pending')) await this.processSafely(question, generation);
   }
@@ -544,11 +545,8 @@ export class PresenceRuntime {
       if (question.reason !== reason) await this.persist(next => { const item = next.questions.find(item => item.id === question.id); if (item) item.reason = reason; });
       return;
     }
-    const cloudBrowser = question.source === 'browser' && this.isCloudBrowserQuestion(question.sessionId);
-    const answers = recommendedAnswers(question.prompts);
-    if (!cloudBrowser && this.observation.mode === 'offline' && answers) { await this.answer({ id: question.id, answers }, true); return; }
-    const reason = (cloudBrowser ? '云端会话提问，等待同步到 Paseo；只接受人工回答' : automaticAnswerBlockReason(question.prompts)) ?? (this.observation.mode === 'offline' ? '没有唯一明确的推荐项，请人工选择' : this.observation.mode === 'unknown' ? '在场状态未知，等待用户回答' : '在线：等待用户回答');
-    if (question.reason !== reason) await this.persist(next => { const item = next.questions.find(item => item.id === question.id); if (item) item.reason = reason; });
+    const reason = this.pendingReason(question);
+    if (reason !== null && question.reason !== reason) await this.persist(next => { const item = next.questions.find(item => item.id === question.id); if (item) item.reason = reason; });
     const alreadySpeaking = [...this.speaking].some(item => item.id === question.id);
     if (this.observation.mode === 'online' && !this.state.notified.includes(question.id) && !alreadySpeaking && !this.blockingNotifications.size && this.clock() >= this.state.speechRetryAt) {
       const mode = this.state.settings.mode;
@@ -701,9 +699,16 @@ export class PresenceRuntime {
         at: new Date().toISOString(), state: 'pending', reason: '等待回答',
         ...(delegatedTo ? { delegatedTo } : {}),
       });
+      const stored = this.state.questions.find(item => item.id === id);
+      if (stored?.delegatedTo) {
+        this.port.closeExternal?.(id);
+      } else if (stored && stored.state === 'pending') {
+        this.port.enqueueExternal?.(stored);
+      }
     }
     const current = new Set(questions.map(question => browserKey(instanceId, question)));
     for (const question of this.state.questions.filter(item => item.instanceId === instanceId && !current.has(item.id))) { this.browser.delete(question.id); this.decisions.delete(question.id); }
+    const closedExternalIds: string[] = [];
     await this.persist(next => { for (const question of next.questions.filter(item => item.instanceId === instanceId)) {
       const result = results.find(result => browserKey(instanceId, { ...question, id: result.id, fingerprint: result.fingerprint }) === question.id && result.sessionId === question.sessionId);
       if (result && (question.state === 'submitted' || question.state === 'unknown')) {
@@ -711,7 +716,11 @@ export class PresenceRuntime {
         else { question.state = 'unknown'; question.reason = '网页回答结果未知，请在原网页检查'; }
       }
       const observed = observedSessionIds.includes(question.sessionId) && sessions.some(session => session.sessionId === question.sessionId);
-      if (observed && !current.has(question.id) && question.state !== 'resolved') { question.reason = question.state === 'unknown' ? '网页已结束此提问，回答是否生效未确认' : '网页已结束此提问'; question.state = 'resolved'; }
+      if (observed && !current.has(question.id) && question.state !== 'resolved') {
+        question.reason = question.state === 'unknown' ? '网页已结束此提问，回答是否生效未确认' : '网页已结束此提问';
+        question.state = 'resolved';
+        closedExternalIds.push(question.id);
+      }
     }
     for (const question of next.questions) {
       if (question.source !== 'native' || !question.webRetry || !question.webSessionId || !question.toolUseId) continue;
@@ -721,6 +730,7 @@ export class PresenceRuntime {
         question.state = 'resolved'; question.reason = '网页上已没有这道提问，请在 claude.ai 核对结果'; endWebRetry(next, question);
       }
     } });
+    for (const id of closedExternalIds) this.port.closeExternal?.(id);
     // 在场状态用 scan() 每 5 秒刷新的缓存值；远端来源主机可能要十几秒才响应，不能在同步路径里等待。
     if (generation !== this.generation || this.stopped) return [];
     for (const question of this.state.questions.filter(item => item.instanceId === instanceId && current.has(item.id) && item.state === 'pending')) await this.processSafely(question, generation);
@@ -734,7 +744,7 @@ export class PresenceRuntime {
     for (const [id, entry] of this.decisions) {
       if (!current.has(id)) continue;
       if (overdue()) break;
-      const valid = () => entry.generation === this.generation && !this.stopped && !this.configuring && (!entry.automatic || !this.state.settings.paused && (entry.delegated || this.observation.mode === 'offline'));
+      const valid = () => entry.generation === this.generation && !this.stopped && !this.configuring;
       if (!valid()) { this.decisions.delete(id); continue; }
       let reserved = false;
       await this.persist(next => {
@@ -742,7 +752,7 @@ export class PresenceRuntime {
         if (valid() && item?.state === 'pending') {
           item.state = 'submitted'; item.at = new Date().toISOString(); item.reason = '回答已下发，等待浏览器确认';
           item.answer = {
-            source: entry.automatic ? 'automatic' : 'user',
+            source: 'user',
             answers: structuredClone(entry.decision.answers),
             ...(entry.decision.otherAnswers ? { otherAnswers: structuredClone(entry.decision.otherAnswers) } : {}),
           };
@@ -787,15 +797,13 @@ export class PresenceRuntime {
     id: string,
     answers: Record<string, string[]>,
     otherAnswers?: Record<string, string>,
-    source: 'automatic' | 'manual' = 'manual',
   ): boolean {
-    if (this.stopped || this.configuring || (source === 'automatic' && this.state.settings.paused)) return false;
+    if (this.stopped || this.configuring) return false;
     const original = this.browser.get(id);
     const question = this.state.questions.find(item => item.id === id);
     if (!original || !question || question.state !== 'pending') return false;
     this.decisions.set(id, {
       generation: this.generation,
-      automatic: source === 'automatic',
       delegated: true,
       decision: {
         id: original.question.id,
@@ -803,7 +811,7 @@ export class PresenceRuntime {
         fingerprint: original.question.fingerprint,
         answers: structuredClone(answers),
         ...(otherAnswers && Object.keys(otherAnswers).length ? { otherAnswers: structuredClone(otherAnswers) } : {}),
-        source,
+        source: 'manual',
         expiresAt: 0,
       },
     });
@@ -829,21 +837,19 @@ export class PresenceRuntime {
       reason: question.reason,
     };
   }
-  answer(input: QuestionAnswer, automatic = false): Promise<PresenceSnapshot> {
+  answer(input: QuestionAnswer): Promise<PresenceSnapshot> {
     if (this.stopped || this.configuring) return Promise.reject(new Error('问答服务正在切换，请稍后再试'));
     if (this.activeAnswers.has(input.id) || this.decisions.has(input.id)) return Promise.reject(new Error('回答已排队，请等待浏览器同步'));
-    const operation = this.performAnswer(input, automatic).finally(() => { this.activeAnswers.delete(input.id); });
+    const operation = this.performAnswer(input).finally(() => { this.activeAnswers.delete(input.id); });
     this.activeAnswers.set(input.id, operation);
     return operation;
   }
-  private async performAnswer(input: QuestionAnswer, automatic: boolean) {
+  private async performAnswer(input: QuestionAnswer) {
     const generation = this.generation;
     const question = this.state.questions.find(item => item.id === input.id);
     if (!question || question.state !== 'pending') throw new Error('此问题已处理或结果待核实，请打开原会话');
     if (question.source === 'browser' && question.pages && question.pages > 1) throw new Error('多题提问，请在 Paseo 云端提问或 claude.ai 作答');
     validateAnswers(question.prompts, input.answers, input.otherAnswers);
-    if (automatic && (input.otherAnswers && Object.keys(input.otherAnswers).length || automaticAnswerBlockReason(question.prompts))) return this.snapshot();
-    if (automatic && (this.stopped || this.state.settings.paused || this.observation.mode !== 'offline')) return this.snapshot();
     let request: AgentPermissionRequest | undefined;
     let agent: QuestionAgent | null = null;
     if (question.source === 'native') {
@@ -853,21 +859,19 @@ export class PresenceRuntime {
       const cloud = isCloudRequest(request, agent);
       nativeResponse(cloud ? { ...request, provider: CLOUD_SESSION_PROVIDER_ID } : request, input.answers, input.otherAnswers);
     } else {
-      if (automatic && this.isCloudBrowserQuestion(question.sessionId)) return this.snapshot();
       const original = this.browser.get(question.id);
       if (!original || Date.now() - original.seen > 60_000) throw new Error('网页已断开，请打开原网页回答');
       await this.persist(next => { const item = next.questions.find(item => item.id === input.id); if (item?.state === 'pending') item.reason = '回答已排队，等待浏览器同步'; });
       if (!this.stopped && !this.configuring && generation === this.generation && this.state.questions.find(item => item.id === input.id)?.state === 'pending') {
         this.decisions.set(question.id, {
           generation,
-          automatic,
           decision: {
             id: original.question.id,
             sessionId: original.question.sessionId,
             fingerprint: original.question.fingerprint,
             answers: structuredClone(input.answers),
             ...(input.otherAnswers && Object.keys(input.otherAnswers).length ? { otherAnswers: structuredClone(input.otherAnswers) } : {}),
-            source: automatic ? 'automatic' : 'manual',
+            source: 'manual',
             expiresAt: 0,
           },
         });
@@ -882,12 +886,12 @@ export class PresenceRuntime {
       if (!item || item.state !== 'pending') throw new Error('此问题正在处理');
       item.state = 'submitted'; item.at = new Date().toISOString(); item.reason = '回答已准备，等待提交确认';
       item.answer = {
-        source: automatic ? 'automatic' : 'user',
+        source: 'user',
         answers: structuredClone(input.answers),
         ...(cleanOther && Object.keys(cleanOther).length ? { otherAnswers: cleanOther } : {}),
       };
     });
-    if (this.stopped || this.configuring || generation !== this.generation || automatic && (this.state.settings.paused || this.observation.mode !== 'offline')) {
+    if (this.stopped || this.configuring || generation !== this.generation) {
       await this.persist(next => { const item = next.questions.find(item => item.id === input.id); if (item?.state === 'submitted') { item.state = 'pending'; delete item.answer; item.reason = '模式已变化，尚未提交'; } });
       return this.snapshot();
     }
@@ -895,7 +899,7 @@ export class PresenceRuntime {
       if (request) {
         const latest = await this.port.refresh(question.sessionId);
         const current = latest && !latest.archivedAt ? latest.pendingPermissions.find(item => item.id === request!.id) : undefined;
-        if (this.stopped || this.configuring || generation !== this.generation || !current || questionFingerprint(current) !== question.fingerprint || automatic && (this.state.settings.paused || this.observation.mode !== 'offline')) {
+        if (this.stopped || this.configuring || generation !== this.generation || !current || questionFingerprint(current) !== question.fingerprint) {
           await this.persist(next => { const item = next.questions.find(item => item.id === input.id); if (item?.state === 'submitted') { item.state = 'pending'; delete item.answer; item.reason = '问题或模式已变化，尚未提交'; } });
           return this.snapshot();
         }
@@ -909,7 +913,7 @@ export class PresenceRuntime {
               toolUseId,
               answers: input.answers,
               ...(cleanOther && Object.keys(cleanOther).length ? { otherAnswers: cleanOther } : {}),
-              source: automatic ? 'automatic' : 'user',
+              source: 'user',
             });
           }
         }

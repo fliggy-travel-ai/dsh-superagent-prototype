@@ -32,6 +32,7 @@ export interface Notice {
   target?: Target;
   requestId?: string;
   events?: Notice[];
+  extra?: Record<string, unknown>;
 }
 export interface Pending {
   agentId: string;
