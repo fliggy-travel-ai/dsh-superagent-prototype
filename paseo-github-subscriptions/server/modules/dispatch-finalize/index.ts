@@ -37,7 +37,7 @@ export const dispatchFinalizeModule: Module = {
     const audit = createAuditWriter(join(directory, 'events.jsonl'));
     const abort = new AbortController();
     const running = new Map<string, Promise<{ ok: boolean; reason: string | null }>>();
-    let saveChain = Promise.resolve();
+    let queue: Promise<unknown> = Promise.resolve();
     const retries = new Map<string, { attempts: number; next: number }>();
     let notifier: Awaited<ReturnType<typeof createNotifier>> | null = null;
     let done: Record<string, boolean> = {};
@@ -49,7 +49,8 @@ export const dispatchFinalizeModule: Module = {
       const port = finalizePort(client);
       const run = (id: string, manual = false) => {
         const existing = running.get(id); if (existing) return existing;
-        const promise = (async () => {
+        const promise = queue.then(async () => {
+          if (abort.signal.aborted) return { ok: false, reason: '模块已停止' };
           const agent = await port.agent(id); const issue = agent && issueOf(agent);
           if (!agent || !issue || agent.labels?.role !== 'main') return { ok: false, reason: '会话不符合收尾条件' };
           const key = JSON.stringify([id, issue]);
@@ -60,13 +61,11 @@ export const dispatchFinalizeModule: Module = {
           const result = await finalize(port, id);
           await audit({ agentId: id, ...result });
           if (result.ok) {
-            saveChain = saveChain.then(async () => {
-              done[key] = true;
-              await mkdir(directory, { recursive: true, mode: 0o700 });
-              await writeFile(`${path}.tmp`, JSON.stringify(done), { mode: 0o600 });
-              await rename(`${path}.tmp`, path);
-            });
-            await saveChain;
+            const next = { ...done, [key]: true };
+            await mkdir(directory, { recursive: true, mode: 0o700 });
+            await writeFile(`${path}.tmp`, JSON.stringify(next), { mode: 0o600 });
+            await rename(`${path}.tmp`, path);
+            done = next;
             retries.delete(id);
             capacityChanged();
           }
@@ -78,7 +77,8 @@ export const dispatchFinalizeModule: Module = {
           }
           await notifier?.send('main_finalized', { agentId: id, ...result }, `finalize:${id}:${issue}:${result.ok ? 'ok' : randomUUID()}`);
           return { ok: result.ok, reason: result.reason };
-        })().finally(() => running.delete(id));
+        }).finally(() => running.delete(id));
+        queue = promise.catch(() => {});
         running.set(id, promise); return promise;
       };
       const schedule = (id: string) => { void run(id).catch(() => {}); };
@@ -103,6 +103,6 @@ export const dispatchFinalizeModule: Module = {
     context.server.handle(dispatchFinalize, async ({ agentId }) => (await start)(agentId, true));
     const removeHook = context.server.addHook('agent.create.after', async e => { void start.then(run => run(e.agent.id)).catch(() => {}); });
     void start.catch(error => context.fail(error));
-    return async () => { removeHook(); abort.abort(); await subscription?.release(); notifier?.stop(); };
+    return async () => { removeHook(); abort.abort(); await start.catch(() => null); await subscription?.release(); await Promise.allSettled(running.values()); notifier?.stop(); };
   },
 };
