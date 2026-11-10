@@ -1,0 +1,16 @@
+{
+  "scripts": {
+    "presence-offline": {
+      "command": "cd ~/.paseo/local-plugins/github-subscriptions && node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/presence-mode.ts offline"
+    },
+    "presence-online": {
+      "command": "cd ~/.paseo/local-plugins/github-subscriptions && node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/presence-mode.ts online"
+    },
+    "presence-auto": {
+      "command": "cd ~/.paseo/local-plugins/github-subscriptions && node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/presence-mode.ts auto"
+    },
+    "presence-status": {
+      "command": "cd ~/.paseo/local-plugins/github-subscriptions && node --import ./tests/resolve-js-to-ts.mjs --experimental-strip-types scripts/presence-mode.ts status"
+    }
+  }
+}
