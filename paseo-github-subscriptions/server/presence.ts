@@ -339,11 +339,35 @@ export class PresenceRuntime {
     if (settings.mode !== 'auto') {
       if (generation === this.generation) this.observation = immediateObservation(settings);
     } else {
-      try {
-        const result = await this.port.observe(settings.sourceHostId);
-        if (generation === this.generation) this.observation = result.observedAt && Date.now() - Date.parse(result.observedAt) < 120_000 && Date.parse(result.observedAt) <= Date.now() + 5000 ? result : unavailable();
-      } catch { if (generation === this.generation) this.observation = unavailable(); }
+      const observation = await this.observeAllHosts(settings.sourceHostId);
+      if (generation === this.generation) this.observation = observation;
     }
+  }
+  /**
+   * 自动模式（Yang 2026-11-10 口径）：任一主机识别到设备即在线；其余情况一律离线。
+   * 拿不到蓝牙状态的主机（未装采样器、连不上、状态过期）视为“没识别到”，不能算在线。
+   */
+  private async observeAllHosts(sourceHostId: string | null): Promise<PresenceObservation> {
+    const fresh = (result: PresenceObservation) => !!result.observedAt && Date.now() - Date.parse(result.observedAt) < 120_000 && Date.parse(result.observedAt) <= Date.now() + 5000;
+    const targets: Array<{ id: string | null; name: string; online: boolean }> = this.hostList.length
+      ? this.hostList.map(host => ({ id: host.id, name: host.name || host.id, online: host.online }))
+      : [{ id: sourceHostId, name: sourceHostId ? '来源主机' : '本机', online: true }];
+    if (sourceHostId && !targets.some(target => target.id === sourceHostId)) targets.push({ id: sourceHostId, name: '来源主机', online: true });
+    const results = await Promise.all(targets.map(async target => {
+      if (!target.online) return { target, result: { ...unavailable(), reason: '主机离线' } };
+      try {
+        const result = await this.port.observe(target.id);
+        return { target, result: fresh(result) ? result : { ...unavailable(), reason: result.observedAt ? '状态已过期或时间异常' : result.reason } };
+      } catch { return { target, result: { ...unavailable(), reason: '无法连接' } }; }
+    }));
+    const present = results.find(item => item.result.mode === 'online');
+    if (present) return targets.length === 1 ? present.result : { ...present.result, reason: `${present.target.name}识别到设备：${present.result.reason}` };
+    const detail = results.map(item => `${item.target.name}：${item.result.mode === 'offline' ? '设备已离开' : item.result.reason}`).join('；');
+    return {
+      mode: 'offline', observedAt: new Date().toISOString(),
+      source: results.some(item => item.result.source === 'bluetooth') ? 'bluetooth' : 'unavailable',
+      reason: `所有主机都没识别到设备，按离线处理，通知总控（${detail}）`.slice(0, 500),
+    };
   }
   private applyUpsert(next: typeof this.state, question: Question) {
     const current = next.questions.find(item => item.id === question.id);
