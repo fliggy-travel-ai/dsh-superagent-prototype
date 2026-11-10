@@ -112,12 +112,12 @@ I. main_migrated（插件已换号）
 - 如果 Mac mini 的 Claude hook 仍按 main-agents.tsv 推送，在 Mac mini 本机同步替换该会话 id（不和其他改写并行）。
 - 在需求 issue 写一条迁移记录评论：旧会话 → 新会话、原账号 → 新账号、原因（五小时额度用尽 / 周额度不足 5%），只写事实。
 
-J. main_migration_planned（影子模式“本该怎么迁”）：只记录到 mode-state 的 migrationPlans（时间、会话、fromProvider → toProvider、reason），用于和负载均衡 bot 的实际动作对比。不通知任何人，不动会话。
+J. main_migration_planned（影子模式“本该怎么迁”）：只记录到 mode-state 的 migrationPlans（时间、会话、fromProvider → toProvider、reason），用于核对插件判定。不通知任何人，不动会话。
 
 K. error（插件推送的主会话错误）：用 Paseo 读一次会话状态。已恢复运行就忽略。额度用尽类错误不处理（由插件换号）。会话卡住按手册 steer 叫醒；连续卡住才告诉 Yang。
 
 L. lb_exception（换号规则处理不了，向 Yang 请示）
-- shadow=true：影子模式，换号仍由负载均衡 bot 负责。只记录，不请示。
+- shadow=true：影子模式的历史事件。只记录，不请示。
 - 同一 oldAgentId + reason 6 小时内只请示一次。
 - 按 reason 写清请示内容（都写项目名+需求名、原账号、触发原因、额度最早恢复时间）：
   · no_target：Mac mini 没有可接手的 Claude 账号（所有账号余量不够）。请 Yang 选：等额度恢复，还是用 Codex 兜底。
@@ -162,7 +162,7 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 | 职责 | 现在怎么做 | 移除后由谁做 |
 |---|---|---|
 | quota-watch 额度监控 | Grok box 上 `/workspace/quota-watch/watch.py`（经 `start-watch.sh` 启动，单实例锁 `/tmp/quota-watch.lock`，pid 在 `/tmp/quota-watch.pid`），每 5 分钟读 `usage ls` 和主会话日志，发 `dsh_quota_alert` | 插件 `capacity.mainSessions`：实时额度报告（10 分钟内）判断，换号由插件做 |
-| 五小时额度低、周额度 0%、日志里限额/封号报错的告警 | watch.py 的 `session_low`、`weekly_exhausted`、`limit/hold` | 插件换号触发（五小时用尽、周额度 ≤5%）；规则罩不住时发 `lb_exception` 给总控 |
+| 五小时额度低、周额度 0%、日志里限额/封号报错的告警 | watch.py 的 `session_low`、`weekly_exhausted`、`limit/hold` | 插件换号触发（五小时用尽、周额度 ≤5%）；插件无法自动完成换号时发 `lb_exception` 给总控，由总控按手册规则处理 |
 | Claude 账号之间迁移主会话（停原会话、建新会话、交接、打标签、归档） | bot 手工执行 | 插件自动换号 |
 | 并行迁移保护、不并行改写 main-agents.tsv | bot 口径 | 插件迁移锁标签 `dsh.migration-lease`、30 分钟冷却；main-agents.tsv 改写交给总控（routine I 节） |
 | 迁移后通知总控更新巡检名单 | bot 发消息 | 插件 `main_migrated` |
@@ -185,7 +185,7 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 
 ### 2.4 配套要改的总控材料（只列位置，随第 4 部分第 6 步一起改）
 
-- `00-总控-profile.md`：“额度均衡……由「主会话账号负载均衡」负责”改为“Claude 间换号由开发自动化插件负责，规则罩不住时插件发 lb_exception 给总控”。
+- `00-总控-profile.md`：“额度均衡……由「主会话账号负载均衡」负责”改为“Claude 间换号由开发自动化插件负责，插件无法自动完成换号时发 lb_exception 给总控，由总控按手册规则处理”。
 - `README.md` 分工第 3 条：同上。
 - `routines-总控/dsh-patrol.md` 第 5 条：“额度由负载均衡”改为“Claude 间换号由插件负责；总控负责 lb_exception 请示、Codex 兜底与回迁、开放需求无活动主会话的告警”。
 - `00-总控-SKILL.md` 第 4 节“派发后若出现 5 小时限额或付款提示，通知负载均衡 bot”、第 8 节“额度负载均衡（已移交）”：按第 3 部分的本机技能修改稿同步改写。
@@ -299,4 +299,13 @@ L. lb_exception（换号规则处理不了，向 Yang 请示）
 | 5. 观察首次真实换号 | 等一次真实触发（五小时用尽或周额度 ≤5%）。不人为制造 | Grok 总控盯事件；插件主会话核对插件状态 | 收到 `main_migrated`；新会话在跑，带 `role=main`+`need`，同一工作区仍置顶且有「主会话」标签；原会话的子会话 `paseo.parent-agent-id`、`paseo.parent-server-id` 指向新会话；原会话已归档；`migrations.jsonl` 有 `result=migrated`；Grok 总控已更新巡检名单并写 issue 评论；Yang 没有收到通知 |
 | 6. 应用技能修改 | 征得 Yang 同意后，本机技能第 4、8 节换成第 3 部分修改稿；Grok 总控同步改 `00-总控-SKILL.md` 第 4、8 节、`00-总控-profile.md`、`README.md`、`dsh-patrol.md` 第 5 条（见 2.4） | 本机总控（本机技能）；Grok 总控（Grok 侧材料） | 读回文件：第 4 节不再含手工 `agent detach` 和 daemon 置顶说明；第 8 节标题为“插件 lb_exception 的处理”；全文不再出现“容量预算”和“通知负载均衡 bot” |
 
-回滚：第 4 步后出现错误迁移或连续 `lb_exception`，插件主会话把 `capacity.migration.mode` 改回 `shadow`（或 `off`）并重载；需要时由负载均衡 bot 用 `start-watch.sh` 重启 quota-watch（源码和状态保留 14 天）。第 6 步之前回滚不需要改技能。
+回滚：第 4 步后出现错误迁移或连续 `lb_exception`，插件主会话把 `capacity.migration.mode` 改回 `shadow`（或 `off`）并重载；换号由总控按第 8 节规则处理（负载均衡 bot 已整个停用，不再重启；quota-watch 源码和状态保留 14 天仅供核对）。第 6 步之前回滚不需要改技能。
+
+
+---
+
+## 执行记录（2026-11-10）
+
+- 20:01 SGT Yang 确认。总控实际采用的弹窗唤醒 routine 与第 1 部分有一处不同：按 Yang 口径**不设“只能本人回答”类别、不看 `audience.ownerOnly`**；是否代答由总控按手册和选择画像判断，每日任务、复盘审阅和手册写明须本人的事项照旧不代答。另删除了通知「DSH 进度页」的条款（该 bot 已停用）。插件仍按定稿发送 `audience` 字段，总控不使用不影响兼容。
+- 20:02:49 SGT 总控停掉 quota-watch 进程，`/tmp/quota-watch.lock` 可获取；负载均衡 bot 整个停用（Yang：规则要写全，不保留“规则管不到的例外”这一职责）。
+- 20:03 SGT 插件主会话：Mac mini `machine.json` 备份后设 `escalation.quotaAlerts.enabled=false`、`capacity.migration.mode=live`，`capacity/migrations-state.json` 不存在（没有进行中或待审迁移），重载插件；读回 `INSTANCE_ROLE=null`、cloud-session available、新实例日志无错误、`capacity.snapshot` 正常。
