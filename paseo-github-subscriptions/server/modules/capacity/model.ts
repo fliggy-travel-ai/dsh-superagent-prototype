@@ -2,10 +2,16 @@ export type Tier = 'max' | 'pro';
 export interface Window { id?: string; remainingPct?: number | null; usedPct?: number | null; resetsAt?: string | null }
 export interface Report { id?: string; sourceId?: string; fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[]; details?: Array<{ id?: string; value?: unknown }> }; lastSuccessful?: { fetchedAt?: string; report?: { status?: string; planLabel?: string | null; windows?: Window[] } } | null }
 export interface Input { provider: string; report?: Report; configuredTier?: Tier; warmup?: boolean; agents: Array<{ id: string; status: string }>; now: number; liveMaxAgeMinutes?: number; paceEnabled?: boolean }
-export function tierOf(label: string | null | undefined, configured?: Tier): { tier: Tier | null; reason: string | null } {
+/**
+ * 档位识别（大小写不敏感）：「Max 5x」或只写「max」按 Max；「Max 20x」等其他倍数需要确认；「Pro…」按 Pro。
+ * 实时报告里套餐标签缺失或认不出时（如新加账号），按配置档位，没有配置就按 Pro 保守计（2 个会话）。
+ */
+export function tierOf(label: string | null | undefined, configured?: Tier, live = false): { tier: Tier | null; reason: string | null } {
   let tier: Tier | null = null;
-  if (/^Max\b/.test(label ?? '')) { if (!/^Max 5x\b/i.test(label ?? '')) return { tier: null, reason: 'Max 档次需要确认' }; tier = 'max'; }
-  else if (/^Pro\b/.test(label ?? '')) tier = 'pro';
+  const text = (label ?? '').trim();
+  if (/^max\b/i.test(text)) { if (/^max\s*\d+x\b/i.test(text) && !/^max\s*5x\b/i.test(text)) return { tier: null, reason: 'Max 档次需要确认' }; tier = 'max'; }
+  else if (/^pro\b/i.test(text)) tier = 'pro';
+  if (!tier && live) return { tier: configured ?? 'pro', reason: null };
   if (!tier) return { tier: null, reason: 'planLabel 未知' };
   if (configured && tier !== configured) return { tier: null, reason: '配置档次与实时档次不一致' };
   return { tier, reason: null };
@@ -20,7 +26,7 @@ export function calculate(input: Input) {
   const { report, now } = input;
   const at = Date.parse(report?.fetchedAt ?? '');
   const live = report?.report?.status === 'available' && Number.isFinite(at) && at <= now && now - at <= (input.liveMaxAgeMinutes ?? 10) * 60_000;
-  const tierResult = tierOf(live ? report?.report?.planLabel : null, input.configuredTier);
+  const tierResult = tierOf(live ? report?.report?.planLabel : null, input.configuredTier, live);
   const displayed = !live && report?.lastSuccessful?.report ? { ...report, report: report.lastSuccessful.report } : report;
   const fiveHour = windowOf(displayed, 'five_hour'); const weekly = windowOf(displayed, 'weekly');
   const eligible = live && tierResult.tier !== null && fiveHour !== null && weekly !== null;
