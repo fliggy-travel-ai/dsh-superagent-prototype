@@ -12,6 +12,7 @@ import { escalationModule } from './answer-escalation/index.ts';
 import { claudeAccountsModule } from './usage-claude-accounts/index.ts';
 import { providerQuotasModule } from './usage-provider-quotas/index.ts';
 import { todoModule } from './todo/index.ts';
+import { dispatchFinalizeModule } from './dispatch-finalize/index.ts';
 
 /**
  * 全部模块，按注册顺序排列（与整合前一致：云端会话最先注册）。
@@ -31,4 +32,5 @@ export const MODULES: readonly Module<any>[] = [
   claudeAccountsModule,
   providerQuotasModule,
   todoModule,
+  dispatchFinalizeModule,
 ];
