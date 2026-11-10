@@ -148,9 +148,86 @@ test('parseReset 支持当天、跨天、跨周和不同时区偏移，未知格
 
   // 非法或未知格式返回 null
   assert.equal(parseReset('Resets tomorrow', now, 300), null);
+  assert.equal(parseReset('Resets Foo 1:30 AM', now, 300), null);
   assert.equal(parseReset('Resets at 13:00 PM', now, 300), null);
   assert.equal(parseReset('Resets at 6:60 AM', now, 300), null);
   assert.equal(parseReset('', now, 300), null);
+
+  // 支持全部星期缩写（含句点）及 Resets H:MM AM/PM（now 为周日 06:07:20 EST）
+  assert.equal(parseReset('Resets Sun 12:00 PM', now, 300), '2026-11-08T17:00:00.000Z');
+  assert.equal(parseReset('Resets Sun. 6:00 AM', now, 300), '2026-11-15T11:00:00.000Z');
+  assert.equal(parseReset('Resets Mon 9:00 AM', now, 300), '2026-11-09T14:00:00.000Z');
+  assert.equal(parseReset('Resets Tue 1:30 AM', now, 300), '2026-11-10T06:30:00.000Z');
+  assert.equal(parseReset('Resets Tue. 1:30 AM', now, 300), '2026-11-10T06:30:00.000Z');
+  assert.equal(parseReset('Resets Wed 3:15 PM', now, 300), '2026-11-11T20:15:00.000Z');
+  assert.equal(parseReset('Resets Thu. 8:45 AM', now, 300), '2026-11-12T13:45:00.000Z');
+  assert.equal(parseReset('Resets Fri 7:00 PM', now, 300), '2026-11-14T00:00:00.000Z');
+  assert.equal(parseReset('Resets Sat. 11:30 PM', now, 300), '2026-11-15T04:30:00.000Z');
+});
+
+test('1737-usage-parse-fix：真实页面 rows（含 U+E027 私有区图标字符与 Tue 星期缩写）正常解析，且归一化后严格相等不误匹配扩展行', async () => {
+  const { readDialog, parseDialog } = loadHelpers();
+  // UTC+8（tzOffset = -480）：2026-11-09T14:30:00Z 对应北京时间周一 22:30
+  const nowMs = Date.parse('2026-11-09T14:30:00.000Z');
+  const tzOffset = -480;
+
+  // 1. 直接验证线上 k1iry23x 抓到的真实 rows（This week 末尾带 U+E027，5 小时窗口为 Resets Tue 1:30 AM）
+  const liveRows = [
+    { label: 'Current session', used: '69', valueText: '69% used', reset: 'Resets Tue 1:30 AM' },
+    { label: 'This week\uE027', used: '80', valueText: '80% used', reset: 'Resets Friday 7:00 PM' },
+    { label: 'Claude Code', used: '97', valueText: '97%', reset: null },
+    { label: 'Chats', used: '0', valueText: '0%', reset: null },
+    { label: 'Cowork', used: '3', valueText: '3%', reset: null },
+    { label: 'Other', used: '0', valueText: '0%', reset: null },
+  ];
+  const parsedLive = structuredClone(parseDialog({ rows: liveRows, now: nowMs, tzOffset }));
+  assert.deepEqual(parsedLive, {
+    observedAt: '2026-11-09T14:30:00.000Z',
+    fiveHour: {
+      usedPct: 69,
+      resetsAt: '2026-11-09T17:30:00.000Z', // 北京时间周二 01:30 AM = UTC 周一 17:30
+      observedAt: '2026-11-09T14:30:00.000Z',
+    },
+    weekly: {
+      usedPct: 80,
+      resetsAt: '2026-11-13T11:00:00.000Z', // 北京时间周五 19:00 PM = UTC 周五 11:00
+      observedAt: '2026-11-09T14:30:00.000Z',
+    },
+  });
+
+  // 2. 验证 readDialog 在 DOM 中同样能抽取星期缩写（含句点）与带 U+E027 / 多余空白的标题
+  const puaAbbrevHtml = dialogFixtureHtml
+    .replace('Current session', '  Current   session \uE001 ')
+    .replace('This week', 'This week\uE027')
+    .replace('<span>Resets at 6:50 AM</span>', '<span>Resets Tue. 1:30 AM</span>')
+    .replace('aria-valuenow="59" aria-valuetext="59% used"', 'aria-valuenow="69" aria-valuetext="69% used"')
+    .replace('aria-valuenow="46" aria-valuetext="46% used"', 'aria-valuenow="80" aria-valuetext="80% used"');
+  const dom = parseHtmlDocument(puaAbbrevHtml, '/settings/usage', 'Usage - Claude');
+  const FakeDate = Object.assign(function () { return { getTimezoneOffset: () => tzOffset }; }, { now: () => nowMs });
+  const extracted = await runInNewContext(`(${readDialog.toString()})()`, {
+    document: dom.document,
+    location: dom.location,
+    Date: FakeDate,
+  });
+  assert.equal(extracted.rows[0]?.reset, 'Resets Tue. 1:30 AM');
+  const parsedFromDom = structuredClone(parseDialog(extracted));
+  assert.equal(parsedFromDom?.fiveHour.usedPct, 69);
+  assert.equal(parsedFromDom?.fiveHour.resetsAt, '2026-11-09T17:30:00.000Z');
+  assert.equal(parsedFromDom?.weekly.usedPct, 80);
+  assert.equal(parsedFromDom?.weekly.resetsAt, '2026-11-13T11:00:00.000Z');
+
+  // 3. 归一化后必须严格相等，绝不用宽松包含误匹配含前缀的其他行
+  assert.equal(
+    parseDialog({
+      now: nowMs,
+      tzOffset,
+      rows: [
+        { label: 'Current session (Sonnet)', used: '50', valueText: '50% used', reset: 'Resets Tue 1:30 AM' },
+        { label: 'This week - Claude Code', used: '60', valueText: '60% used', reset: 'Resets Friday 7:00 PM' },
+      ],
+    }),
+    null,
+  );
 });
 
 test('readDialog 与 parseDialog 从真实样本 usage-dialog.html 提取两个窗口，忽略产品分类行与会话圆环样本', async () => {
