@@ -6,12 +6,23 @@ import { stalledPort } from '../server/stalled-port.ts';
 import type { StalledAgent } from '../server/stalled.ts';
 import { parseWorkspaceRoles } from '../server/core/session-roles.ts';
 
-const parent: StalledAgent = { id: 'parent', hostId: 'mini', title: null, status: 'idle', updatedAt: '2026-11-07T00:00:00Z' };
+const parent: StalledAgent = { id: 'parent', hostId: 'mini', workspaceId: 'wks_main', title: null, status: 'idle', updatedAt: '2026-11-07T00:00:00Z' };
 function fixture() {
-  const state = { rolesFailed: false, shadow: false, failed: false, timeline: [] as Record<string, unknown>[], calls: [] as unknown[], schedules: [] as unknown[] };
+  const state = {
+    now: Date.parse('2026-11-10T06:00:00Z'),
+    rolesFailed: false,
+    shadow: false,
+    failed: false,
+    remoteStatus: 'online' as 'online' | 'offline',
+    remoteListCalls: 0,
+    localAgents: [{ ...parent }] as StalledAgent[],
+    timeline: [] as Record<string, unknown>[],
+    calls: [] as unknown[],
+    schedules: [] as unknown[],
+  };
   const subscription = { id: 'subscription', agentId: 'child', workspaceId: null, agentTitle: null, parentAgentId: null, key: 'test', scope: 'repo', owner: 'test', repo: 'test', number: null, isPr: null, title: null, events: ['comment'], note: null, createdAt: '', updatedAt: '', expiresAt: null, lastEventAt: null, lastEventId: null, delivered: 0, lastDelivery: null };
   const remote = {
-    fetchAgents: async () => ({ entries: [{ agent: { ...parent, id: 'child' } }], pageInfo: { hasMore: false } }),
+    fetchAgents: async () => { state.remoteListCalls++; return { entries: [{ agent: { ...parent, id: 'child', workspaceId: null } }], pageInfo: { hasMore: false } }; },
     scheduleList: async () => ({ schedules: state.schedules }),
     invokePluginRpc: async () => {
       if (state.failed) throw new Error('远端订阅不可用');
@@ -20,14 +31,14 @@ function fixture() {
   };
   const origin = {
     getLastServerInfoMessage: () => ({ serverId: 'mini' }),
-    listHosts: async () => ({ self: { serverId: 'mini' }, hosts: [{ enabled: true, serverId: 'book', status: 'online' }] }),
-    fetchAgents: async () => ({ entries: [{ agent: parent }], pageInfo: { hasMore: false } }),
+    listHosts: async () => ({ self: { serverId: 'mini' }, hosts: [{ enabled: true, serverId: 'book', label: 'MacBook', status: state.remoteStatus }] }),
+    fetchAgents: async () => ({ entries: state.localAgents.map(agent => ({ agent })), pageInfo: { hasMore: false } }),
     scheduleList: async () => ({ schedules: [] }),
     fetchAgentTimeline: async (_id: string, options: unknown) => { state.calls.push(options); return state.timeline.shift(); },
   } as unknown as DaemonClient;
   const hosts = { withHost: async (_id: string, operation: (client: unknown) => Promise<unknown>) => operation(remote) } as unknown as PresenceHosts;
   const roles = { read: async () => { if (state.rolesFailed) throw new Error('工作区状态无法读取'); return parseWorkspaceRoles([{ workspaceId: 'wks_main', pinnedAt: 'x' }]); } };
-  return { state, port: stalledPort(origin, hosts, () => ['local-listener'], roles) };
+  return { state, port: (stalledPort as any)(origin, hosts, () => ['local-listener'], roles, { now: () => state.now }) as ReturnType<typeof stalledPort> };
 }
 
 test('远端有效 GitHub 订阅与 heartbeat 纳入监听，暂停和过期任务不算，读取失败必须报错', async () => {
@@ -37,8 +48,45 @@ test('远端有效 GitHub 订阅与 heartbeat 纳入监听，暂停和过期任�
   const collected = await port.collect();
   assert.deepEqual([...collected.listeners].sort(), ['book:child', 'book:heartbeat', 'mini:local-listener']);
   assert.equal(collected.agents[1].hostId, 'book');
+  state.now += 61_000;
   state.shadow = true; assert.equal((await port.collect()).listeners.has('book:child'), false);
+  state.now += 61_000;
   state.failed = true; await assert.rejects(port.collect(), /远端订阅不可用/);
+});
+
+test('1737-todo-latency：本机无候选主会话时不跨主机读取；远端缓存命中、离线沿用缓存与过期上限报错', async () => {
+  const { state, port } = fixture();
+  const schedule = { status: 'active', target: { type: 'agent', agentId: 'heartbeat' }, nextRunAt: '2099-01-01T00:00:00Z' };
+  state.schedules = [schedule];
+
+  // 1. 本机主会话正在 running，没有候选停滞主会话 -> 不跨主机读取
+  state.localAgents = [{ ...parent, status: 'running' }];
+  const localOnly = await port.collect();
+  assert.equal(state.remoteListCalls, 0, '本机没有候选主会话时不应跨主机拉取');
+  assert.equal(localOnly.agents.length, 1);
+
+  // 2. 本机主会话变为 idle -> 首次跨主机拉取并写入缓存
+  state.localAgents = [{ ...parent, status: 'idle' }];
+  const first = await port.collect();
+  assert.equal(state.remoteListCalls, 1);
+  assert.equal(first.listeners.has('book:child'), true);
+
+  // 3. 20 秒内再次 collect -> 命中远端缓存，不重复跨主机拉取
+  state.now += 20_000;
+  const cached = await port.collect();
+  assert.equal(state.remoteListCalls, 1, '缓存有效期内不应重复请求远端主机');
+  assert.equal(cached.listeners.has('book:child'), true);
+
+  // 4. 50 秒时（超过 45 秒常规 TTL，但未超 60 秒离线缓存上限）远端主机离线 -> 沿用缓存不抛错
+  state.now += 30_000;
+  state.remoteStatus = 'offline';
+  const offlineCached = await port.collect();
+  assert.equal(state.remoteListCalls, 1);
+  assert.equal(offlineCached.listeners.has('book:child'), true);
+
+  // 5. 超过 60 秒离线缓存上限且远端仍离线 -> 明确报错不判定停滞
+  state.now += 15_000;
+  await assert.rejects(port.collect(), /有来源主机离线/);
 });
 
 test('置顶状态随采集返回；读取失败必须报错，不能当作没有主会话', async () => {

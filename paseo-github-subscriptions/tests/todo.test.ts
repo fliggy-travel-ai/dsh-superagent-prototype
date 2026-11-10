@@ -1236,3 +1236,64 @@ test('自动结束的升级事件不在待办中，处理记录写明结束原�
     ['esc-closed:esc-9', '升级投递', '已自动结束（提问已回答或已取消） · 【插件整合】主会话 · 提问：是否合并？'],
   ]);
 });
+
+test('1737-todo-latency：todo.list 远端慢响应或短暂离线时立即返回缓存待办并附带耗时统计，超过过期上限后降级告警', async () => {
+  const { port } = makeFixture();
+  let currentNow = Date.parse('2026-11-09T06:00:00Z');
+  let remoteOnline = true;
+  let remoteHang = false;
+  let remoteCalls = 0;
+
+  let releaseHang: (() => void) | undefined;
+
+  const runtime = new TodoRuntime({
+    ...port,
+    now: () => currentNow,
+    hosts: async () => [
+      { id: 'srv-mini', name: 'Mac mini', online: true },
+      { id: 'srv-book', name: 'MacBook', online: remoteOnline },
+    ],
+    remoteLocal: async hostId => {
+      remoteCalls += 1;
+      if (remoteHang) {
+        await new Promise<void>(resolve => { releaseHang = resolve; });
+      }
+      return port.remoteLocal(hostId);
+    },
+  });
+
+  // 1. 首次读取缓存远端待办，并附带 timings
+  const first = await runtime.list();
+  assert.equal(remoteCalls, 1);
+  assert.equal(first.items.length, 6);
+  assert.equal(typeof (first as any).timings?.localMs, 'number');
+  assert.equal(typeof (first as any).timings?.totalMs, 'number');
+
+  // 2. 缓存有效期内（+5 秒）再次调用 list，直接复用缓存不重复请求远端
+  currentNow += 5_000;
+  const cached = await runtime.list();
+  assert.equal(remoteCalls, 1, '缓存有效期内不应重复请求远端 todo.local');
+  assert.equal(cached.items.length, 6);
+
+  // 3. 超过常规缓存 TTL（+20 秒），但未超过 60 秒离线/慢响应上限，此时远端挂起 -> list 立即返回缓存结果
+  currentNow += 20_000;
+  remoteHang = true;
+  const t0 = Date.now();
+  const slowFallback = await runtime.list();
+  assert.ok(Date.now() - t0 < 400, '远端挂起时 todo.list 应立即返回缓存结果');
+  assert.equal(slowFallback.items.length, 6);
+  assert.equal(slowFallback.warning, null);
+
+  // 4. 远端主机短暂离线（仍未超 60 秒缓存上限） -> 沿用缓存不告警
+  remoteOnline = false;
+  const offlineFallback = await runtime.list();
+  assert.equal(offlineFallback.items.length, 6);
+  assert.equal(offlineFallback.warning, null);
+
+  // 5. 超过 60 秒缓存上限且远端仍离线 -> 丢弃过期缓存并提示未响应
+  currentNow += 45_000;
+  const expired = await runtime.list();
+  assert.equal(expired.items.length, 5);
+  assert.equal(expired.warning, 'MacBook 未响应，以下只含 Mac mini 的待办');
+  releaseHang?.();
+});

@@ -70,11 +70,20 @@ export const TodoHostStatusSchema = z.strictObject({
 });
 export type TodoHostStatus = z.infer<typeof TodoHostStatusSchema>;
 
+export const TodoListTimingsSchema = z.strictObject({
+  localMs: z.number(),
+  hostsMs: z.number(),
+  remoteMs: z.record(z.string(), z.number()),
+  totalMs: z.number(),
+});
+export type TodoListTimings = z.infer<typeof TodoListTimingsSchema>;
+
 export const TodoMergedSnapshotSchema = z.strictObject({
   items: z.array(TodoItemSchema),
   logs: z.array(TodoLogItemSchema),
   hosts: z.array(TodoHostStatusSchema),
   warning: z.string().nullable(),
+  timings: TodoListTimingsSchema.optional(),
 });
 export type TodoMergedSnapshot = z.infer<typeof TodoMergedSnapshotSchema>;
 

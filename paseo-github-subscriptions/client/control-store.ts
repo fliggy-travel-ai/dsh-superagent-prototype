@@ -200,7 +200,8 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
           const result = await callListAgents({ filter: { includeArchived: false }, page: { limit: 100, cursor }, timeout: 5000 });
           for (const { agent } of result.entries) {
             if (agent.archivedAt) continue;
-            if (['idle', 'error'].includes(agent.status)) ids.add(agent.id);
+            const detail = agent as { activeTurn?: unknown; pendingPermissions?: unknown[] };
+            if (['idle', 'error'].includes(agent.status) && !detail.activeTurn && !detail.pendingPermissions?.length) ids.add(agent.id);
             if (agent.status !== 'closed' && !seen.has(agent.id)) {
               seen.add(agent.id);
               sessions.push({ id: agent.id, title: (agent as { title?: string | null }).title?.trim() || '未命名 Paseo 会话' });

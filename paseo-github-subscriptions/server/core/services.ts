@@ -2,7 +2,7 @@ import { Runtime } from '../runtime.ts';
 import { BrowserBridge } from '../browser-bridge.ts';
 import { PresenceRuntime } from '../presence.ts';
 import { PresenceHosts, presencePort } from '../presence-port.ts';
-import { StalledRuntime } from '../stalled.ts';
+import { StalledRuntime, STALLED_SCAN_INTERVAL_MS } from '../stalled.ts';
 import { stalledPort } from '../stalled-port.ts';
 import { sessionRoles } from './session-roles.ts';
 import type { StalledSnapshot } from '../../shared/stalled.ts';
@@ -13,7 +13,7 @@ import type { ModuleHost } from './modules.ts';
 import type { EscalationRuntime } from '../modules/answer-escalation/runtime.ts';
 import type { QuietRuntime } from '../modules/answer-quiet-children/runtime.ts';
 
-const STALLED_CACHE_MS = 45_000;
+const STALLED_CACHE_MS = STALLED_SCAN_INTERVAL_MS;
 
 /**
  * 主实例模块共用的运行时。每个运行时第一次使用时才初始化，失败后下次调用重试。
@@ -31,7 +31,6 @@ export class MainServices {
   quiet: QuietRuntime | null = null;
   stalledPaused = false;
   private stalled: StalledRuntime | null = null;
-  private stalledCache: { at: number; value: Promise<StalledSnapshot> } | null = null;
   private readonly directory: string;
   private readonly daemon: SharedDaemon;
   private readonly home: string;
@@ -80,31 +79,29 @@ export class MainServices {
   }
 
   invalidateStalledCache(): void {
-    this.stalledCache = null;
+    this.stalled?.stop();
+    this.stalled?.invalidate();
   }
 
   /**
-   * `todo.stalled` 与 `todo` 模块共用的停滞会话扫描实例与 45 秒缓存。
+   * `todo.stalled` 与 `todo` 模块共用的停滞会话扫描实例（后台定时刷新 + 每次调用过滤已运行会话）。
    */
   async stalledSnapshot(
     machine?: { modules?: Record<string, boolean> },
     homeOverride?: string,
   ): Promise<StalledSnapshot> {
     if (this.stalledPaused || !this.isModuleRunning('todo.stalled', machine, true)) {
-      return { sessions: [], error: null };
+      this.stalled?.stop();
+      return { sessions: [], error: null, scannedAt: null };
     }
-    const now = Date.now();
-    if (this.stalledCache && now - this.stalledCache.at < STALLED_CACHE_MS) {
-      return this.stalledCache.value;
-    }
-    const promise = (async () => {
-      const githubRunning = this.isModuleRunning('github', machine, true);
-      const [hosts, connection] = await Promise.all([
-        this.readyHosts(),
-        this.daemon.ready(),
-        ...(githubRunning ? [this.github().catch(() => null)] : []),
-      ]);
-      this.stalled ??= new StalledRuntime(
+    const githubRunning = this.isModuleRunning('github', machine, true);
+    const [hosts, connection] = await Promise.all([
+      this.readyHosts(),
+      this.daemon.ready(),
+      ...(githubRunning ? [this.github().catch(() => null)] : []),
+    ]);
+    if (!this.stalled) {
+      this.stalled = new StalledRuntime(
         stalledPort(
           connection.client,
           hosts,
@@ -118,14 +115,13 @@ export class MainServices {
               : [],
           sessionRoles(homeOverride ?? this.home),
         ),
+        { cacheTtlMs: STALLED_CACHE_MS, scanIntervalMs: STALLED_SCAN_INTERVAL_MS },
       );
-      return this.stalled.snapshot();
-    })().catch(error => {
-      if (this.stalledCache?.value === promise) this.stalledCache = null;
-      throw error;
-    });
-    this.stalledCache = { at: now, value: promise };
-    return promise;
+    }
+    if (!this.stopped) {
+      this.stalled.start();
+    }
+    return this.stalled.snapshot();
   }
 
   /** GitHub 订阅运行时。 */
@@ -195,6 +191,7 @@ export class MainServices {
   /** 先停模块，再停运行时；顺序与整合前一致。 */
   async stop(): Promise<void> {
     this.stopped = true;
+    this.stalled?.stop();
     try { await this.initializing; } catch {}
     await Promise.allSettled([this.browserInitializing, this.presenceInitializing, this.hostsInitializing]);
     await Promise.allSettled([this.browser?.stop(), this.presence?.stop()]);

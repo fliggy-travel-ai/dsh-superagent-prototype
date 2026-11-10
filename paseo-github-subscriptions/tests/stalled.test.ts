@@ -102,3 +102,83 @@ test('发布前无法核对本机会话状态时不返回旧卡片', async () =>
   assert.deepEqual(result.sessions, []);
   assert.match(result.error!, /无法核对会话是否已归档/);
 });
+
+test('1737-todo-latency：慢远端端口下 snapshot 立即返回，后台扫描完成后返回结果并附带 scannedAt 与 timings', async () => {
+  const { state, port, runtime } = fixture();
+  let releaseCollect!: () => void;
+  port.collect = async () => {
+    await new Promise<void>(resolve => { releaseCollect = resolve; });
+    return { hostId: 'mini', agents: state.agents, listeners: state.listeners, roles: state.roles };
+  };
+
+  const t0 = Date.now();
+  const first = await runtime.snapshot();
+  assert.ok(Date.now() - t0 < 300, '首次遇到慢端口时 snapshot 应立即返回空快照而不阻塞等待整轮扫描');
+  assert.deepEqual(first.sessions, []);
+  assert.equal(first.scannedAt, null);
+
+  releaseCollect();
+  await new Promise(resolve => setTimeout(resolve, 30));
+
+  // 下一次扫描再次挂起，但 snapshot 应立即返回上一次后台完成的快照
+  let releaseSecond!: () => void;
+  port.collect = async () => {
+    await new Promise<void>(resolve => { releaseSecond = resolve; });
+    return { hostId: 'mini', agents: state.agents, listeners: state.listeners, roles: state.roles };
+  };
+  const t1 = Date.now();
+  const second = await runtime.snapshot();
+  assert.ok(Date.now() - t1 < 300, '后台已有扫描结果时慢端口下 snapshot 应立即返回');
+  assert.deepEqual(second.sessions.map(s => s.agentId), ['parent']);
+  assert.equal(typeof second.scannedAt, 'string');
+  assert.equal(typeof second.timings?.collectMs, 'number');
+  assert.equal(typeof second.timings?.totalMs, 'number');
+  releaseSecond?.();
+  runtime.stop();
+});
+
+test('1737-todo-latency：本机会话变为 running、activeTurn 或有待批权限后，下一次 snapshot 立即剔除不等慢扫描', async () => {
+  const { state, port, runtime } = fixture();
+  const initial = await runtime.snapshot();
+  assert.deepEqual(initial.sessions.map(s => s.agentId), ['parent']);
+
+  const blockCollect = () => {
+    let release!: () => void;
+    port.collect = async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { hostId: 'mini', agents: state.agents, listeners: state.listeners, roles: state.roles };
+    };
+    return async () => {
+      port.collect = async () => ({ hostId: 'mini', agents: state.agents, listeners: state.listeners, roles: state.roles });
+      release?.();
+      await new Promise(resolve => setImmediate(resolve));
+    };
+  };
+
+  // 1. status 变为 running，即使跨主机 collect 卡住也立即剔除
+  let unblock = blockCollect();
+  state.agents[0].status = 'running';
+  const t0 = Date.now();
+  const afterRunning = await runtime.snapshot();
+  assert.ok(Date.now() - t0 < 300, '剔除已运行的本机会话不应等待慢扫描');
+  assert.deepEqual(afterRunning.sessions, []);
+  await unblock();
+
+  // 2. 恢复 idle 后再测 activeTurn
+  state.agents[0].status = 'idle';
+  assert.equal((await runtime.snapshot()).sessions.length, 1);
+
+  unblock = blockCollect();
+  state.agents[0].activeTurn = { id: 'turn-1' };
+  assert.deepEqual((await runtime.snapshot()).sessions, []);
+  await unblock();
+
+  // 3. 恢复后再测 pendingPermissions
+  delete state.agents[0].activeTurn;
+  assert.equal((await runtime.snapshot()).sessions.length, 1);
+
+  unblock = blockCollect();
+  state.agents[0].pendingPermissions = [{ id: 'perm-1' }];
+  assert.deepEqual((await runtime.snapshot()).sessions, []);
+  await unblock();
+});

@@ -12,5 +12,8 @@ export const stalledModule: Module = {
     context.server.handle(stalledSnapshot, () =>
       services.stalledSnapshot(context.machine, context.services.home),
     );
+    return () => {
+      services.invalidateStalledCache?.();
+    };
   },
 };
