@@ -18,8 +18,15 @@ export interface AgentHeartbeatsView {
   readonly error: string | null;
 }
 
+export interface AgentHeartbeatCount {
+  /** 有效（未暂停）的心跳数量。 */
+  readonly active: number;
+  /** 已暂停的心跳数量。 */
+  readonly paused: number;
+}
+
 export interface HeartbeatStoreState {
-  readonly counts: ReadonlyMap<string, number>;
+  readonly counts: ReadonlyMap<string, AgentHeartbeatCount>;
   readonly agents: ReadonlyMap<string, AgentHeartbeatsView>;
 }
 
@@ -59,8 +66,12 @@ export function createHeartbeatStore(client: Pick<PluginClientContext, 'rpc'>) {
       error: null,
     });
     const nextCounts = new Map(state.counts);
-    if (heartbeats.length > 0) nextCounts.set(agentId, heartbeats.length);
-    else nextCounts.delete(agentId);
+    const paused = heartbeats.filter(item => item.status === 'paused').length;
+    if (heartbeats.length > 0) {
+      nextCounts.set(agentId, { active: heartbeats.length - paused, paused });
+    } else {
+      nextCounts.delete(agentId);
+    }
     state = { counts: nextCounts, agents: nextAgents };
     emit();
   };
@@ -70,14 +81,17 @@ export function createHeartbeatStore(client: Pick<PluginClientContext, 'rpc'>) {
     try {
       const result = await client.rpc(listHeartbeatCounts, {});
       if (disposed) return;
-      const nextCounts = new Map<string, number>();
+      const nextCounts = new Map<string, AgentHeartbeatCount>();
       for (const entry of result.counts) {
-        if (entry.count > 0) nextCounts.set(entry.agentId, entry.count);
+        if (entry.count + entry.paused > 0) {
+          nextCounts.set(entry.agentId, { active: entry.count, paused: entry.paused });
+        }
       }
       let same = nextCounts.size === state.counts.size;
       if (same) {
         for (const [agentId, count] of nextCounts) {
-          if (state.counts.get(agentId) !== count) {
+          const previous = state.counts.get(agentId);
+          if (!previous || previous.active !== count.active || previous.paused !== count.paused) {
             same = false;
             break;
           }

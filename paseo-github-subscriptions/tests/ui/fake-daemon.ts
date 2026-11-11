@@ -537,7 +537,10 @@ export class FakeDaemon {
       case 'heartbeats.counts': {
         const counts = [...this.heartbeats.entries()]
           .filter(([, list]) => list.length > 0)
-          .map(([agentId, list]) => ({ agentId, count: list.length }));
+          .map(([agentId, list]) => {
+            const paused = list.filter((item) => item.status === 'paused').length;
+            return { agentId, count: list.length - paused, paused };
+          });
         return { counts };
       }
       case 'heartbeats.list': {

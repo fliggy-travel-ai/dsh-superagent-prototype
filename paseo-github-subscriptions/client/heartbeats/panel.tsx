@@ -287,7 +287,7 @@ function HeartbeatCard({
       <View style={styles.metadata}>
         <Metadata label="运行频率" value={describeCron(heartbeat.cron)} styles={styles} />
         <Metadata label="Cron" value={heartbeat.cron} mono styles={styles} />
-        <Metadata label="时区" value={heartbeat.timezone ?? 'UTC'} styles={styles} />
+        <Metadata label="时区" value={heartbeat.timezone ?? 'UTC（未设置，按 UTC 执行）'} styles={styles} />
         <Metadata
           label="下次运行"
           value={formatRunTime(heartbeat.nextRunAt, now)}
@@ -485,7 +485,7 @@ function HeartbeatForm({
       </View>
       {initial && (initial.prompt !== prompt.trim() || initial.maxRuns !== effectiveMaxRuns) ? (
         <Text style={styles.help}>
-          修改提示词或最大运行次数会重建该心跳并重置历史运行计数。
+          保存后会重新创建心跳，已执行次数从 0 开始。
         </Text>
       ) : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}

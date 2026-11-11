@@ -1,5 +1,5 @@
 import type { PluginButtonRegistration, PluginClientContext } from '@getpaseo/plugin/client';
-import type { HeartbeatStore } from './store.ts';
+import type { AgentHeartbeatCount, HeartbeatStore } from './store.ts';
 
 export const HEARTBEATS_PANEL_ID = 'heartbeats';
 const PILL_ID = 'heartbeats';
@@ -10,9 +10,18 @@ interface RegisteredHeartbeatPill {
   label: string;
 }
 
+/** 气泡数字只统计有效心跳；有暂停的心跳时追加说明，例如“1（另有 1 个暂停）”。 */
+export function heartbeatPillLabel(count: AgentHeartbeatCount): string {
+  return count.paused > 0 ? `${count.active}（另有 ${count.paused} 个暂停）` : String(count.active);
+}
+
+function hasHeartbeats(count: AgentHeartbeatCount | undefined): count is AgentHeartbeatCount {
+  return count !== undefined && count.active + count.paused >= 1;
+}
+
 /**
- * 代理心跳气泡：仅当该代理有心跳（数量 >= 1）时在输入框旁显示心跳数量；
- * 数量清零或清理插件时立即移除气泡。点击气泡打开该代理的心跳面板。
+ * 代理心跳气泡：仅当该代理有心跳（含暂停的）时在输入框旁显示；数字只统计有效心跳，
+ * 暂停的心跳单独标出。心跳全部删除或清理插件时立即移除气泡。点击气泡打开该代理的心跳面板。
  */
 export function createHeartbeatPills(
   client: Pick<PluginClientContext, 'addComposerPill' | 'paseo'> & {
@@ -26,9 +35,9 @@ export function createHeartbeatPills(
   const retryAt = new Map<string, number>();
   let disposed = false;
 
-  const add = (agentId: string, workspaceId: string, count: number) => {
-    if (disposed || count < 1 || pills.has(agentId)) return;
-    const label = String(count);
+  const add = (agentId: string, workspaceId: string, count: AgentHeartbeatCount) => {
+    if (disposed || !hasHeartbeats(count) || pills.has(agentId)) return;
+    const label = heartbeatPillLabel(count);
     try {
       const registration = client.addComposerPill({
         id: PILL_ID,
@@ -72,16 +81,15 @@ export function createHeartbeatPills(
     if (disposed) return;
     const { counts } = store.getState();
     for (const [agentId, pill] of [...pills]) {
-      const count = counts.get(agentId) ?? 0;
-      if (count >= 1) continue;
+      if (hasHeartbeats(counts.get(agentId))) continue;
       pill.registration.remove();
       pills.delete(agentId);
     }
     for (const [agentId, count] of counts) {
-      if (count < 1) continue;
+      if (!hasHeartbeats(count)) continue;
       const existing = pills.get(agentId);
       if (existing) {
-        const label = String(count);
+        const label = heartbeatPillLabel(count);
         if (label !== existing.label) {
           existing.registration.update({ label });
           existing.label = label;

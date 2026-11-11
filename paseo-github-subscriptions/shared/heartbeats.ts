@@ -21,7 +21,10 @@ export type Heartbeat = z.output<typeof HeartbeatSchema>;
 
 export const HeartbeatCountSchema = z.object({
   agentId: z.string(),
-  count: z.number().int().positive(),
+  /** 有效（未暂停）的心跳数量。 */
+  count: z.number().int().nonnegative(),
+  /** 已暂停的心跳数量，暂停的心跳不会唤醒代理。 */
+  paused: z.number().int().nonnegative(),
 });
 
 export type HeartbeatCount = z.output<typeof HeartbeatCountSchema>;

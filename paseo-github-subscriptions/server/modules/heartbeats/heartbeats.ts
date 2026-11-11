@@ -44,16 +44,23 @@ export interface HeartbeatServiceOptions {
   readonly runPaseo?: (agentId: string, args: string[]) => Promise<string>;
 }
 
-function resolvePaseoBinary(): string {
-  const configured = process.env.PASEO_CLI?.trim() || process.env.PASEO_BIN?.trim();
+const PASEO_APP_BIN_DIR = '/Applications/Paseo.app/Contents/Resources/bin';
+
+export function resolvePaseoBinary(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+  home: string = homedir(),
+): string {
+  const configured = env.PASEO_CLI?.trim() || env.PASEO_BIN?.trim();
   if (configured) return configured;
   const candidates = [
-    join(homedir(), '.local', 'bin', 'paseo'),
+    join(home, '.local', 'bin', 'paseo'),
     '/opt/homebrew/bin/paseo',
     '/usr/local/bin/paseo',
+    join(PASEO_APP_BIN_DIR, 'paseo'),
   ];
   for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+    if (exists(candidate)) return candidate;
   }
   return 'paseo';
 }
@@ -105,7 +112,12 @@ function cliError(stdout: string, stderr: string, error: Error): Error {
 function defaultRunPaseo(home: string) {
   return (agentId: string, args: string[]): Promise<string> => {
     const binary = resolvePaseoBinary();
-    const extraPath = [join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin'];
+    const extraPath = [
+      join(homedir(), '.local', 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      PASEO_APP_BIN_DIR,
+    ];
     const currentPath = process.env.PATH ?? '';
     const mergedPath = [...extraPath, ...currentPath.split(':').filter(Boolean)].join(':');
     return new Promise((resolve, reject) => {
@@ -228,15 +240,17 @@ export function createHeartbeatService(options: HeartbeatServiceOptions) {
 
   return {
     async readHeartbeatCounts(): Promise<{ counts: HeartbeatCount[] }> {
-      const byAgent = new Map<string, number>();
+      const byAgent = new Map<string, { count: number; paused: number }>();
       for (const schedule of await readSchedules()) {
         if (schedule.target.type !== 'agent' || schedule.status === 'completed') continue;
-        byAgent.set(schedule.target.agentId, (byAgent.get(schedule.target.agentId) ?? 0) + 1);
+        const entry = byAgent.get(schedule.target.agentId) ?? { count: 0, paused: 0 };
+        if (schedule.status === 'paused') entry.paused += 1;
+        else entry.count += 1;
+        byAgent.set(schedule.target.agentId, entry);
       }
       const counts = [...byAgent.entries()]
-        .filter(([, count]) => count > 0)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([agentId, count]) => ({ agentId, count }));
+        .map(([agentId, entry]) => ({ agentId, count: entry.count, paused: entry.paused }));
       return { counts };
     },
 
@@ -257,9 +271,12 @@ export function createHeartbeatService(options: HeartbeatServiceOptions) {
         const currentCron = cadenceCron(current);
         const currentTimezone =
           current.cadence.type === 'cron' ? (current.cadence.timezone ?? null) : null;
-        const onlyCadenceChanged = current.prompt === input.prompt && current.maxRuns === input.maxRuns;
+        // CLI 的 update 只能设置时区，不能清除；要清除原有时区就只能重建心跳。
+        const clearsTimezone = currentTimezone !== null && input.timezone === null;
+        const canUpdateInPlace =
+          current.prompt === input.prompt && current.maxRuns === input.maxRuns && !clearsTimezone;
 
-        if (onlyCadenceChanged) {
+        if (canUpdateInPlace) {
           if (currentCron !== input.cron || currentTimezone !== input.timezone) {
             const args = ['heartbeat', 'update', input.id, '--cron', input.cron];
             if (input.timezone) args.push('--timezone', input.timezone);

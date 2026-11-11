@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import React from 'react';
 import { describeCron, parseScheduleInput } from '../shared/schedule-input.ts';
-import { createHeartbeatService } from '../server/modules/heartbeats/heartbeats.ts';
+import { createHeartbeatService, resolvePaseoBinary } from '../server/modules/heartbeats/heartbeats.ts';
 import { createHeartbeatStore } from '../client/heartbeats/store.ts';
-import { createHeartbeatPills } from '../client/heartbeats/pills.ts';
+import { createHeartbeatPills, heartbeatPillLabel } from '../client/heartbeats/pills.ts';
 
 function satisfiesRange(version: string, range: string): boolean {
   // 按标准 npm semver 规则核验我们的联合区间表达式（含预发布标签比较）。
@@ -229,7 +229,7 @@ test('createHeartbeatService：读取计数与列表，并通过 CLI 创建、�
     assert.equal(created.heartbeats.length, 1);
     assert.equal(created.heartbeats[0]!.id, 'hb-1');
     assert.deepEqual(await service.readHeartbeatCounts(), {
-      counts: [{ agentId: 'agent-a', count: 1 }],
+      counts: [{ agentId: 'agent-a', count: 1, paused: 0 }],
     });
 
     // 只改频率：原地调用 heartbeat update
@@ -259,20 +259,87 @@ test('createHeartbeatService：读取计数与列表，并通过 CLI 创建、�
     assert.equal(replaced.heartbeats[0]!.prompt, '检查 PR 评审与 CI 状态');
     assert.equal(replaced.heartbeats[0]!.maxRuns, 3);
 
+    // 清除时区：CLI 的 update 不能清除时区，只能新建替换再删除旧心跳
+    const callsBeforeClear = calls.length;
+    const clearedTimezone = await service.editHeartbeat({
+      id: 'hb-2',
+      agentId: 'agent-a',
+      prompt: '检查 PR 评审与 CI 状态',
+      cron: '*/30 * * * *',
+      timezone: null,
+      maxRuns: 3,
+    });
+    assert.deepEqual(
+      calls.slice(callsBeforeClear).map(call => call.args[1]),
+      ['create', 'delete'],
+    );
+    assert.equal(clearedTimezone.heartbeats.length, 1);
+    assert.equal(clearedTimezone.heartbeats[0]!.id, 'hb-3');
+    assert.equal(clearedTimezone.heartbeats[0]!.timezone, null);
+
     // 跨代理删除被拒绝
     await assert.rejects(
-      service.removeHeartbeat({ id: 'hb-2', agentId: 'agent-other' }),
+      service.removeHeartbeat({ id: 'hb-3', agentId: 'agent-other' }),
       /不属于当前代理/,
     );
 
-    // 删除心跳后计数清空
-    const afterDelete = await service.removeHeartbeat({ id: 'hb-2', agentId: 'agent-a' });
+    // 暂停的心跳不计入有效数量，单独统计
+    await writeSchedule('paused-1', {
+      id: 'paused-1',
+      name: null,
+      prompt: '已暂停的心跳',
+      cadence: { type: 'cron', expression: '0 * * * *' },
+      target: { type: 'agent', agentId: 'agent-a' },
+      status: 'paused',
+      createdAt: '2026-11-11T01:30:00.000Z',
+      updatedAt: '2026-11-11T01:30:00.000Z',
+      nextRunAt: null,
+      lastRunAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    });
+    assert.deepEqual(await service.readHeartbeatCounts(), {
+      counts: [{ agentId: 'agent-a', count: 1, paused: 1 }],
+    });
+
+    // 只剩暂停的心跳：有效数量为 0，但仍保留记录
+    await service.removeHeartbeat({ id: 'hb-3', agentId: 'agent-a' });
+    assert.deepEqual(await service.readHeartbeatCounts(), {
+      counts: [{ agentId: 'agent-a', count: 0, paused: 1 }],
+    });
+
+    // 全部删除后计数清空
+    const afterDelete = await service.removeHeartbeat({ id: 'paused-1', agentId: 'agent-a' });
     assert.deepEqual(afterDelete.heartbeats, []);
     assert.deepEqual(await service.readHeartbeatCounts(), { counts: [] });
-    assert.ok(calls.length >= 4);
+    assert.ok(calls.length >= 6);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test('resolvePaseoBinary：依次查找候选路径，包含 Paseo.app 内置命令，找不到时退回 paseo', () => {
+  const appBinary = '/Applications/Paseo.app/Contents/Resources/bin/paseo';
+  const none = () => false;
+  assert.equal(resolvePaseoBinary({ PASEO_CLI: ' /custom/paseo ' }, none, '/home/u'), '/custom/paseo');
+  assert.equal(resolvePaseoBinary({ PASEO_BIN: '/other/paseo' }, none, '/home/u'), '/other/paseo');
+  assert.equal(resolvePaseoBinary({}, path => path === appBinary, '/home/u'), appBinary);
+  assert.equal(
+    resolvePaseoBinary({}, path => path === appBinary || path === '/usr/local/bin/paseo', '/home/u'),
+    '/usr/local/bin/paseo',
+  );
+  assert.equal(
+    resolvePaseoBinary({}, path => path === '/home/u/.local/bin/paseo' || path === appBinary, '/home/u'),
+    '/home/u/.local/bin/paseo',
+  );
+  assert.equal(resolvePaseoBinary({}, none, '/home/u'), 'paseo');
+});
+
+test('heartbeatPillLabel：数字只统计有效心跳，有暂停时追加说明', () => {
+  assert.equal(heartbeatPillLabel({ active: 2, paused: 0 }), '2');
+  assert.equal(heartbeatPillLabel({ active: 1, paused: 1 }), '1（另有 1 个暂停）');
+  assert.equal(heartbeatPillLabel({ active: 0, paused: 2 }), '0（另有 2 个暂停）');
 });
 
 test('客户端心跳气泡、代理范围命令与心跳面板：数量为 0 不显示气泡，>=1 显示并可增删改', async () => {
@@ -365,6 +432,24 @@ test('客户端心跳气泡、代理范围命令与心跳面板：数量为 0 �
         [...handle.registry.pills.values()].find(p => p.id === 'heartbeats')?.button.label,
         '2',
       );
+
+      // 暂停第 2 个心跳：气泡只统计有效心跳，并标出暂停数量
+      handle.daemon.heartbeats.set(
+        'agent-main',
+        second.heartbeats.map(item =>
+          item.id === second.heartbeats[1]!.id ? { ...item, status: 'paused' as const } : item,
+        ),
+      );
+      await store.refreshCounts();
+      assert.equal(
+        [...handle.registry.pills.values()].find(p => p.id === 'heartbeats')?.button.label,
+        '1（另有 1 个暂停）',
+      );
+      handle.daemon.heartbeats.set(
+        'agent-main',
+        second.heartbeats.map(item => ({ ...item, status: 'active' as const })),
+      );
+      await store.refreshCounts();
 
       // 修改第 1 个心跳
       await store.update({
