@@ -8,6 +8,9 @@ import { createSnapshotStore } from './client/store.ts';
 import { createControlStore } from './client/control-store.ts';
 import { githubIcon } from './client/icons.ts';
 import { bind, type Env } from './client/ui.tsx';
+import { createHeartbeatsPanel } from './client/heartbeats/panel.tsx';
+import { createHeartbeatPills, HEARTBEATS_PANEL_ID } from './client/heartbeats/pills.ts';
+import { createHeartbeatStore } from './client/heartbeats/store.ts';
 import { INSTANCE_ROLE } from './shared/instance.ts';
 import { resolveInstance } from './shared/instances.ts';
 
@@ -16,6 +19,7 @@ export default function contribute(client: PluginClientContext) {
   if (!resolveInstance(INSTANCE_ROLE).hostsUi) return () => {};
   const store = createSnapshotStore(client);
   const control = createControlStore(client, client.paseo.agents.list);
+  const heartbeatStore = createHeartbeatStore(client);
   const env: Env = {
     store,
     control,
@@ -35,6 +39,20 @@ export default function contribute(client: PluginClientContext) {
   const removers = [
     client.addScreen({ id: 'main', title: '开发自动化', Component: bind(env, MainScreen) }),
     client.addSidebarHeaderItem({ id: 'main', title: '开发自动化', Component: bind(env, SidebarItem) }),
+    client.addAgentPanel?.({
+      id: HEARTBEATS_PANEL_ID,
+      title: '心跳',
+      icon: 'HeartPulse',
+      Component: createHeartbeatsPanel(heartbeatStore),
+    }),
+    client.addCommandCenterItem?.({
+      id: 'open-heartbeats',
+      title: '打开心跳面板',
+      icon: 'HeartPulse',
+      keywords: ['heartbeat', 'heartbeats', '心跳', '定时'],
+      context: 'agent',
+      onSelect: ctx => ctx.openPanel(HEARTBEATS_PANEL_ID),
+    }),
     client.addCommandCenterItem?.({
       id: 'open-todo',
       title: '打开待办总览',
@@ -80,15 +98,19 @@ export default function contribute(client: PluginClientContext) {
     }),
   ].filter((remove): remove is NonNullable<typeof remove> => typeof remove === 'function');
   const pills = createPills(client, store, bind(env, PillPopover));
+  const heartbeatPills = createHeartbeatPills(client, heartbeatStore);
   const quotaResume = registerQuotaResume(client);
   store.start();
   control.start();
+  heartbeatStore.start();
 
   return () => {
     pills.dispose();
+    heartbeatPills.dispose();
     quotaResume();
     store.dispose();
     control.dispose();
+    heartbeatStore.dispose();
     for (const remove of removers) remove();
   };
 }

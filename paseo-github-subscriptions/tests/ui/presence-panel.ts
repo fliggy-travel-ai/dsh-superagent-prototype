@@ -25,7 +25,14 @@ export function installTsxAndReactNativeHooks() {
     "export const Platform = { select: (obj) => obj.default ?? obj.ios };",
   ].join('\n');
   const rnDataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(rnSource)}`;
-  const pluginUiDataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent("export const useToast = () => ({ show: () => {} }); export const SidebarRow = 'SidebarRow'; export const Icon = 'Icon'; export const StreamedText = 'StreamedText';")}`;
+  const pluginUiSource = [
+    "export const useToast = () => ({ show: () => {}, error: () => {} });",
+    "export const SidebarRow = 'SidebarRow';",
+    "export const Icon = 'Icon';",
+    "export const StreamedText = 'StreamedText';",
+    "export const Modal = Object.assign(({ open, children }) => (open ? children : null), { Content: ({ children }) => children });",
+  ].join('\n');
+  const pluginUiDataUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(pluginUiSource)}`;
 
   registerHooks({
     resolve(specifier, context, nextResolve) {

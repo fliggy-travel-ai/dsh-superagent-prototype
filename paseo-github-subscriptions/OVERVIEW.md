@@ -121,3 +121,38 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 ## 主会话收尾与容量
 
 可选模块自动整理带需求单号的主会话，并按 Claude 实时额度计算可承接数。额度用尽时，可在已核实的 Claude 账号之间迁移主会话；点名账号的会话保留原账号并报告异常。收尾、容量和迁移事件发送到现有总控 webhook。模块默认关闭，迁移默认关闭；配置和联调步骤见 `docs/answer-usage-modules.md`。
+
+## 代理定时心跳
+
+`heartbeats` 模块为每个 Paseo 代理提供定时心跳管理，读取本机 `~/.paseo/schedules` 下的代理计划并通过 Paseo CLI 创建、修改和删除心跳：
+
+- **心跳气泡**：仅当代理已有生效或暂停中的心跳（数量 ≥ 1）时，在输入框旁显示心跳数量气泡，点击气泡直接打开该代理的心跳面板；数量为 0 时不显示气泡。
+- **命令面板与心跳面板**：在代理视图打开命令面板（`⌘K`）选择「打开心跳面板」，或通过代理右侧面板栏的「心跳」入口进入，即可查看、新建、修改和删除当前代理的心跳（支持延迟单次运行、中英文周期短语及五段式 Cron 表达式）。
+
+### 开源来源与许可声明
+
+代理心跳功能参考并改编自 `panrafal/paseo-plugins` 仓库（提交 `004c6a80c6aa8e76bb563694c3eee5c2c0b0466f`）中的 `agent-heartbeats` 目录，按 MIT 许可证使用并针对 Paseo 0.15 / 0.16 插件接口与中文界面做了适配：
+
+```text
+MIT License
+
+Copyright (c) 2026 panrafal
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished
+to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

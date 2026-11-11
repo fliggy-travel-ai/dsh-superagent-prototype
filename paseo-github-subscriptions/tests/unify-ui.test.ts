@@ -20,7 +20,7 @@ test('第二期客户端入口：只注册 1 个主屏幕、1 个开发自动化
     assert.equal('addSettingsScreen' in handle.registry, false);
     assert.deepEqual(
       [...handle.registry.commands.keys()],
-      ['open-todo', 'qa-mode-online', 'qa-mode-offline', 'qa-mode-auto', 'pause-all'],
+      ['open-heartbeats', 'open-todo', 'qa-mode-online', 'qa-mode-offline', 'qa-mode-auto', 'pause-all'],
     );
     await new Promise(r => setTimeout(r, 100));
     const renderer = createTestRenderer();

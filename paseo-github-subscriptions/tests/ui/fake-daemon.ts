@@ -12,6 +12,7 @@ import type { EscalationWindow } from '../../client/control-store.ts';
 import type { QuietSnapshot } from '../../shared/quiet.ts';
 import type { TodoMergedSnapshot } from '../../shared/todo.ts';
 import type { MachineSettingsSnapshot } from '../../shared/machine-settings.ts';
+import type { Heartbeat } from '../../shared/heartbeats.ts';
 
 export interface RpcLogEntry {
   name: string;
@@ -38,6 +39,8 @@ export class FakeDaemon {
   ];
   presence = makePresence();
   adspowerApiKeyConfigured = false;
+  heartbeats = new Map<string, Heartbeat[]>();
+  private heartbeatSeq = 1;
   state: Snapshot;
   defaults: DefaultsSnapshot = {
     enabled: false,
@@ -531,6 +534,69 @@ export class FakeDaemon {
       case removeToken.name:
         this.state = { ...this.state, token: { configured: false, prefix: null, login: null, remaining: null, resetAt: null, error: null } };
         return this.state.token;
+      case 'heartbeats.counts': {
+        const counts = [...this.heartbeats.entries()]
+          .filter(([, list]) => list.length > 0)
+          .map(([agentId, list]) => {
+            const paused = list.filter((item) => item.status === 'paused').length;
+            return { agentId, count: list.length - paused, paused };
+          });
+        return { counts };
+      }
+      case 'heartbeats.list': {
+        const agentId = String(input.agentId ?? '');
+        return { heartbeats: [...(this.heartbeats.get(agentId) ?? [])] };
+      }
+      case 'heartbeats.create': {
+        const agentId = String(input.agentId ?? '');
+        const nowIso = new Date().toISOString();
+        const created: Heartbeat = {
+          id: `hb-${this.heartbeatSeq++}`,
+          name: null,
+          prompt: String(input.prompt),
+          cron: String(input.cron),
+          timezone: (input.timezone as string | null) ?? null,
+          status: 'active',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          nextRunAt: new Date(Date.now() + 900_000).toISOString(),
+          lastRunAt: null,
+          expiresAt: null,
+          maxRuns: (input.maxRuns as number | null) ?? null,
+          runCount: 0,
+        };
+        const next = [...(this.heartbeats.get(agentId) ?? []), created];
+        this.heartbeats.set(agentId, next);
+        return { heartbeats: next };
+      }
+      case 'heartbeats.update': {
+        const agentId = String(input.agentId ?? '');
+        const id = String(input.id ?? '');
+        const current = this.heartbeats.get(agentId) ?? [];
+        const existing = current.find(item => item.id === id);
+        if (!existing) throw new Error(`未找到心跳：${id}`);
+        const nowIso = new Date().toISOString();
+        const updated: Heartbeat = {
+          ...existing,
+          prompt: String(input.prompt),
+          cron: String(input.cron),
+          timezone: (input.timezone as string | null) ?? null,
+          maxRuns: (input.maxRuns as number | null) ?? null,
+          updatedAt: nowIso,
+        };
+        const next = current.map(item => (item.id === id ? updated : item));
+        this.heartbeats.set(agentId, next);
+        return { heartbeats: next };
+      }
+      case 'heartbeats.delete': {
+        const agentId = String(input.agentId ?? '');
+        const id = String(input.id ?? '');
+        const current = this.heartbeats.get(agentId) ?? [];
+        const next = current.filter(item => item.id !== id);
+        if (next.length > 0) this.heartbeats.set(agentId, next);
+        else this.heartbeats.delete(agentId);
+        return { heartbeats: next };
+      }
       default:
         throw new Error(`未知调用 ${name}`);
     }
