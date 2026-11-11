@@ -51,3 +51,13 @@ export function Icon({ name }: { name?: string; size?: number; color?: string })
 export function StreamedText({ text }: { text?: string; isStreaming?: boolean; color?: string; fontSize?: number }) {
   return <Text>{text ?? ''}</Text>;
 }
+
+function ModalRoot({ open, children }: { open: boolean; children?: ReactNode }) {
+  return open ? <View>{children}</View> : null;
+}
+
+function ModalContent({ children }: { children?: ReactNode }) {
+  return <View>{children}</View>;
+}
+
+export const Modal = Object.assign(ModalRoot, { Content: ModalContent });

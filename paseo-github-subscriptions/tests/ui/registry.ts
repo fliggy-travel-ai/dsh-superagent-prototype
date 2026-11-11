@@ -18,6 +18,12 @@ export interface CommandEntry {
   context: string;
   onSelect(ctx: unknown): void | Promise<void>;
 }
+export interface AgentPanelEntry {
+  id: string;
+  title: string;
+  icon: unknown;
+  Component: AnyComponent;
+}
 export interface PillButton {
   title: string;
   label?: string;
@@ -37,8 +43,10 @@ export interface PillEntry {
 export class Registry {
   readonly screens = new Map<string, ScreenEntry>();
   readonly sidebar = new Map<string, SidebarEntry>();
+  readonly agentPanels = new Map<string, AgentPanelEntry>();
   readonly commands = new Map<string, CommandEntry>();
   readonly pills = new Map<string, PillEntry>();
+  readonly openedPanels: Array<{ id: string; workspaceId?: string; agentId?: string }> = [];
   /** 记录所有注册、更新、移除，用来验收清理是否完整。 */
   readonly events: string[] = [];
   version = 0;
@@ -73,6 +81,21 @@ export class Registry {
       if (this.sidebar.delete(entry.id)) this.events.push(`sidebar- ${entry.id}`);
       this.bump();
     };
+  }
+  addAgentPanel(entry: AgentPanelEntry) {
+    if (this.agentPanels.has(entry.id)) throw new Error(`重复的代理面板 ${entry.id}`);
+    this.agentPanels.set(entry.id, entry);
+    this.events.push(`panel+ ${entry.id}`);
+    this.bump();
+    return () => {
+      if (this.agentPanels.delete(entry.id)) this.events.push(`panel- ${entry.id}`);
+      this.bump();
+    };
+  }
+  openPanel(id: string, options?: { workspaceId?: string; agentId?: string }) {
+    this.openedPanels.push({ id, ...options });
+    this.events.push(`open-panel ${id}`);
+    this.bump();
   }
   addCommandCenterItem(entry: CommandEntry) {
     if (this.commands.has(entry.id)) throw new Error(`重复的命令项 ${entry.id}`);

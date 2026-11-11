@@ -71,8 +71,10 @@ export function createPreview(options: PreviewOptions) {
     },
     rpc: (contract: Parameters<FakeDaemon['rpc']>[0], input: unknown) => daemon.rpc(contract, input),
     openScreen: (input: { screenId: string; params?: Record<string, string> }) => route.set({ kind: 'screen', screenId: input.screenId, params: input.params ?? {} }),
+    openPanel: (id: string, panelOptions: { workspaceId: string; agentId?: string }) => registry.openPanel(id, panelOptions),
     addScreen: (entry: Parameters<Registry['addScreen']>[0]) => registry.addScreen(entry),
     addSidebarHeaderItem: (entry: Parameters<Registry['addSidebar']>[0]) => registry.addSidebar(entry),
+    addAgentPanel: (entry: Parameters<Registry['addAgentPanel']>[0]) => registry.addAgentPanel(entry),
     addCommandCenterItem: (entry: Parameters<Registry['addCommandCenterItem']>[0]) => registry.addCommandCenterItem(entry),
     addComposerPill: (entry: PillEntry) => registry.addPill(entry),
   } as unknown as PluginClientContext;
