@@ -415,6 +415,22 @@ test('在线只提醒一次，语音播放不会阻塞网页同步', async () =>
   } finally { finishSpeech(); await setup.close(); }
 });
 
+test('原生提问播报工作区名称，没有工作区名称时退回会话名称', async () => {
+  const texts: string[] = []; let now = Date.now();
+  const setup = await fixture({ speak: async (_host, _id, text) => { texts.push(text); return { played: true }; } }, () => now);
+  try {
+    await setup.runtime.configure({ ...setup.runtime.snapshot().settings, mode: 'online' });
+    setup.agents.push({ ...agent(), title: '会话甲', workspaceName: '【需求名】工作区' });
+    await setup.runtime.refresh(); await setup.runtime.refresh();
+    await eventually(() => texts.length === 1);
+    now += 24 * 60 * 60 * 1000;
+    setup.agents.splice(0, 1, { ...agent(), id: 'agent-2', title: '会话乙', workspaceName: null });
+    await setup.runtime.refresh(); await setup.runtime.refresh();
+    await eventually(() => texts.length === 2);
+    assert.deepEqual(texts, ['注意，【需求名】工作区，有一个问题等待你确认。', '注意，会话乙，有一个问题等待你确认。']);
+  } finally { await setup.close(); }
+});
+
 test('语音失败提示在刷新后保留，下次成功播放后清除', async () => {
   let unavailable = true;
   let attempts = 0;

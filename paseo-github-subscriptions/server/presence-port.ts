@@ -57,14 +57,30 @@ export class PresenceHosts extends HostRouter {
   override async stop() { this.speech.stop(); await super.stop(); }
 }
 
+// 语音播报用工作区名称；读取失败时调用方退回会话名称。
+async function workspaceNames(connection: Awaited<ReturnType<typeof connectDaemon>>) {
+  const names = new Map<string, string>(); let cursor: string | undefined;
+  const filter = connection.client.supportsBackgroundWorkspaces() ? { includeBackground: true } : {};
+  for (let page = 0; page < 10; page++) {
+    const result = await connection.paseo.workspaces.list({ filter, page: { limit: 200, ...(cursor ? { cursor } : {}) } });
+    for (const workspace of result.entries) if (workspace.name) names.set(workspace.id, workspace.name);
+    if (!result.pageInfo.nextCursor || result.pageInfo.nextCursor === cursor) break;
+    cursor = result.pageInfo.nextCursor;
+  }
+  return names;
+}
+
 export function presencePort(connection: Awaited<ReturnType<typeof connectDaemon>>, hosts: PresenceHosts): PresencePort {
   return {
     async list() {
-      const agents: QuestionAgent[] = []; let cursor: string | undefined;
+      const agents: (QuestionAgent & { workspaceId?: string })[] = []; let cursor: string | undefined;
       for (let page = 0; page < 10; page++) {
         const result = await connection.paseo.agents.list({ filter: { includeArchived: false }, page: { limit: 100, cursor } });
         agents.push(...result.entries.map(entry => entry.agent));
-        if (!result.pageInfo.hasMore) return agents;
+        if (!result.pageInfo.hasMore) {
+          const names = await workspaceNames(connection).catch(() => new Map<string, string>());
+          return agents.map(agent => ({ ...agent, workspaceName: agent.workspaceId ? names.get(agent.workspaceId) ?? null : null }));
+        }
         if (!result.pageInfo.nextCursor || result.pageInfo.nextCursor === cursor) break;
         cursor = result.pageInfo.nextCursor;
       }

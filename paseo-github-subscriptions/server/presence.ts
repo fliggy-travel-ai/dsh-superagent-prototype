@@ -15,6 +15,8 @@ import { webRequestDetailReason, type CloudRequestOutcome, type WebRequestResult
 export interface QuestionAgent {
   id: string;
   title: string | null;
+  /** 会话所属工作区的显示名，语音播报优先使用。 */
+  workspaceName?: string | null;
   provider?: string;
   labels?: Record<string, string>;
   archivedAt?: string | null;
@@ -611,7 +613,8 @@ export class PresenceRuntime {
           };
           this.speaking.add(activeSpeaking);
           this.reviewSpeech();
-          const text = `注意，${question.title.slice(0, 80)}，有一个问题等待你确认。`;
+          const spokenName = this.native.get(question.id)?.agent.workspaceName?.trim() || question.title;
+          const text = `注意，${spokenName.slice(0, 80)}，有一个问题等待你确认。`;
 
           let anyPlayed = false;
           let cooldownApplied = false;
