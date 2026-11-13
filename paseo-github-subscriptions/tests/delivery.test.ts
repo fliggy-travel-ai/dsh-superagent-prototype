@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PaseoApi } from '@getpaseo/client';
 import type { GithubEvent, Subscription } from '../shared/model.ts';
-import { acceptBatch, Dispatcher, matches, messageFor } from '../server/delivery.ts';
+import { acceptBatch, Dispatcher, matches, messageFor, QUESTION_HOLD } from '../server/delivery.ts';
 import { Storage } from '../server/storage.ts';
 
 const at = '2026-11-06T12:00:00.000Z';
@@ -25,9 +25,9 @@ async function fixture(action: (storage: Storage) => Promise<void>) {
   await storage.load();
   try { await action(storage); } finally { await rm(directory, { recursive: true, force: true }); }
 }
-function daemon(options: { archived?: boolean; provider?: string; status?: string; sendError?: Error; send?: (text: string, input: unknown) => void; refresh?: () => Promise<void> } = {}) {
+function daemon(options: { archived?: boolean; provider?: string; status?: string; sendError?: Error; send?: (text: string, input: unknown) => void; refresh?: () => Promise<void>; pending?: () => { kind: string }[] } = {}) {
   return { agents: { ref: () => ({ refresh: async () => { await options.refresh?.(); return { agent: { archivedAt: options.archived ? at : null,
-    provider: options.provider ?? 'codex', status: options.status ?? 'running', capabilities: {} } }; },
+    provider: options.provider ?? 'codex', status: options.status ?? 'running', capabilities: {}, pendingPermissions: options.pending?.() ?? [] } }; },
     send: async (text: string, input: unknown) => { options.send?.(text, input); if (options.sendError) throw options.sendError; } }) } } as unknown as PaseoApi;
 }
 
@@ -198,4 +198,87 @@ test('重启保留游标、事件和稳定发送编号，重复批次不生成�
   assert.equal(reopened.state.deliveries.length, 1);
   assert.equal(reopened.state.deliveries[0].id, storage.state.deliveries[0].id);
   assert.deepEqual(reopened.state.source, { cursor: 'next' });
+}));
+
+test('提问期间到达的单条事件排队，提问结束后用原发送编号送达一次', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event()], {}, at);
+  let pending = [{ kind: 'question' }];
+  const sent: Array<{ text: string; input: unknown }> = [];
+  const dispatcher = new Dispatcher(storage, daemon({ pending: () => pending, send: (text, input) => sent.push({ text, input }) }), String);
+  await dispatcher.flush(); await dispatcher.flush();
+  assert.equal(sent.length, 0);
+  assert.equal(storage.state.deliveries[0].status, 'pending');
+  assert.equal(storage.state.deliveries[0].error, QUESTION_HOLD);
+  assert.equal(storage.state.deliveries[0].attempts, 0);
+  pending = [];
+  await dispatcher.flush(); await dispatcher.flush();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].input, { activeTurnBehavior: 'steer', messageId: storage.state.deliveries[0].id });
+  assert.equal(storage.state.deliveries[0].status, 'delivered');
+  assert.equal(storage.state.deliveries[0].error, null);
+  assert.equal(storage.state.subscriptions[0].delivered, 1);
+}));
+
+test('提问期间到达的多条事件全部排队，提问结束后按到达顺序各送一次', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  let pending = [{ kind: 'tool' }, { kind: 'question' }];
+  const sent: string[] = [];
+  const dispatcher = new Dispatcher(storage, daemon({ pending: () => pending, send: text => sent.push(text) }), String);
+  for (const id of ['first', 'second', 'third']) {
+    await acceptBatch(storage, [event(id)], {}, at);
+    await dispatcher.flush();
+  }
+  assert.equal(sent.length, 0);
+  assert.deepEqual(storage.state.deliveries.map(delivery => [delivery.status, delivery.error]), Array(3).fill(['pending', QUESTION_HOLD]));
+  pending = [{ kind: 'tool' }];
+  await dispatcher.flush(); await dispatcher.flush();
+  assert.deepEqual(sent.map(text => text.match(/issuecomment-(\w+)/)?.[1]), ['first', 'second', 'third']);
+  assert.ok(storage.state.deliveries.every(delivery => delivery.status === 'delivered'));
+}));
+
+test('提问在同一轮发送途中出现时，同会话后面的事件也排队，不越过前面的事件', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event('first')], {}, at);
+  await acceptBatch(storage, [event('second')], {}, at);
+  let refreshes = 0;
+  const sent: string[] = [];
+  const dispatcher = new Dispatcher(storage, daemon({ pending: () => (refreshes++ === 0 ? [{ kind: 'question' }] : []), send: text => sent.push(text) }), String);
+  await dispatcher.flush();
+  assert.equal(refreshes, 1);
+  assert.equal(sent.length, 0);
+  assert.deepEqual(storage.state.deliveries.map(delivery => delivery.error), [QUESTION_HOLD, QUESTION_HOLD]);
+  await dispatcher.flush();
+  assert.deepEqual(sent.map(text => text.match(/issuecomment-(\w+)/)?.[1]), ['first', 'second']);
+}));
+
+test('没有待答提问时立即送达；只有工具审批时也立即送达', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event('idle')], {}, at);
+  let sends = 0;
+  await new Dispatcher(storage, daemon({ status: 'idle', send: () => { sends++; } }), String).flush();
+  await acceptBatch(storage, [event('tool')], {}, at);
+  await new Dispatcher(storage, daemon({ pending: () => [{ kind: 'tool' }], send: () => { sends++; } }), String).flush();
+  assert.equal(sends, 2);
+  assert.ok(storage.state.deliveries.every(delivery => delivery.status === 'delivered' && delivery.error === null));
+}));
+
+test('设置为跳过的提供方在提问期间也排队，不丢事件', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.preferences.providerPolicies.other = 'skip'; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event()], {}, at);
+  await new Dispatcher(storage, daemon({ provider: 'other', status: 'running', pending: () => [{ kind: 'question' }], send: () => assert.fail('提问期间不发送') }), String).flush();
+  assert.equal(storage.state.deliveries[0].status, 'pending');
+  assert.equal(storage.state.deliveries[0].error, QUESTION_HOLD);
+}));
+
+test('排队期间重启后仍保留排队事件，提问结束后送达', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event()], {}, at);
+  await new Dispatcher(storage, daemon({ pending: () => [{ kind: 'question' }], send: () => assert.fail('提问期间不发送') }), String).flush();
+  const restarted = new Storage(storage.directory); await restarted.load();
+  assert.equal(restarted.state.deliveries[0].error, QUESTION_HOLD);
+  let sends = 0;
+  await new Dispatcher(restarted, daemon({ send: () => { sends++; } }), String).flush();
+  assert.equal(sends, 1);
+  assert.equal(restarted.state.deliveries[0].status, 'delivered');
 }));

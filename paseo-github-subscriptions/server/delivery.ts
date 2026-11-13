@@ -61,6 +61,11 @@ export async function acceptBatch(storage: Storage, events: GithubEvent[], sourc
   });
 }
 
+/** 会话有待答提问时，订阅事件先排队，避免 steer 撤销正在等回答的提问。 */
+export const QUESTION_HOLD = '会话有待答提问，提问结束后按顺序送达';
+const awaitingQuestion = (agent: { pendingPermissions?: readonly { kind?: string }[] | null }) =>
+  agent.pendingPermissions?.some(request => request.kind === 'question') === true;
+
 export class Dispatcher {
   private storage: Storage;
   private paseo: PaseoApi;
@@ -68,8 +73,11 @@ export class Dispatcher {
   constructor(storage: Storage, paseo: PaseoApi, redact: (error: unknown) => string) { this.storage = storage; this.paseo = paseo; this.redact = redact; }
 
   async flush() {
+    // 同一会话前一条排队后，本轮不再送后面的事件，保证提问结束后按原顺序送达。
+    const held = new Set<string>();
     for (let candidate of this.storage.state.deliveries.filter(delivery => delivery.status === 'pending' && delivery.retryAt <= Date.now())) {
       if (this.storage.state.preferences.shadow || !this.storage.state.preferences.enabled) return;
+      if (held.has(candidate.agentId)) { await this.hold(candidate); continue; }
       const handle = this.paseo.agents.ref(candidate.agentId);
       try {
         const current = await handle.refresh();
@@ -98,6 +106,11 @@ export class Dispatcher {
           });
           if (!replacement) continue;
           candidate = replacement;
+        }
+        if (awaitingQuestion(agent)) {
+          held.add(candidate.agentId);
+          await this.hold(candidate);
+          continue;
         }
         const policy = this.storage.state.preferences.providerPolicies[agent.provider];
         const canSteer = agent.capabilities.supportsSteer === true || /^(claude|codex)(?:-|$)/.test(agent.provider);
@@ -129,6 +142,14 @@ export class Dispatcher {
         }
       }
     }
+  }
+
+  private async hold(candidate: PendingDelivery) {
+    if (this.storage.state.deliveries.find(delivery => delivery.id === candidate.id)?.error === QUESTION_HOLD) return;
+    await this.storage.mutate(state => {
+      const record = state.deliveries.find(delivery => delivery.id === candidate.id);
+      if (record?.status === 'pending') record.error = QUESTION_HOLD;
+    });
   }
 
   private async finish(candidate: PendingDelivery, status: PendingDelivery['status'], error: string | null) {
