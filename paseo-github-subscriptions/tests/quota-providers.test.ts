@@ -58,8 +58,38 @@ test("会话范围只读取该 Provider 的配置目录", async () => {
     return [];
   };
   await discoverAccounts({ kind: "session", provider: "claude-3", env: { HOME: "/u" } }, discover, { providers, labels: () => ({}) });
-  await discoverAccounts({ kind: "session", provider: "claude", env: { HOME: "/u" } }, discover, { providers, labels: () => ({}) });
   assert.deepEqual(dirs, ["/u/.claude-3"]);
+});
+
+test("基础 Claude Provider 按会话环境读取独立用户账号，并应用邮箱显示名称", async () => {
+  const scopes: unknown[] = [];
+  const env = { HOME: "/u", CLAUDE_CONFIG_DIR: "/Users/independent/.claude" };
+  const accounts = await discoverAccounts({ kind: "session", provider: "claude", env }, async scope => {
+    scopes.push(scope);
+    return [{ key: "independent-account", label: RELAY, input: {} }];
+  }, { providers, labels: () => ({ [RELAY]: "user@example.com（Apple 登录）" }) });
+  assert.deepEqual(scopes, [{ kind: "session", provider: "claude", env }]);
+  assert.equal(accounts[0]?.label, "user@example.com（Apple 登录）");
+});
+
+test("会话环境优先于已变更的 Provider 配置，且只发现一次", async () => {
+  const scopes: unknown[] = [];
+  const env = { HOME: "/u", CLAUDE_CONFIG_DIR: "/u/session-login" };
+  await discoverAccounts({ kind: "session", provider: "claude-3", env }, async scope => {
+    scopes.push(scope);
+    return [];
+  }, { providers, includeDefault: true });
+  assert.deepEqual(scopes, [{ kind: "session", provider: "claude", env }]);
+});
+
+test("其他 Provider 不会读取 Claude 账号", async () => {
+  let calls = 0;
+  const accounts = await discoverAccounts({ kind: "session", provider: "codex", env: {} }, async () => {
+    calls++;
+    return [];
+  }, { providers });
+  assert.equal(calls, 0);
+  assert.deepEqual(accounts, []);
 });
 
 test("没有自带额度插件时，同时报告默认账号，并使用显示名称", async () => {

@@ -99,13 +99,16 @@ export async function discoverAccounts(
   const providers = (deps.providers ?? configDirProviders)();
   const labels: Record<string, string> = (deps.labels ?? (() => ({})))();
   const baseEnv = scope.kind === "session" ? scope.env : stringEnv(deps.env ?? process.env);
-  const selected =
-    scope.kind === "global"
-      ? [...providers.values()]
-      : providers.has(scope.provider)
-        ? [providers.get(scope.provider)!]
-        : [];
-  const scopes: UsageScope[] = deps.includeDefault ? [scope] : [];
+  const selected = scope.kind === "global" ? [...providers.values()] : [];
+  const scopes: UsageScope[] = scope.kind === "global" && deps.includeDefault ? [scope] : [];
+  if (scope.kind === "session") {
+    const providerEnv = providers.get(scope.provider);
+    if (scope.provider === "claude" || providerEnv) {
+      scopes.push({ ...scope, provider: "claude", env: { ...providerEnv, ...scope.env } });
+    } else if (deps.includeDefault) {
+      scopes.push(scope);
+    }
+  }
   for (const providerEnv of selected) {
     scopes.push({
       kind: "session",

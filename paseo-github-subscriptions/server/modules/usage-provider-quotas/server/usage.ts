@@ -484,20 +484,25 @@ async function fetchAntigravityUsage(input: AccountInput): Promise<UsageReport> 
 function discoverCodexAccounts(scope: UsageScope): UsageAccount[] {
   const providers = readProvidersConfig();
   const accounts: UsageAccount[] = [];
+  const codexProviders = Object.entries(providers).filter(([providerId, cfg]) =>
+    providerId === "codex" || providerId.startsWith("codex-") || cfg?.extends === "codex",
+  );
+  let selected = codexProviders.filter(([, cfg]) => cfg?.enabled !== false);
+  if (scope.kind === "session") {
+    if (scope.env.OPENAI_BASE_URL) return [];
+    const sessionHome = scope.env.CODEX_HOME || path.join(scope.env.HOME || REAL_HOME, ".codex");
+    const matches = scope.provider === "codex"
+      ? codexProviders.filter(([, cfg]) => path.resolve(cfg?.env?.CODEX_HOME || path.join(cfg?.env?.HOME || REAL_HOME, ".codex")) === path.resolve(sessionHome))
+      : codexProviders.filter(([providerId]) => providerId === scope.provider);
+    const provider = matches.find(([, cfg]) => cfg?.enabled !== false) ?? matches[0];
+    selected = provider ? [provider] : scope.provider === "codex" ? [["codex", {}]] : [];
+  }
 
-  for (const [providerId, cfg] of Object.entries(providers)) {
-    if (cfg?.enabled === false) continue;
-    const isCodex =
-      providerId === "codex" ||
-      providerId.startsWith("codex-") ||
-      cfg?.extends === "codex";
-    if (!isCodex) continue;
-    if (scope.kind === "session" && scope.provider !== providerId) continue;
-
-    const codexHome =
-      (scope.kind === "session" ? scope.env?.CODEX_HOME : undefined) ||
-      cfg?.env?.CODEX_HOME ||
-      path.join(REAL_HOME, ".codex");
+  for (const [providerId, cfg] of selected) {
+    const configuredHome = cfg?.env?.CODEX_HOME || path.join(cfg?.env?.HOME || REAL_HOME, ".codex");
+    const codexHome = scope.kind === "session"
+      ? scope.env.CODEX_HOME || (scope.env.HOME ? path.join(scope.env.HOME, ".codex") : configuredHome)
+      : configuredHome;
     const authPath = path.join(codexHome, "auth.json");
     if (!fs.existsSync(authPath)) continue;
 
@@ -519,7 +524,9 @@ function discoverCodexAccounts(scope: UsageScope): UsageAccount[] {
         label: displayLabel,
         email,
         authPath,
-        proxyUrl: cfg?.env?.HTTPS_PROXY || cfg?.env?.HTTP_PROXY,
+        proxyUrl: scope.kind === "session"
+          ? scope.env.HTTPS_PROXY || scope.env.HTTP_PROXY || cfg?.env?.HTTPS_PROXY || cfg?.env?.HTTP_PROXY
+          : cfg?.env?.HTTPS_PROXY || cfg?.env?.HTTP_PROXY,
       } satisfies AccountInput as Record<string, any>,
     });
   }
