@@ -237,7 +237,7 @@ test('提问期间到达的多条事件全部排队，提问结束后按到达�
   assert.ok(storage.state.deliveries.every(delivery => delivery.status === 'delivered'));
 }));
 
-test('提问在同一轮发送途中出现时，同会话后面的事件也排队，不越过前面的事件', () => fixture(async storage => {
+test('同会话前一条因提问排队后，后面的记录不再刷新会话，直接排队', () => fixture(async storage => {
   await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
   await acceptBatch(storage, [event('first')], {}, at);
   await acceptBatch(storage, [event('second')], {}, at);
@@ -281,4 +281,73 @@ test('排队期间重启后仍保留排队事件，提问结束后送达', () =>
   await new Dispatcher(restarted, daemon({ send: () => { sends++; } }), String).flush();
   assert.equal(sends, 1);
   assert.equal(restarted.state.deliveries[0].status, 'delivered');
+}));
+
+test('同一轮中途出现提问时，已送出的照常记为送达，后面的排队', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event('first')], {}, at);
+  await acceptBatch(storage, [event('second')], {}, at);
+  let refreshes = 0;
+  const sent: string[] = [];
+  const dispatcher = new Dispatcher(storage, daemon({ pending: () => (refreshes++ === 1 ? [{ kind: 'question' }] : []), send: text => sent.push(text) }), String);
+  await dispatcher.flush();
+  assert.deepEqual(storage.state.deliveries.map(delivery => [delivery.status, delivery.error]), [['delivered', null], ['pending', QUESTION_HOLD]]);
+  await dispatcher.flush();
+  assert.deepEqual(sent.map(text => text.match(/issuecomment-(\w+)/)?.[1]), ['first', 'second']);
+}));
+
+test('按名称识别的提问也排队', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event()], {}, at);
+  await new Dispatcher(storage, daemon({ pending: () => [{ kind: 'other', name: 'mcp__claude__AskUserQuestion' } as { kind: string }], send: () => assert.fail('提问期间不发送') }), String).flush();
+  assert.equal(storage.state.deliveries[0].error, QUESTION_HOLD);
+}));
+
+test('前一条在退避重试或刷新失败时，同会话后面的记录不越过它', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription(), subscription('agent-two')]; });
+  await acceptBatch(storage, [event('first')], {}, at);
+  await acceptBatch(storage, [event('second')], {}, at);
+  let fail = true;
+  const sent: string[] = [];
+  const dispatcher = new Dispatcher(storage, daemon({ send: text => { if (fail) throw new Error('暂时失败'); sent.push(text); } }), String);
+  await dispatcher.flush();
+  const agentOne = () => storage.state.deliveries.filter(delivery => delivery.agentId === 'agent-one');
+  assert.equal(agentOne()[0].status, 'pending');
+  assert.equal(agentOne()[1].attempts, 0);
+  fail = false;
+  await dispatcher.flush();
+  assert.equal(agentOne()[1].status, 'pending', '退避未到期时后面的记录也不发送');
+  await storage.mutate(state => { for (const delivery of state.deliveries) delivery.retryAt = 0; });
+  await dispatcher.flush();
+  assert.deepEqual(sent.filter(text => text.length).length, 4);
+  assert.ok(agentOne().every(delivery => delivery.status === 'delivered'));
+  const order = sent.map(text => text.match(/issuecomment-(\w+)/)?.[1]);
+  assert.ok(order.indexOf('first') < order.lastIndexOf('second'));
+}));
+
+test('订阅变化生成的替换记录排在同会话更晚的记录前面', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [{ ...subscription('agent-one', null), events: ['state'] }, subscription()]; });
+  await acceptBatch(storage, [{ ...event('closed'), number: 3, type: 'state', closed: true }, event('comment')], {}, at);
+  await acceptBatch(storage, [{ ...event('later'), number: 3, type: 'state', closed: false }], {}, at);
+  await storage.mutate(state => { state.subscriptions = state.subscriptions.filter(subscription => subscription.scope === 'repo'); });
+  let pending = [{ kind: 'question' }];
+  const sent: string[] = [];
+  const dispatcher = new Dispatcher(storage, daemon({ pending: () => pending, send: text => sent.push(text) }), String);
+  await dispatcher.flush();
+  assert.equal(sent.length, 0);
+  pending = [];
+  await dispatcher.flush();
+  assert.deepEqual(sent.map(text => text.match(/issuecomment-(\w+)/)?.[1]), ['closed', 'later']);
+}));
+
+test('影子模式下提问期间和提问结束后都不发送', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event()], {}, at);
+  let pending = [{ kind: 'question' }];
+  const dispatcher = new Dispatcher(storage, daemon({ pending: () => pending, send: () => assert.fail('影子模式不发送') }), String);
+  await dispatcher.flush();
+  await storage.mutate(state => { state.preferences.shadow = true; });
+  pending = [];
+  await dispatcher.flush();
+  assert.equal(storage.state.deliveries[0].status, 'pending');
 }));

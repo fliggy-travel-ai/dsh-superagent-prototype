@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PaseoApi } from '@getpaseo/client';
 import type { GithubEvent, Subscription } from '../shared/model.ts';
+import { questionRequest } from './notify/routing.ts';
 import { Storage, type PendingDelivery } from './storage.ts';
 
 export function matches(subscription: Subscription, event: GithubEvent) {
@@ -63,8 +64,8 @@ export async function acceptBatch(storage: Storage, events: GithubEvent[], sourc
 
 /** 会话有待答提问时，订阅事件先排队，避免 steer 撤销正在等回答的提问。 */
 export const QUESTION_HOLD = '会话有待答提问，提问结束后按顺序送达';
-const awaitingQuestion = (agent: { pendingPermissions?: readonly { kind?: string }[] | null }) =>
-  agent.pendingPermissions?.some(request => request.kind === 'question') === true;
+const awaitingQuestion = (agent: { pendingPermissions?: readonly unknown[] | null }) =>
+  agent.pendingPermissions?.some(questionRequest) === true;
 
 export class Dispatcher {
   private storage: Storage;
@@ -73,11 +74,14 @@ export class Dispatcher {
   constructor(storage: Storage, paseo: PaseoApi, redact: (error: unknown) => string) { this.storage = storage; this.paseo = paseo; this.redact = redact; }
 
   async flush() {
-    // 同一会话前一条排队后，本轮不再送后面的事件，保证提问结束后按原顺序送达。
+    // 同一会话前一条没有送出（等提问、退避重试或刷新失败）时，本轮不再送后面的事件，保证按原顺序送达。
     const held = new Set<string>();
-    for (let candidate of this.storage.state.deliveries.filter(delivery => delivery.status === 'pending' && delivery.retryAt <= Date.now())) {
+    const blocked = new Set<string>();
+    for (let candidate of this.storage.state.deliveries.filter(delivery => delivery.status === 'pending')) {
       if (this.storage.state.preferences.shadow || !this.storage.state.preferences.enabled) return;
       if (held.has(candidate.agentId)) { await this.hold(candidate); continue; }
+      if (blocked.has(candidate.agentId)) continue;
+      if (candidate.retryAt > Date.now()) { blocked.add(candidate.agentId); continue; }
       const handle = this.paseo.agents.ref(candidate.agentId);
       try {
         const current = await handle.refresh();
@@ -101,7 +105,8 @@ export class Dispatcher {
             const known = state.deliveries.find(delivery => delivery.id === id);
             if (known) return known.status === 'pending' ? known : null;
             const next = { ...previous, id, eventIds: activeEvents.map(event => event.id).sort(), events: activeEvents, text: messageFor(activeEvents), attempts: 0, retryAt: 0 };
-            state.deliveries.push(next);
+            // 放在原记录后面，不排到同会话更晚的记录之后。
+            state.deliveries.splice(record ? state.deliveries.indexOf(record) + 1 : state.deliveries.length, 0, next);
             return next;
           });
           if (!replacement) continue;
@@ -126,6 +131,7 @@ export class Dispatcher {
         await handle.send(candidate.text, { activeTurnBehavior: 'steer', messageId: candidate.id });
         await this.finish(candidate, 'delivered', null);
       } catch (error) {
+        blocked.add(candidate.agentId);
         const detail = this.redact(error);
         const code = (error as { code?: string }).code ?? '';
         if (/outcome_unknown|request_key_conflict/.test(`${code} ${detail}`)) {
