@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import https from 'node:https';
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,6 +17,37 @@ const source = (id: string) => usage.createUsageSources().find(item => item.id =
 
 const jwt = (exp: number) => `x.${Buffer.from(JSON.stringify({ exp })).toString('base64url')}.y`;
 const expired = () => jwt(Math.floor(Date.now() / 1000) - 3600);
+
+test('Codex 会话使用实际登录目录匹配账号，不误标为默认 Provider', async () => {
+  const defaultHome = join(root, '.codex');
+  const accountHome = join(root, '.codex-other');
+  mkdirSync(process.env.PASEO_HOME!, { recursive: true });
+  for (const [directory, email] of [[defaultHome, 'default@example.com'], [accountHome, 'other@example.com']]) {
+    mkdirSync(directory!, { recursive: true });
+    writeFileSync(join(directory!, 'auth.json'), JSON.stringify({ tokens: { id_token: `x.${Buffer.from(JSON.stringify({ email })).toString('base64url')}.y` } }));
+  }
+  writeFileSync(join(process.env.PASEO_HOME!, 'config.json'), JSON.stringify({ agents: { providers: {
+    codex: {},
+    'codex-disabled': { extends: 'codex', enabled: false, env: { CODEX_HOME: accountHome } },
+    'codex-5': { extends: 'codex', env: { CODEX_HOME: accountHome, HTTPS_PROXY: 'http://configured-proxy:8080' } },
+  } } }));
+  const accounts = await source('codex-multi').discover({ kind: 'session', provider: 'codex', env: { HOME: root, CODEX_HOME: accountHome } });
+  assert.equal(accounts.length, 1);
+  assert.equal(accounts[0]!.key, 'codex-5');
+  assert.equal(accounts[0]!.label, 'other@example.com (codex-5)');
+  assert.equal((accounts[0]!.input as { authPath: string }).authPath, join(accountHome, 'auth.json'));
+  const aliasAccounts = await source('codex-multi').discover({ kind: 'session', provider: 'codex-5', env: {} });
+  assert.equal(aliasAccounts[0]!.label, 'other@example.com (codex-5)');
+  assert.equal((aliasAccounts[0]!.input as { proxyUrl: string }).proxyUrl, 'http://configured-proxy:8080');
+  const sessionProxy = await source('codex-multi').discover({ kind: 'session', provider: 'codex-5', env: { HTTP_PROXY: 'http://session-proxy:8080' } });
+  assert.equal((sessionProxy[0]!.input as { proxyUrl: string }).proxyUrl, 'http://session-proxy:8080');
+  const changedHome = await source('codex-multi').discover({ kind: 'session', provider: 'codex-5', env: { HOME: root } });
+  assert.equal((changedHome[0]!.input as { authPath: string }).authPath, join(defaultHome, 'auth.json'));
+  const apiAccounts = await source('codex-multi').discover({ kind: 'session', provider: 'codex', env: { HOME: root, OPENAI_BASE_URL: 'https://api.example.com' } });
+  assert.deepEqual(apiAccounts, []);
+  const otherProvider = await source('codex-multi').discover({ kind: 'session', provider: 'claude', env: { HOME: root } });
+  assert.deepEqual(otherProvider, []);
+});
 
 /** 替换 http(s).request：记录调用，按处理函数返回响应。 */
 function fakeTransport(handler: (url: URL, init: any, body: string) => { status: number; body: string } | Error) {
