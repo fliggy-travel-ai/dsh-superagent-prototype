@@ -7,6 +7,7 @@ import { presenceModule } from './answer-presence/index.ts';
 import { browserModule } from './answer-browser/index.ts';
 import { stalledModule } from './todo-stalled/index.ts';
 import { defaultsModule } from './providers-defaults/index.ts';
+import { toolPermissionsModule } from './providers-tool-permissions/index.ts';
 import { quietChildrenModule } from './answer-quiet-children/index.ts';
 import { escalationModule } from './answer-escalation/index.ts';
 import { claudeAccountsModule } from './usage-claude-accounts/index.ts';
@@ -29,6 +30,7 @@ export const MODULES: readonly Module<any>[] = [
   browserModule,
   stalledModule,
   defaultsModule,
+  toolPermissionsModule,
   quietChildrenModule,
   escalationModule,
   claudeAccountsModule,
