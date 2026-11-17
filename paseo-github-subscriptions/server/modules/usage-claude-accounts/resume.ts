@@ -36,13 +36,25 @@ export async function cli(args: string[]): Promise<string> {
   return stdout;
 }
 
+export const MIGRATION_SUCCESSOR_LABEL = "dsh.migration-successor";
+export const MIGRATION_STATE_LABEL = "dsh.migration-state";
+export type ResumeAgentView = { archivedAt?: string | null; status?: string | null; labels?: Record<string, string> | null } | null | undefined;
+export function canResumeAgent(agent: ResumeAgentView): boolean {
+  if (!agent || agent.archivedAt || agent.status === "closed") return false;
+  const labels = agent.labels ?? {};
+  if (labels[MIGRATION_SUCCESSOR_LABEL]?.trim()) return false;
+  return labels[MIGRATION_STATE_LABEL] !== "needs_review";
+}
+
 export class ResumeService {
   private readonly isClaudeProvider: (id: string) => boolean;
   private readonly sources: ReadonlySet<string>;
   /** The global default for sessions the user has not decided on (new sessions). */
   private readonly autoResumeDefault: () => boolean;
-  constructor(options: { isClaudeProvider?: (id: string) => boolean; directory?: string; sources?: ReadonlySet<string>; autoResumeDefault?: () => boolean } = {}) {
+  private readonly canResume: (agentId: string) => Promise<boolean>;
+  constructor(options: { isClaudeProvider?: (id: string) => boolean; directory?: string; sources?: ReadonlySet<string>; autoResumeDefault?: () => boolean; canResume?: (agentId: string) => Promise<boolean> } = {}) {
     this.isClaudeProvider = options.isClaudeProvider ?? (id => id === "claude");
+    this.canResume = options.canResume ?? (async () => true);
     this.sources = options.sources ?? DEFAULT_CLAUDE_SOURCES;
     this.autoResumeDefault = options.autoResumeDefault ?? (() => false);
     this.directory = options.directory ?? join(process.env.PASEO_HOME || join(homedir(), ".paseo"), "claude-quota-resume");
@@ -143,6 +155,8 @@ export class ResumeService {
       const snap = JSON.parse(await cli(["inspect", agentId, "--json"])) as Snapshot;
       if (this.stopped || generation !== (this.generations.get(agentId) ?? 0)) return;
       if (snap.Id !== agentId || snap.Archived || !["idle", "error"].includes(snap.Status) || !snap.UpdatedAt || snap.PendingPermissions?.length) return;
+      if (!await this.canResume(agentId)) { console.info("会话已迁移、待审或已归档，不安排自动继续：", agentId); return; }
+      if (this.stopped || generation !== (this.generations.get(agentId) ?? 0) || this.jobs.has(agentId)) return;
       this.jobs.set(agentId, { agentId, resetAt, updatedAt: snap.UpdatedAt, phase: "pending" });
       this.save();
       console.info(this.isEnabled(agentId) ? "已安排额度恢复后继续：" : "检测到额度耗尽，自动继续未开启，已记录重置时间：", agentId, new Date(resetAt + GRACE_MS).toISOString());
@@ -181,6 +195,12 @@ export class ResumeService {
         console.info("会话状态已改变，未自动继续：", job.agentId);
         return;
       }
+      if (!await this.canResume(job.agentId)) {
+        await this.cancel(job.agentId);
+        console.info("会话已迁移、待审或已归档，未自动继续：", job.agentId);
+        return;
+      }
+      if (this.stopped || this.jobs.get(job.agentId) !== job || !this.isEnabled(job.agentId)) return;
       job.phase = "sending";
       this.save();
       await cli(["send", job.agentId, PROMPT, "--no-wait", "--json"]);
