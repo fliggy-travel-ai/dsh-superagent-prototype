@@ -16,6 +16,7 @@ import { todoModule } from './todo/index.ts';
 import { capacityModule } from './capacity/index.ts';
 import { dispatchFinalizeModule } from './dispatch-finalize/index.ts';
 import { heartbeatsModule } from './heartbeats/index.ts';
+import { scheduleWorkspacesModule } from './schedule-workspaces/index.ts';
 
 /**
  * 全部模块，按注册顺序排列（与整合前一致：云端会话最先注册）。
@@ -39,4 +40,5 @@ export const MODULES: readonly Module<any>[] = [
   dispatchFinalizeModule,
   capacityModule,
   heartbeatsModule,
+  scheduleWorkspacesModule,
 ];
