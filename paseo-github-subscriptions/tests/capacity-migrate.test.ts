@@ -26,6 +26,56 @@ test('迁移先改挂子会话，再归档原会话', async () => {
   const f = fixture(); assert.equal(await migrate(f.port, f.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'migrated');
   assert.ok(f.calls.indexOf('update:child') < f.calls.indexOf('archive:old')); assert.equal(f.agents.get('child')!.labels['paseo.parent-agent-id'], 'new');
 });
+test('成功标记在归档前保存，源会话复活后不再迁移', async () => {
+  const fixtureState = fixture();
+  const archive = fixtureState.port.archive;
+  fixtureState.port.archive = async id => {
+    if (id === 'old') assert.equal(fixtureState.agent.labels['dsh.migration-successor'], 'new');
+    await archive(id);
+  };
+  const accounts = [account('claude-1', 0), account('claude-2', 100)];
+  assert.equal(await migrate(fixtureState.port, fixtureState.agent, accounts, 'live', now), 'migrated');
+  fixtureState.agent.status = 'error';
+  fixtureState.agent.archivedAt = null;
+  fixtureState.calls.length = 0;
+  assert.equal(await migrate(fixtureState.port, fixtureState.agent, accounts, 'live', now + 31 * 60_000), 'ineligible');
+  assert.deepEqual(fixtureState.calls, []);
+});
+test('快照过期时不迁移已归档或已关闭的源会话', async () => {
+  for (const state of [{ archivedAt: 'archived' }, { status: 'closed' }]) {
+    const fixtureState = fixture();
+    Object.assign(fixtureState.agent, state);
+    assert.equal(await migrate(fixtureState.port, fixtureState.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'ineligible');
+    assert.deepEqual(fixtureState.calls, []);
+  }
+});
+test('归档明确失败时回滚成功标记，结果未知时保留标记', async () => {
+  for (const uncertain of [false, true]) {
+    const fixtureState = fixture();
+    const read = fixtureState.port.read;
+    let archiveAttempted = false;
+    fixtureState.port.archive = async id => {
+      if (id === 'old') { archiveAttempted = true; throw Error('archive failed'); }
+      fixtureState.calls.push(`archive:${id}`);
+    };
+    fixtureState.port.read = async id => uncertain && archiveAttempted && id === 'old' ? null : read(id);
+    assert.equal(await migrate(fixtureState.port, fixtureState.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), uncertain ? 'archive_unknown' : 'archive_failed');
+    assert.equal(fixtureState.agent.labels['dsh.migration-successor'], uncertain ? 'new' : '');
+    assert.equal(fixtureState.calls.includes('archive:new'), !uncertain);
+  }
+});
+test('成功标记写入后报错时也回滚，不归档源会话', async () => {
+  const fixtureState = fixture();
+  const update = fixtureState.port.update;
+  fixtureState.port.update = async (id, labels) => {
+    await update(id, labels);
+    if (labels['dsh.migration-successor'] === 'new') throw Error('response lost');
+  };
+  assert.equal(await migrate(fixtureState.port, fixtureState.agent, [account('claude-1', 0), account('claude-2', 100)], 'live', now), 'operation_failed');
+  assert.equal(fixtureState.agent.labels['dsh.migration-successor'], '');
+  assert.ok(fixtureState.calls.includes('archive:new'));
+  assert.equal(fixtureState.calls.includes('archive:old'), false);
+});
 test('迁移中每步失败时保留原会话并恢复自动继续', async () => {
   for (const step of ['stop', 'create', 'finalize', 'verify', 'children'] as const) {
     const f = fixture(); (f.port[step] as unknown) = async (...args: unknown[]) => { if (step === 'create') (args[2] as () => void)(); throw Error('failure'); };

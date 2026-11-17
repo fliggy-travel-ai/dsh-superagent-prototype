@@ -24,11 +24,11 @@ test('恢复失败时容量快照和推送继续，迁移停止并报告', async
   } finally { await cleanup(); await rm(dir, { recursive: true, force: true }); }
 });
 
-test('一次迁移失败后不使用原快照继续迁移其他会话', async () => {
+test('跳过已迁移和已归档源会话，一次迁移失败后停止使用旧快照', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'capacity-round-')); const now = Date.now();
   const makeAccount = (provider: string, five: number, ids: string[]) => calculate({ provider, now, agents: ids.map(id => ({ id, status: 'idle' })), report: { fetchedAt: new Date(now).toISOString(), report: { status: 'available', planLabel: 'Max 5x', windows: [{ id: 'five_hour', remainingPct: five, resetsAt: new Date(now + 3600_000).toISOString() }, { id: 'weekly', remainingPct: 100 }] } } });
-  const agents = ['first', 'second'].map(id => ({ id, provider: 'claude-1', cwd: '/work', workspaceId: 'w', model: 'model', title: null, labels: { role: 'main', need: id } }));
-  const data = { generatedAt: new Date(now).toISOString(), totalCanAdd: 4, recommendedProvider: 'claude-2', accounts: [makeAccount('claude-1', 0, ['first', 'second']), makeAccount('claude-2', 100, [])], excluded: [] };
+  const agents = ['migrated', 'archived', 'first', 'second'].map(id => ({ id, provider: 'claude-1', cwd: '/work', workspaceId: 'w', model: 'model', title: null, status: 'error', archivedAt: id === 'archived' ? 'archived' : null, labels: { role: 'main', need: id, 'dsh.migration-successor': id === 'migrated' ? 'successor' : '' } }));
+  const data = { generatedAt: new Date(now).toISOString(), totalCanAdd: 4, recommendedProvider: 'claude-2', accounts: [makeAccount('claude-1', 0, agents.map(agent => agent.id)), makeAccount('claude-2', 100, [])], excluded: [] };
   const stops: string[] = []; const events: string[] = []; const handlers = new Map<string, any>();
   const module = createCapacityModule({ readSnapshot: async () => data, notifier: (async () => ({ send: async (event: string) => { events.push(event); }, stop: () => {} })) as never,
     migrationPort: ((_client: unknown, _template: unknown, _audit: unknown, notify: any, _signal: unknown, journal: any) => ({

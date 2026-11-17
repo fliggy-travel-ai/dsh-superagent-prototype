@@ -33,6 +33,7 @@ export function triggerReason(account: Account, now: number): 'five_hour' | 'wee
   return account.weekly.remainingPct <= 5 ? 'weekly' : null;
 }
 export async function migrate(port: MigrationPort, agent: MigrationAgent, accounts: Account[], mode: 'shadow' | 'live', now = Date.now()) {
+  if (agent.archivedAt || agent.status === 'closed' || agent.labels['dsh.migration-successor']) return 'ineligible';
   const source = accounts.find(a => a.provider === agent.provider.split('/')[0]);
   if (!source?.live || !source.tier || !source.fiveHour || !source.weekly || agent.labels.role !== 'main' || !(agent.labels.need || agent.labels.issue)) return 'ineligible';
   const reason = triggerReason(source, now);
@@ -62,6 +63,7 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
   const lease = `plugin:${now + 30 * 60_000}:${randomUUID()}`;
   let acquired = false; let leaseAttempted = false; let lockReleased = false; let started = false; let releaseUncertain = false; let oldResume: boolean | undefined; let newId: string | undefined; let archived = false; let archiveUncertain = false; let review = false; let begun = false; let weeklyStopIssued = false; let creating = false; let inCreate = false; let pendingFailure: string | null = null;
   const moved: string[] = [];
+  let successorAttempted = false;
   const step = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
     const started = Date.now();
     try { const value = await action(); await port.audit({ ...result, step: name, ok: true, elapsedMs: Date.now() - started }).catch(() => {}); return value; }
@@ -110,6 +112,11 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
     // 归档原会话前再确认新会话仍在：出错、已关闭或已归档就回滚，不归档原会话。
     const fresh = await port.read(newId);
     if (!fresh || fresh.archivedAt || fresh.status === 'error' || fresh.status === 'closed') throw Error('new_agent_failed');
+    successorAttempted = true;
+    await step('mark_successor', async () => {
+      await port.update(agent.id, { 'dsh.migration-successor': newId! });
+      if ((await port.read(agent.id))?.labels['dsh.migration-successor'] !== newId) throw Error('successor_unverified');
+    });
     try { await step('release_lease', releaseOwn); } catch { releaseUncertain = true; throw Error('lease_release_failed'); }
     try { await step('archive_original', () => port.archive(agent.id)); archived = true; }
     catch {
@@ -133,6 +140,12 @@ export async function migrate(port: MigrationPort, agent: MigrationAgent, accoun
         } catch { rollbackIncomplete = true; }
       }
       if (newId && !rollbackIncomplete) await port.archive(newId).catch(() => { rollbackIncomplete = true; });
+      if (successorAttempted && !rollbackIncomplete) {
+        try {
+          await port.update(agent.id, { 'dsh.migration-successor': '' });
+          if ((await port.read(agent.id))?.labels['dsh.migration-successor'] !== '') throw Error('successor_unverified');
+        } catch { rollbackIncomplete = true; }
+      }
       if (oldResume !== undefined) await port.setAutoResume(agent.id, oldResume).catch(() => { rollbackIncomplete = true; });
       if (weeklyStopIssued) await port.continueWork(agent.id).catch(() => { rollbackIncomplete = true; });
     }

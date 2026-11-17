@@ -141,6 +141,7 @@ export function createCapacityModule(deps: { readSnapshot?: () => Promise<Awaite
               if (stopped || cooldown[id] || journal.get(id)) continue;
               const agent = await port.read(id);
               if (!agent || agent.labels.role !== 'main' || !(agent.labels.need || agent.labels.issue)) continue;
+              if (agent.archivedAt || agent.status === 'closed' || agent.labels['dsh.migration-successor']) continue;
               if (agent.labels['dsh.migration-state'] === 'needs_review') {
                 await journal.review(id, 'needs_review');
                 await port.notify('lb_exception', { oldAgentId: id, reason: 'needs_review' });

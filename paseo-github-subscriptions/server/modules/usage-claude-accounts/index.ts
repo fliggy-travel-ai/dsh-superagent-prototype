@@ -15,7 +15,7 @@ import { readLabels, setLabel } from './labels-file.ts';
 import { migrateLegacyClaudeQuota } from './migrate.ts';
 import { bundledClaudeUsageInstalled, discoverAccounts, isClaudeProvider } from './providers.ts';
 import { QuotaLabelService } from './quota-labels.ts';
-import { cli, ResumeService } from './resume.ts';
+import { canResumeAgent, cli, ResumeService } from './resume.ts';
 
 const ICON = 'server/vendor/paseo-0.15.0/claude-usage-source/icon.svg';
 
@@ -70,7 +70,11 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     });
 
     const sources: ReadonlySet<string> = new Set(['claude', config.sourceId]);
-    const service = new ResumeService({ isClaudeProvider: id => isClaudeProvider(id), directory, sources, autoResumeDefault: () => settings.read().autoResumeDefault });
+    const canResume = async (agentId: string) => {
+      const { client } = await services.daemon.ready();
+      return canResumeAgent((await client.fetchAgent(agentId))?.agent ?? null);
+    };
+    const service = new ResumeService({ isClaudeProvider: id => isClaudeProvider(id), directory, sources, autoResumeDefault: () => settings.read().autoResumeDefault, canResume });
     server.handle(rpc.quotaRetryStatus, async ({ agentId, text, messageId }, { paseo }) => {
       const enabled = service.isEnabled(agentId);
       const retryAt = service.retryAt(agentId);
