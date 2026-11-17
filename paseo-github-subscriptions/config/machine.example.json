@@ -9,6 +9,7 @@
     "providers.antigravity": false,
     "usage.providerQuotas": false,
     "dispatch.finalize": false,
+    "schedules.workspaces": true,
     "capacity.mainSessions": false
   },
   "agentDefaults": [
