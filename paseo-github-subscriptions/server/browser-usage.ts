@@ -14,6 +14,7 @@ import {
   type BrowserUsageWindow,
 } from '../shared/browser-usage.ts';
 import type { BrowserBridge } from './browser-bridge.ts';
+import { adsPowerLoginMethod, browserAccountKey, type BrowserLoginMethod } from './browser-usage-accounts.ts';
 
 // 扩展每分钟上报一次；MV3 后台休眠会让闹钟推迟几分钟，所以 5 分钟没有上报才判为离线。
 const OFFLINE_AFTER_MS = 5 * 60_000;
@@ -57,6 +58,7 @@ const StoredRecordSchema = z.strictObject({
   adspowerUserId: z.string().trim().min(1).max(120).optional(),
   adspowerSerialNumber: z.string().trim().min(1).max(120).optional(),
   adspowerName: z.string().trim().min(1).max(120).optional(),
+  adspowerLoginMethod: z.enum(['apple', 'direct', 'unknown']).optional(),
   adspowerQueriedAt: z.number().finite().optional(),
   adspowerError: BrowserUsageAdsPowerErrorSchema.optional(),
   displayName: z.string().trim().min(1).max(120).optional(),
@@ -77,12 +79,14 @@ export interface BrowserUsageStoreOptions {
   adspowerMinIntervalMs?: number;
   fetchFn?: typeof fetch;
   sleepFn?: (ms: number) => Promise<void>;
+  registeredClaudeAccounts?: () => ReadonlySet<string>;
 }
 
 interface AdsPowerUserEntry {
   userId?: string;
   serialNumber?: string;
   name?: string;
+  loginMethod?: BrowserLoginMethod;
   fetchedAt: number;
 }
 
@@ -91,8 +95,8 @@ type AdsPowerResponse =
   | { ok: false; error: BrowserUsageAdsPowerError };
 
 type AsyncQueryResult =
-  | { ok: true; clearAutoDetect?: boolean; userId?: string; serialNumber?: string; name?: string }
-  | { ok: false; error: BrowserUsageAdsPowerError; fallbackUserId?: string; fallbackSerial?: string };
+  | { ok: true; clearAutoDetect?: boolean; userId?: string; serialNumber?: string; name?: string; loginMethod?: BrowserLoginMethod }
+  | { ok: false; error: BrowserUsageAdsPowerError; fallbackUserId?: string; fallbackSerial?: string; fallbackName?: string };
 
 function computeDisplay(input: {
   instanceName: string;
@@ -335,6 +339,7 @@ export class BrowserUsageStore {
           ...(rowUserId ? { userId: rowUserId } : {}),
           ...(rowSerial ? { serialNumber: rowSerial } : {}),
           ...(rowName ? { name: rowName } : {}),
+          loginMethod: adsPowerLoginMethod(record),
           fetchedAt: now,
         });
       }
@@ -393,6 +398,7 @@ export class BrowserUsageStore {
       ...(userId ? { userId } : {}),
       ...(serialNumber ? { serialNumber } : {}),
       ...(name ? { name } : {}),
+      loginMethod: adsPowerLoginMethod(item),
       fetchedAt: now,
     };
     if (!this.stopped && queryVersion === this.apiKeyVersion) {
@@ -459,6 +465,7 @@ export class BrowserUsageStore {
           userId: resolved.entry.userId,
           serialNumber: resolved.entry.serialNumber,
           name: resolved.entry.name,
+          loginMethod: resolved.entry.loginMethod,
         };
       } else {
         result = { ok: false, error: resolved.error };
@@ -479,7 +486,7 @@ export class BrowserUsageStore {
         const rawSerial = active?.serial_number !== undefined && active?.serial_number !== null ? String(active.serial_number).trim() : '';
         const activeSerial = rawSerial ? rawSerial.slice(0, 120) : undefined;
         const activeName = typeof active?.name === 'string' && active.name.trim() ? active.name.trim().slice(0, 120) : undefined;
-        if (activeName) {
+        if (activeName && (!this.options.registeredClaudeAccounts || (!activeUserId && !activeSerial))) {
           if (!this.stopped && queryVersion === this.apiKeyVersion) {
             this.storeCachedUser({ userId: activeUserId, serialNumber: activeSerial, name: activeName, fetchedAt: queryNow });
           }
@@ -492,6 +499,7 @@ export class BrowserUsageStore {
               userId: resolved.entry.userId ?? activeUserId,
               serialNumber: resolved.entry.serialNumber ?? activeSerial,
               name: resolved.entry.name,
+              loginMethod: resolved.entry.loginMethod,
             };
           } else {
             result = {
@@ -499,6 +507,7 @@ export class BrowserUsageStore {
               error: resolved.error,
               fallbackUserId: activeUserId,
               fallbackSerial: activeSerial,
+              fallbackName: activeName,
             };
           }
         } else {
@@ -521,6 +530,7 @@ export class BrowserUsageStore {
       let adspowerUserId = current.adspowerUserId;
       let adspowerSerialNumber = current.adspowerSerialNumber;
       let adspowerName = current.adspowerName;
+      let adspowerLoginMethod = current.adspowerLoginMethod;
       let adspowerError: BrowserUsageAdsPowerError | undefined;
 
       if (result.ok) {
@@ -528,15 +538,21 @@ export class BrowserUsageStore {
           adspowerUserId = undefined;
           adspowerSerialNumber = undefined;
           adspowerName = undefined;
+          adspowerLoginMethod = undefined;
         } else {
           adspowerUserId = result.userId;
           adspowerSerialNumber = result.serialNumber;
           adspowerName = result.name;
+          adspowerLoginMethod = result.loginMethod;
         }
         adspowerError = undefined;
       } else {
         if (!adspowerUserId && result.fallbackUserId) adspowerUserId = result.fallbackUserId;
         if (!adspowerSerialNumber && result.fallbackSerial) adspowerSerialNumber = result.fallbackSerial;
+        if (result.fallbackName) {
+          adspowerName = result.fallbackName;
+          adspowerLoginMethod = 'unknown';
+        }
         adspowerError = result.error;
       }
 
@@ -555,6 +571,7 @@ export class BrowserUsageStore {
         ...(adspowerUserId ? { adspowerUserId } : {}),
         ...(adspowerSerialNumber ? { adspowerSerialNumber } : {}),
         ...(adspowerName ? { adspowerName } : {}),
+        ...(adspowerLoginMethod ? { adspowerLoginMethod } : {}),
         adspowerQueriedAt: Math.max(current.adspowerQueriedAt ?? 0, queryNow),
         ...(adspowerError ? { adspowerError } : {}),
         displayName: display.displayName,
@@ -609,6 +626,12 @@ export class BrowserUsageStore {
       }
       this.loaded = true;
       this.loadedAt = now;
+      if (this.options.registeredClaudeAccounts) {
+        for (const item of this.records.values()) {
+          const identifiable = item.adspowerProfile || (this.records.size === 1 && item.instanceName.trim() === '未命名浏览器环境');
+          if (identifiable && item.adspowerName && item.adspowerLoginMethod === undefined) this.triggerAsyncNameQuery(item.instanceId, item.adspowerProfile, now);
+        }
+      }
     });
   }
 
@@ -696,6 +719,7 @@ export class BrowserUsageStore {
       let adspowerUserId = previous?.adspowerUserId;
       let adspowerSerialNumber = previous?.adspowerSerialNumber;
       let adspowerName = previous?.adspowerName;
+      let adspowerLoginMethod = previous?.adspowerLoginMethod;
       let adspowerQueriedAt = previous?.adspowerQueriedAt;
       let adspowerError = previous?.adspowerError;
 
@@ -704,6 +728,7 @@ export class BrowserUsageStore {
         adspowerUserId = undefined;
         adspowerSerialNumber = undefined;
         adspowerName = undefined;
+        adspowerLoginMethod = undefined;
         adspowerQueriedAt = undefined;
         adspowerError = undefined;
       }
@@ -716,6 +741,7 @@ export class BrowserUsageStore {
           adspowerUserId = cached.userId;
           adspowerSerialNumber = cached.serialNumber;
           adspowerName = cached.name;
+          adspowerLoginMethod = cached.loginMethod;
           adspowerQueriedAt = cached.fetchedAt;
           adspowerError = undefined;
           hitCache = true;
@@ -724,6 +750,7 @@ export class BrowserUsageStore {
         adspowerUserId = undefined;
         adspowerSerialNumber = undefined;
         adspowerName = undefined;
+        adspowerLoginMethod = undefined;
         adspowerQueriedAt = undefined;
         adspowerError = undefined;
       }
@@ -754,6 +781,7 @@ export class BrowserUsageStore {
         ...(adspowerUserId ? { adspowerUserId } : {}),
         ...(adspowerSerialNumber ? { adspowerSerialNumber } : {}),
         ...(adspowerName ? { adspowerName } : {}),
+        ...(adspowerLoginMethod ? { adspowerLoginMethod } : {}),
         ...(adspowerQueriedAt !== undefined ? { adspowerQueriedAt } : {}),
         ...(adspowerError ? { adspowerError } : {}),
         displayName: display.displayName,
@@ -771,6 +799,7 @@ export class BrowserUsageStore {
         || previous.adspowerUserId !== next.adspowerUserId
         || previous.adspowerSerialNumber !== next.adspowerSerialNumber
         || previous.adspowerName !== next.adspowerName
+        || previous.adspowerLoginMethod !== next.adspowerLoginMethod
         || previous.adspowerError !== next.adspowerError
         || previous.displayName !== next.displayName
         || previous.labelSource !== next.labelSource
@@ -824,7 +853,11 @@ export class BrowserUsageStore {
     }
     await this.tail;
     this.prune(now);
-    const list = [...this.records.values()];
+    const registered = this.options.registeredClaudeAccounts?.();
+    const list = [...this.records.values()].filter(item => {
+      const account = browserAccountKey(item.adspowerName, item.adspowerLoginMethod);
+      return !account || !registered?.has(account);
+    });
     const baseLabel = (item: BrowserUsageRecord) => item.displayName || item.instanceName;
     const counts = new Map<string, number>();
     for (const item of list) {
