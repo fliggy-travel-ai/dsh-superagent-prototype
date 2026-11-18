@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync, statSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CrossUserUsage } from '../server/modules/usage-claude-accounts/cross-user.ts';
@@ -87,4 +87,145 @@ test('出口探测超时和 IP 不一致使用不同提示', async () => {
     assert.equal(result.status, 'error');
     if (result.status === 'error') assert.match(result.error, expected);
   }
+});
+
+const renewalMappings = () => ({ [dir]: { command: '/trusted/launch', args: ['--usage'],
+  renewal: { cwd: '/trusted/workspace', probeArgs: ['--egress'] },
+} });
+test('隔离用户先核对出口，再官方初始化，最后查询；并发与缓存覆盖完整流程', async () => {
+  const actions: string[] = [];
+  let tokenExpired = true;
+  const usage = new CrossUserUsage({ mappings: renewalMappings,
+    initialize: async (command, cwd, timeout) => {
+      assert.equal(command, '/trusted/launch'); assert.equal(cwd, '/trusted/workspace'); assert.ok(timeout <= 6000);
+      actions.push('initialize'); tokenExpired = false; return true;
+    },
+    run: async (command, args) => {
+      assert.equal(command, '/trusted/launch');
+      if (args[0] === '--egress') { actions.push('probe'); return JSON.stringify({ verified: true }); }
+      actions.push('usage');
+      return JSON.stringify(tokenExpired ? { version: 1, error: 'http-401' } : reply);
+    },
+  });
+  const [first, second] = await Promise.all([usage.fetch(dir, 'account.org'), usage.discover(dir)]);
+  assert.equal(first.status, 'available'); assert.equal(second[0].key, 'account.org');
+  await usage.fetch(dir, 'account.org');
+  assert.deepEqual(actions, ['probe', 'initialize', 'usage']);
+});
+test('隔离用户出口预检失败时不续期、不发送账号请求', async () => {
+  for (const error of ['egress-mismatch', 'egress-timeout', 'egress-invalid-response']) {
+    let calls = 0;
+    const usage = new CrossUserUsage({ mappings: renewalMappings,
+      initialize: async () => assert.fail('出口失败不能续期'),
+      run: async (_command, args) => { calls++; assert.deepEqual(args, ['--egress']); return JSON.stringify({ version: 1, error }); },
+    });
+    const result = await usage.fetch(dir, 'account.org');
+    assert.equal(result.status, 'error'); assert.equal(calls, 1);
+  }
+});
+test('初始化确认不能代替真实账号结果，失败也不阻止尚有效的凭据查询', async () => {
+  for (const initialized of [true, false]) {
+    for (const response of [reply, { version: 1, error: 'http-401' }, { version: 1, error: 'keychain' }]) {
+      const usage = new CrossUserUsage({ mappings: renewalMappings,
+        initialize: async () => initialized,
+        run: async (_command, args) => JSON.stringify(args[0] === '--egress' ? { verified: true } : response),
+      });
+      const result = await usage.fetch(dir, 'account.org');
+      assert.equal(result.status, 'error' in response ? 'error' : 'available');
+      if (result.status === 'error') assert.match(result.error, 'error' in response && response.error === 'http-401' ? /HTTP 401/ : /钥匙串/);
+    }
+  }
+});
+test('预检、初始化和查询共用十八秒预算，预算耗尽时不查询', async () => {
+  let now = 0;
+  const timeouts: number[] = [];
+  const usage = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
+    initialize: async (_command, _cwd, timeout) => { assert.equal(timeout, 6000); now += 5000; return true; },
+    run: async (_command, args, timeout) => {
+      timeouts.push(timeout);
+      if (args[0] === '--egress') { now += 4000; return JSON.stringify({ verified: true }); }
+      return JSON.stringify(reply);
+    },
+  });
+  assert.equal((await usage.fetch(dir, 'account.org')).status, 'available');
+  assert.deepEqual(timeouts, [4000, 9000]);
+  const exhausted = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
+    initialize: async () => { now += 18_000; return false; },
+    run: async (_command, args) => { assert.deepEqual(args, ['--egress']); return JSON.stringify({ verified: true }); },
+  });
+  assert.equal((await exhausted.fetch(dir, 'account.org')).status, 'error');
+});
+test('隔离用户429冷却跨重载保留，冷却期间不运行预检或续期', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'quota-renewal-backoff-'));
+  let now = 0;
+  let initializations = 0;
+  let probes = 0;
+  const options = { mappings: renewalMappings, cacheFile: join(temp, 'cache.json'), now: () => now,
+    initialize: async () => { initializations++; return true; },
+    run: async (_command: string, args: string[]) => {
+      if (args[0] === '--egress') { probes++; return JSON.stringify({ verified: true }); }
+      return JSON.stringify({ ...reply, error: 'http-429' });
+    },
+  };
+  try {
+    await new CrossUserUsage(options).fetch(dir, 'account.org');
+    now = 899_999;
+    const reloaded = new CrossUserUsage(options);
+    await reloaded.discover(dir); await reloaded.fetch(dir, 'account.org');
+    assert.equal(initializations, 1); assert.equal(probes, 1);
+    now = 900_000;
+    await reloaded.fetch(dir, 'account.org');
+    assert.equal(initializations, 2); assert.equal(probes, 2);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+test('真实配置文件兼容旧映射并接受显式续期配置', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'quota-renewal-mapping-'));
+  try {
+    const file = join(temp, 'cross-user-providers.json');
+    writeFileSync(file, JSON.stringify({ ...mappings(), '/Users/second/.claude': renewalMappings()[dir] }));
+    const usage = new CrossUserUsage({ directory: temp });
+    assert.equal(usage.handles(dir), true); assert.equal(usage.handles('/Users/second/.claude'), true);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});
+test('初始化抛错后仍查询有效凭据，旧映射完全跳过初始化', async () => {
+  const usage = new CrossUserUsage({ mappings: renewalMappings,
+    initialize: async () => { throw new Error('fake failure'); },
+    run: async (_command, args) => JSON.stringify(args[0] === '--egress' ? { verified: true } : reply),
+  });
+  assert.equal((await usage.fetch(dir, 'account.org')).status, 'available');
+  const legacy = new CrossUserUsage({ mappings, initialize: async () => assert.fail('旧映射不能初始化'),
+    run: async (_command, args) => { assert.deepEqual(args, ['--usage']); return JSON.stringify(reply); },
+  });
+  assert.equal((await legacy.fetch(dir, 'account.org')).status, 'available');
+});
+test('剩余预算少于三秒时不启动额度helper', async () => {
+  let now = 0;
+  const usage = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
+    initialize: async () => { now = 15_001; return false; },
+    run: async (_command, args) => { assert.deepEqual(args, ['--egress']); return JSON.stringify({ verified: true }); },
+  });
+  assert.equal((await usage.fetch(dir, 'account.org')).status, 'error');
+});
+test('无效出口响应安全归类，预检429保留十五分钟冷却', async () => {
+  for (const output of ['not-json', 'null', JSON.stringify({ error: 'unknown-sensitive-value' }), JSON.stringify({ error: 'http-429' })]) {
+    let calls = 0;
+    let now = 0;
+    const usage = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
+      initialize: async () => assert.fail('无效出口不能初始化'),
+      run: async () => { calls++; return output; },
+    });
+    const report = await usage.fetch(dir, 'account.org');
+    assert.equal(report.status, 'error');
+    assert.equal(JSON.stringify(report).includes('unknown-sensitive-value'), false);
+    if (output.includes('http-429')) { now = 899_999; await usage.fetch(dir, 'account.org'); assert.equal(calls, 1); }
+  }
+});
+test('真实配置拒绝相对目录、空预检参数和未知续期字段', () => {
+  const temp = mkdtempSync(join(tmpdir(), 'quota-invalid-renewal-'));
+  try {
+    for (const renewal of [{ cwd: 'relative', probeArgs: ['--egress'] }, { cwd: '/workspace', probeArgs: [] }, { cwd: '/workspace', probeArgs: ['--egress'], unknown: true }]) {
+      writeFileSync(join(temp, 'cross-user-providers.json'), JSON.stringify({ [dir]: { ...mappings()[dir], renewal } }));
+      assert.equal(new CrossUserUsage({ directory: temp }).handles(dir), false);
+    }
+  } finally { rmSync(temp, { recursive: true, force: true }); }
 });
