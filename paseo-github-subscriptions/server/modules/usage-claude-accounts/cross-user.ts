@@ -6,9 +6,12 @@ import { z } from 'zod';
 import type { UsageAccount, UsageReport } from '@getpaseo/plugin/server/usage';
 import { toneFromUsedPct, windowFromUsedPct } from '@getpaseo/plugin/server/usage';
 import { paseoHome } from './providers.ts';
+import { initializeIsolatedLogin } from './isolated-renewal.ts';
 
 const exec = promisify(execFile);
-const mappingsSchema = z.record(z.string(), z.object({ command: z.string().startsWith('/'), args: z.array(z.string()) }).strict());
+const mappingsSchema = z.record(z.string(), z.object({ command: z.string().startsWith('/'), args: z.array(z.string()),
+  renewal: z.object({ cwd: z.string().startsWith('/'), probeArgs: z.array(z.string()).min(1) }).strict().optional(),
+}).strict());
 const replySchema = z.object({
   version: z.literal(1),
   account: z.object({ key: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/), label: z.string() }).optional(),
@@ -20,6 +23,8 @@ type Reply = z.infer<typeof replySchema>;
 const cacheSchema = z.record(z.string(), z.object({ until: z.number().finite(), reply: replySchema }));
 const QUERY_INTERVAL = 5 * 60_000;
 const RATE_LIMIT_WAIT = 15 * 60_000;
+const QUERY_TIMEOUT = 18_000;
+const MIN_QUERY_BUDGET = 3000;
 type Mappings = z.infer<typeof mappingsSchema>;
 function mappings(file: string): Mappings {
   try { return mappingsSchema.parse(JSON.parse(readFileSync(file, 'utf8'))); }
@@ -27,14 +32,15 @@ function mappings(file: string): Mappings {
 }
 export class CrossUserUsage {
   private load: () => Mappings;
-  private run: (command: string, args: string[]) => Promise<string>;
+  private run: (command: string, args: string[], timeout: number) => Promise<string>;
+  private initialize: typeof initializeIsolatedLogin;
   private cache = new Map<string, { until: number; reply: Reply }>();
   private now: () => number;
   private cacheFile?: string;
   private pending = new Map<string, Promise<Reply>>();
   private identities = new Map<string, NonNullable<Reply['account']>>();
   /** `directory` holds cross-user-providers.json (trusted query programs) and cross-user-cache.json. */
-  constructor(options: { mappings?: () => Mappings; run?: (command: string, args: string[]) => Promise<string>; now?: () => number; cacheFile?: string; directory?: string } = {}) {
+  constructor(options: { mappings?: () => Mappings; run?: (command: string, args: string[], timeout: number) => Promise<string>; initialize?: typeof initializeIsolatedLogin; now?: () => number; cacheFile?: string; directory?: string } = {}) {
     const directory = options.directory ?? join(paseoHome(process.env), 'claude-quota-resume');
     this.load = options.mappings ?? (() => mappings(join(directory, 'cross-user-providers.json')));
     this.now = options.now ?? Date.now;
@@ -45,9 +51,33 @@ export class CrossUserUsage {
         for (const [dir, entry] of this.cache) if (entry.reply.account) this.identities.set(dir, entry.reply.account);
       } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') console.warn('独立用户额度缓存读取失败'); }
     }
-    this.run = options.run ?? (async (command, args) => (await exec(command, args, { timeout: 18000, maxBuffer: 65536 })).stdout);
+    this.run = options.run ?? (async (command, args, timeout) => (await exec(command, args, { timeout, maxBuffer: 65536 })).stdout);
+    this.initialize = options.initialize ?? initializeIsolatedLogin;
   }
   handles(configDir: string | undefined): boolean { return !!configDir && !!this.load()[configDir]; }
+  private async execute(mapping: Mappings[string]): Promise<Reply> {
+    const deadline = this.now() + QUERY_TIMEOUT;
+    const remaining = () => Math.max(1, deadline - this.now());
+    if (mapping.renewal) {
+      let output: string;
+      try { output = await this.run(mapping.command, mapping.renewal.probeArgs, Math.min(4000, remaining())); }
+      catch (error) {
+        return { version: 1, error: (error as { killed?: boolean }).killed ? 'egress-timeout' : 'egress-probe-failed', windows: [] };
+      }
+      let probe: { verified?: boolean; error?: string };
+      try { probe = z.object({ verified: z.boolean().optional(), error: z.string().optional() }).parse(JSON.parse(output)); }
+      catch { return { version: 1, error: 'egress-invalid-response', windows: [] }; }
+      if (probe.verified !== true) {
+        const error = probe.error && /^(egress-(mismatch|timeout|probe-failed|invalid-response)|http-429)$/.test(probe.error) ? probe.error : 'egress-probe-failed';
+        return { version: 1, error, windows: [] };
+      }
+      if (remaining() <= MIN_QUERY_BUDGET) return { version: 1, error: 'query-failed', windows: [] };
+      try { await this.initialize(mapping.command, mapping.renewal.cwd, Math.min(6000, remaining() - MIN_QUERY_BUDGET)); } catch {}
+      if (remaining() < MIN_QUERY_BUDGET) return { version: 1, error: 'query-failed', windows: [] };
+    }
+    if (this.now() >= deadline) return { version: 1, error: 'query-failed', windows: [] };
+    return replySchema.parse(JSON.parse(await this.run(mapping.command, mapping.args, remaining())));
+  }
   private async query(configDir: string): Promise<Reply> {
     const mapping = this.load()[configDir];
     if (!mapping) throw new Error('未配置独立用户额度查询');
@@ -56,7 +86,7 @@ export class CrossUserUsage {
     const running = this.pending.get(configDir); if (running) return running;
     const task = (async () => {
       let reply: Reply;
-      try { reply = replySchema.parse(JSON.parse(await this.run(mapping.command, mapping.args))); }
+      try { reply = await this.execute(mapping); }
       catch { reply = { version: 1, error: 'query-failed', windows: [] }; }
       if (reply.account) this.identities.set(configDir, reply.account);
       else if (this.identities.has(configDir)) reply = { ...reply, account: this.identities.get(configDir) };
