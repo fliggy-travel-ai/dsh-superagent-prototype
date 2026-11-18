@@ -7,7 +7,7 @@ import { ContinuousUsage } from '../usage-claude-accounts/continuous-usage.ts';
 import { allocationHint, quotaUsable, type AccountQuota } from './rules.ts';
 import { proxyAccount, proxyQuotaUrl, readProxyQuotas } from './proxy.ts';
 
-type Client = Pick<DaemonConnection['client'], 'listUsageReports' | 'listAvailableProviders'>;
+type Client = Pick<DaemonConnection['client'], 'listUsageReports' | 'getProvidersSnapshot'>;
 type UsageReportEntry = Awaited<ReturnType<Client['listUsageReports']>>['reports'][number];
 
 interface ProviderConfig {
@@ -87,18 +87,22 @@ export function localQuotaReader(client: Client, paseoHome: string, signal: Abor
       if (proxy) return proxyAccount(proxy, provider, route.kind);
     }
     if (identityEnvKeys.some(key => overrides?.[key] !== undefined && overrides[key] !== route.env[key])) return;
-    if (route.kind === 'claude') {
+    const reports = await usageReports;
+    if (route.kind === 'claude' && reports.some(report => report.sourceId === 'claude-accounts' || report.sourceId === 'claude')) {
       claudeAccounts ??= accountMap(paseoHome, new ContinuousUsage({ home: paseoHome, renewal: false }).discover);
     }
-    const [reports, keys] = await Promise.all([usageReports, route.kind === 'claude' ? claudeAccounts : undefined]);
-    return quotaFromReports(reports, provider, route.kind, keys?.get(provider), Date.now());
+    const claudeKey = route.kind === 'claude' ? (await claudeAccounts)?.get(provider) : undefined;
+    return quotaFromReports(reports, provider, route.kind, claudeKey, Date.now());
   }
 
   async function alternatives(provider: string, floor: number) {
-    const { providers, error } = await client.listAvailableProviders();
-    if (error) throw new Error('无法读取本机可用 Provider');
-    const others = providers.filter(entry => entry.available && entry.provider !== provider);
-    const results = await Promise.all(others.map(async entry => quotaUsable(await read(entry.provider), floor) ? entry.provider : null));
+    const { entries, compactSnapshot } = await client.getProvidersSnapshot();
+    const others = (compactSnapshot?.entries ?? entries).filter(entry =>
+      entry.enabled && entry.status !== 'unavailable' && entry.status !== 'error' && entry.provider !== provider);
+    const results = await Promise.all(others.map(async entry => {
+      const quota = await read(entry.provider).catch(() => undefined);
+      return quotaUsable(quota, floor) ? entry.provider : null;
+    }));
     return [...new Set(results.flatMap(result => result === null ? [] : [result]))].sort();
   }
 

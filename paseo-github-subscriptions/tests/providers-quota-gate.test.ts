@@ -88,8 +88,8 @@ test('创建钩子拒绝目标，只列本机启用且额度通过的账号，�
       usage('codex-multi', 'codex-low', available(window(8))),
       usage('codex-multi', 'codex-disabled', available(window(50))),
     ] }),
-    listAvailableProviders: async () => ({ providers: ['codex-empty', 'codex-spare', 'codex-low', 'codex-disabled', 'codex-unknown'].map(provider => ({
-      provider, available: provider !== 'codex-disabled',
+    getProvidersSnapshot: async () => ({ entries: ['codex-empty', 'codex-spare', 'codex-low', 'codex-disabled', 'codex-unknown'].map(provider => ({
+      provider, enabled: provider !== 'codex-disabled', status: 'loading',
     })) }),
   };
   quotaGateModule.register({
