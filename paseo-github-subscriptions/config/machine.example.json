@@ -3,6 +3,7 @@
   "machine": "macmini",
   "modules": {
     "providers.defaults": true,
+    "providers.quotaGate": true,
     "answer.quietChildren": true,
     "answer.escalation": true,
     "usage.claudeAccounts": true,
@@ -11,6 +12,9 @@
     "dispatch.finalize": false,
     "schedules.workspaces": true,
     "capacity.mainSessions": false
+  },
+  "quotaGate": {
+    "minRemainingPct": 10
   },
   "agentDefaults": [
     {

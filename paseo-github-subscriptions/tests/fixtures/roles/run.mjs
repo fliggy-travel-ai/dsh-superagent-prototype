@@ -30,7 +30,12 @@ const handlers = new Map(); const hooks = new Map(); const providers = []; const
 const server = {
   registerProvider(value) { providers.push(value.id); }, registerUsageSource(value) { usage.push(value.id); },
   handle(contract, handler) { handlers.set(contract.name, handler); },
-  addHook(name, handler) { hooks.set(name, handler); return () => hooks.delete(name); },
+  addHook(name, handler) {
+    const callbacks = hooks.get(name) ?? new Set();
+    hooks.set(name, callbacks);
+    callbacks.add(handler);
+    return () => callbacks.delete(handler);
+  },
 };
 const cleanup = contribute(server);
 try {
@@ -52,6 +57,7 @@ try {
     assert.ok(!ids.includes('providers.antigravity'));
     assert.ok(ids.includes('providers.cloudGateway'));
     assert.ok(ids.includes('usage.providerQuotas'));
+    assert.ok(ids.includes('providers.quotaGate'));
     assert.deepEqual(providers, []);
     assert.deepEqual(usage, ['claude-browser', 'claude-accounts']);
     assert.ok(handlers.has('cloud-bridge.answer-web-request'));
@@ -60,7 +66,10 @@ try {
     const result = await handlers.get(cloudRpc)({ cloudSessionId: 'cse_abcdefgh1234', afterSeq: 0, waitMs: 0 }, {});
     assert.deepEqual(result, { forwarded: true });
     assert.deepEqual(invoked, [['dev-automation-providers', cloudRpc, { cloudSessionId: 'cse_abcdefgh1234', afterSeq: 0, waitMs: 0 }]]);
-    const created = await hooks.get('agent.create.before')({ request: { config: { provider: 'qoder' } } }, {});
+    let created = { config: { provider: 'qoder' } };
+    const createHooks = [...hooks.get('agent.create.before')];
+    assert.equal(createHooks.length, 2);
+    for (const handler of createHooks) created = await handler({ request: created }, {}) ?? created;
     assert.equal(created.config.modeId, 'yolo');
   } else {
     assert.deepEqual(status.instance, { role: 'main', legacy: true });

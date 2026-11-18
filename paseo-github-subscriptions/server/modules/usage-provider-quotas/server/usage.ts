@@ -592,7 +592,7 @@ async function fetchCodexUsage(input: AccountInput): Promise<UsageReport> {
   pushCodexWindow(data?.rate_limit?.secondary_window, "7d");
 
   const balances: UsageBalance[] = [];
-  const creditBalance = Number(data?.credits?.balance);
+  const creditBalance = data?.credits?.has_credits === false ? 0 : Number(data?.credits?.balance);
   if (Number.isFinite(creditBalance) && creditBalance > 0) {
     const remaining = Math.round(creditBalance * 100) / 100;
     balances.push({
@@ -610,6 +610,7 @@ async function fetchCodexUsage(input: AccountInput): Promise<UsageReport> {
   const details: UsageDetail[] = [
     { id: "provider_id", label: "Provider ID", value: input.providerId },
   ];
+  if (data?.credits?.unlimited === true) details.push({ id: "payable_credit", label: "Credits", value: "unlimited" });
   if (input.email) {
     details.push({ id: "email", label: "Account Email", value: input.email });
   }
