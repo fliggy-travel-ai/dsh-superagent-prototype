@@ -20,6 +20,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDeployArgs, assertRoleChange, pluginIdFor, providersHostedBy, readRoleFile, roleFileContent, runningTurns, type AgentRow, type DeployOptions } from './deploy-lib.ts';
+import { checkScheduleHost } from './check-schedule-workspaces.ts';
 
 const PLUGIN_DIRECTORY = 'paseo-github-subscriptions';
 
@@ -36,7 +37,7 @@ function installedRole(target: string) {
   return readRoleFile(existsSync(file) ? readFileSync(file, 'utf8') : null);
 }
 
-function main() {
+async function main() {
   const options = parseDeployArgs(process.argv.slice(2), homedir());
   const repo = run('git', ['rev-parse', '--show-toplevel'], dirname(fileURLToPath(import.meta.url))).trim();
   const commit = run('git', ['rev-parse', '--verify', `${options.ref}^{commit}`], repo).trim();
@@ -87,22 +88,31 @@ function main() {
   const listed = () => (JSON.parse(paseo(options, ['plugin', 'ls', '--json'])) as { id: string; path: string; status: string }[]).find(plugin => plugin.id === pluginId);
   if (options.install || options.reload) {
     const current = listed();
+    let activated = false;
     if (!current) {
       if (!options.install) { console.log(`${pluginId} 尚未安装。安装命令：${options.paseo} plugin install ${options.target} --id ${pluginId}`); return; }
       paseo(options, ['plugin', 'install', options.target, '--id', pluginId]);
+      activated = true;
     } else if (current.path !== options.target) {
       console.log(`${pluginId} 当前安装在 ${current.path}，不是本次部署目录。改装需要先 remove 再 install，请人工确认后执行。`);
       return;
     } else if (options.reload) {
       paseo(options, ['plugin', 'reload', pluginId]);
+      activated = true;
     }
     const after = listed();
     console.log(`${pluginId} 状态：${after?.status ?? '未找到'}`);
     if (after?.status !== 'running') process.exitCode = 1;
+    else if (activated && options.role !== 'provider') {
+      console.log('文件已部署并加载，开始验收定时任务工作区模块。');
+      await checkScheduleHost(options.host);
+      console.log('定时任务工作区模块已运行；其他机器需要分别部署并验收。');
+    }
+    else if (!activated) console.log('文件已部署但未重载，未核对新版本模块。');
   } else {
     console.log(`未重载。生效需要：${options.paseo} plugin reload ${pluginId}${options.host ? ` --host ${options.host}` : ''}`);
   }
 }
 
-try { main(); }
+try { await main(); }
 catch (error) { console.error(`部署失败：${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }

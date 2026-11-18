@@ -5,3 +5,7 @@
 模块通过会话自身的 `paseo.schedule-id` 查询任务，只处理没有父会话的未归档会话。心跳和普通会话不处理。插件启动时补齐现存会话；会话创建时处理新增会话。同一次插件运行中，每个成功处理的工作区只修改一次。重新加载插件会重新核对现存定时任务工作区。
 
 模块使用现有共享连接，不修改任务提示词、运行时间和模型。管理键为 `schedules.workspaces`，默认开启。任务已删除时跳过；连接或写入失败时记日志，插件重载时可以重试。
+
+模块只处理当前插件所在守护进程的会话。Mac Mini 和 MacBook 必须分别部署并重载 `github-subscriptions`。插件显示名为“开发自动化”；`plugin ls` 中仍使用原编号。插件状态为 `running` 不能证明这个模块已部署。
+
+部署后在源码目录执行 `npm run check:schedules -- --both`，分别通过两台机器的 `modules.status` 确认 `schedules.workspaces` 正在运行。MacBook 连接使用已有环境变量 `MACBOOK_PASEO_HOST`，检查命令不输出连接地址。单个工作区可执行 `npm run check:schedules -- --macbook --workspace <工作区编号>`，读回置顶时间和每日任务标题；刚重载时最多等待 30 秒让后台补齐完成。检查命令只读；验收失败时返回非零退出码。
