@@ -71,6 +71,8 @@ export function createCapacityModule(deps: { readSnapshot?: () => Promise<Awaite
     let journalLoaded = false;
     let cooldownLoaded = false;
     const clearing = new Set<string>();
+    // 上一轮因无可接账号而等待的会话：冷却期内一旦出现可接账号就立即重试，不等满 30 分钟。
+    const waitingForTarget = new Set<string>();
     const readSnapshot = async () => {
       if (deps.readSnapshot) return deps.readSnapshot();
       const config = context.machine.section<{ sourceId: string }>('claudeAccounts');
@@ -132,13 +134,16 @@ export function createCapacityModule(deps: { readSnapshot?: () => Promise<Awaite
           const before = Object.keys(cooldown).length;
           cooldown = pruneCooldown(cooldown, Date.now());
           if (Object.keys(cooldown).length !== before) await saveCooldown();
+          for (const id of waitingForTarget) if (!cooldown[id]) waitingForTarget.delete(id);
           const mode = context.config.migration.mode;
           if (mode === 'off') return;
           const data = await readSnapshot();
           for (const account of data.accounts) {
             if (!triggerReason(account, Date.now())) continue;
+            const hasTarget = targets(data.accounts, account.provider).length > 0;
             for (const id of account.load.agentIds) {
-              if (stopped || cooldown[id] || journal.get(id)) continue;
+              if (stopped || journal.get(id)) continue;
+              if (cooldown[id] && !(hasTarget && waitingForTarget.has(id))) continue;
               const agent = await port.read(id);
               if (!agent || agent.labels.role !== 'main' || !(agent.labels.need || agent.labels.issue)) continue;
               if (agent.archivedAt || agent.status === 'closed' || agent.labels['dsh.migration-successor']) continue;
@@ -156,6 +161,9 @@ export function createCapacityModule(deps: { readSnapshot?: () => Promise<Awaite
               }
               cooldown[id] = Date.now(); await saveCooldown();
               const result = await migrate(port, agent, data.accounts, mode);
+              // 无可接账号只是打开自动继续等待，不改变容量：继续处理同一轮里其他超额会话。
+              if (result === 'no_target') { waitingForTarget.add(id); continue; }
+              waitingForTarget.delete(id);
               if (result === 'migrated') capacityChanged();
               if (result === 'lock_unverified') recoveryReady = false;
               return;
