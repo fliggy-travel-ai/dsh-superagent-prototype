@@ -90,7 +90,7 @@ export function proxyAccount(report: ProxyReport, provider: string, kind: string
       if (!window.success || window.data.name?.trim().toLowerCase() === 'total') return [];
       const used = number(window.data.used);
       const remaining = number(window.data.remaining) ?? (used === undefined ? undefined : 100 - used);
-      return remaining === undefined ? [] : [{ id: 'upstream', remainingPct: remaining }];
+      return remaining === undefined ? [] : [{ id: 'upstream', label: window.data.name, remainingPct: remaining }];
     });
     const amount = account.balance?.trim().match(/^(-?\d+(?:\.\d+)?)\s+\S.*$/)?.[1]
       ?? account.balance?.trim().match(/^[^\d\s]{1,3}\s*(-?\d+(?:\.\d+)?)$/)?.[1];

@@ -62,7 +62,7 @@ export function quotaFromReports(reports: readonly UsageReportEntry[], provider:
   const windows = report.windows.flatMap(window => {
     if (window.resetsAt && Date.parse(window.resetsAt) <= now) return [];
     const remainingPct = window.remainingPct ?? (window.usedPct == null ? undefined : 100 - window.usedPct);
-    return remainingPct === undefined ? [] : [{ id: window.id, remainingPct }];
+    return remainingPct === undefined ? [] : [{ id: window.id, label: window.shortLabel ?? window.label, remainingPct }];
   });
   const payableCredit = resolvedKind === 'codex' && (
     report.balances?.some(balance => balance.id === 'credits' && (balance.remaining ?? 0) > 0) === true
@@ -77,6 +77,7 @@ export function localQuotaReader(client: Client, paseoHome: string, signal: Abor
   const usageReports = client.listUsageReports().then(result => result.reports, () => []);
   const proxyReports = new Map<string, ReturnType<typeof readProxyQuotas>>();
   let claudeAccounts: ReturnType<typeof accountMap> | undefined;
+  let claudeUsage: ContinuousUsage | undefined;
 
   async function read(provider: string, overrides?: Record<string, string>) {
     const route = providerRoute(provider, providers);
@@ -88,8 +89,17 @@ export function localQuotaReader(client: Client, paseoHome: string, signal: Abor
     }
     if (identityEnvKeys.some(key => overrides?.[key] !== undefined && overrides[key] !== route.env[key])) return;
     const reports = await usageReports;
-    if (route.kind === 'claude' && reports.some(report => report.sourceId === 'claude-accounts' || report.sourceId === 'claude')) {
-      claudeAccounts ??= accountMap(paseoHome, new ContinuousUsage({ home: paseoHome, renewal: false }).discover);
+    if (route.kind === 'claude') {
+      claudeUsage ??= new ContinuousUsage({ home: paseoHome, renewal: false });
+      // 凭据被清空或过期且无法续期的账号不会出现在账号映射里，必须单独拦截，不能当作额度未知放行。
+      // API Key、外部网关和独立系统用户的账号不在本机用户的钥匙串里，不做登录检查。
+      const apiLogin = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'].some(key => route.env[key]);
+      const configDir = route.env.CLAUDE_CONFIG_DIR;
+      const ownLogin = !configDir || configDir.startsWith(`${home}/`);
+      if (!apiLogin && ownLogin && await claudeUsage.needsLogin(route.env)) return { error: '账号未登录或登录已过期，请在对应账号的 Claude Code 终端重新登录' };
+      if (reports.some(report => report.sourceId === 'claude-accounts' || report.sourceId === 'claude')) {
+        claudeAccounts ??= accountMap(paseoHome, claudeUsage.discover);
+      }
     }
     const claudeKey = route.kind === 'claude' ? (await claudeAccounts)?.get(provider) : undefined;
     return quotaFromReports(reports, provider, route.kind, claudeKey, Date.now());

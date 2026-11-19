@@ -14,7 +14,7 @@
 
 工具权限自动批准模块默认启用，处理本机 Paseo 会话的 Bash 等工具执行权限。插件加载时检查已存在的待批准请求，收到权限事件后立即检查，并每五秒补查和重试。人工提问、计划确认和模式变更保留人工处理。每次批准前重新读取会话，避免处理已经结束的请求。批准成功和失败均写入插件日志，不记录命令内容。在 `machine.json` 的 `modules` 中设置 `"providers.toolPermissions": false` 可关闭；修改后重载插件生效。该模块按主机运行，两台主机需要分别更新。
 
-新建会话额度检查默认启用。确认账号报错、代理上游查询报错、额度用尽或任一适用窗口低于阈值时，插件拒绝创建，并列出本机额度已确认可用的 Provider ID。Cursor 和 Antigravity 的模型族窗口及有付费余额的账号跳过百分比阈值。没有可判定的额度时，插件记录警告并允许创建。检查仅用于新建会话。可在 `machine.json` 中设置 `quotaGate.minRemainingPct`（默认 `10`，范围 `0` 到 `100`），或在 `modules` 中设置 `"providers.quotaGate": false`。修改后重载插件生效。
+新建会话额度检查默认启用。确认账号报错、代理上游查询报错、本机用户的 Claude 账号未登录或登录已过期、额度用尽时，插件拒绝创建，并列出本机额度可用且不低于阈值的 Provider ID。任一适用窗口低于阈值但还没用完时，插件记录警告并允许创建。提示文案显示原窗口名（例如 7d），不显示 effective。Cursor 和 Antigravity 的模型族窗口及有付费余额的账号跳过百分比阈值。API Key、外部网关和独立系统用户的 Claude 账号不做登录检查。没有可判定的额度时，插件记录警告并允许创建。检查仅用于新建会话。可在 `machine.json` 中设置 `quotaGate.minRemainingPct`（默认 `10`，范围 `0` 到 `100`），或在 `modules` 中设置 `"providers.quotaGate": false`。修改后重载插件生效。
 
 实现使用 `@getpaseo/plugin`、`@getpaseo/client`、`@getpaseo/protocol` 的 0.15.0 版本。清单限制 Paseo 为 `>=0.15.0 <0.16.0`。
 
