@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,7 +7,8 @@ import { loadMachineConfig } from '../server/core/machine-config.ts';
 import { quotaGateModule } from '../server/modules/providers-quota-gate/index.ts';
 import { proxyAccount, proxyQuotaUrl, readProxyQuotas } from '../server/modules/providers-quota-gate/proxy.ts';
 import { quotaFromReports } from '../server/modules/providers-quota-gate/reports.ts';
-import { quotaProblems, quotaUsable } from '../server/modules/providers-quota-gate/rules.ts';
+import { localQuotaReader } from '../server/modules/providers-quota-gate/reports.ts';
+import { quotaProblems, quotaUsable, quotaWarnings } from '../server/modules/providers-quota-gate/rules.ts';
 
 type UsageEntry = Parameters<typeof quotaFromReports>[0][number];
 const window = (remainingPct: number) => ({ id: 'weekly', label: 'Weekly', remainingPct });
@@ -16,12 +17,35 @@ const usage = (sourceId: string, key: string, report: UsageEntry['report']): Usa
 });
 const available = (...windows: ReturnType<typeof window>[]): UsageEntry['report'] => ({ status: 'available', windows });
 
-test('同一阈值用于目标与备选，已耗尽、账号报错和代理报错独立拒绝', () => {
+test('低于阈值只警告不拒绝，已耗尽、账号报错和代理报错拒绝', () => {
   assert.equal(quotaUsable({ allocationHint: 'normal', windows: [window(10)] }, 10), true);
-  assert.match(quotaProblems({ windows: [window(9.9)] }, 10)[0]!, /9\.9%/);
+  const low = { allocationHint: 'normal' as const, windows: [window(9.9)] };
+  assert.deepEqual(quotaProblems(low), []);
+  assert.match(quotaWarnings(low, 10)[0]!, /9\.9%/);
+  assert.equal(quotaUsable(low, 10), false);
   assert.equal(quotaUsable({ allocationHint: 'unknown' }, 10), false);
-  assert.match(quotaProblems({ allocationHint: 'avoid', windows: [window(0)] }, 0).join(' '), /0%/);
-  assert.deepEqual(quotaProblems({ error: '账号报错', upstream: { error: '上游报错' }, payableCredit: true }, 10), ['账号报错', '上游报错']);
+  assert.match(quotaProblems({ allocationHint: 'avoid', windows: [window(0)] }).join(' '), /0%/);
+  assert.deepEqual(quotaProblems({ error: '账号报错', upstream: { error: '上游报错' }, payableCredit: true }), ['账号报错', '上游报错']);
+});
+
+test('提示文案显示原窗口名，不显示 effective', () => {
+  const pinned = usage('glm', 'glm-acp', available({ id: 'effective', label: 'Weekly limit', shortLabel: '7d', remainingPct: 8 } as never));
+  assert.deepEqual(quotaWarnings(quotaFromReports([pinned], 'glm-acp', 'glm', undefined, 0), 10), ['7d 窗口剩余 8%']);
+});
+
+test('本机用户的 Claude 账号凭据缺失时拒绝，独立系统用户的账号不判定', async context => {
+  const base = mkdtempSync(join(tmpdir(), 'quota-claude-'));
+  context.after(() => rmSync(base, { recursive: true, force: true }));
+  const home = join(base, '.paseo');
+  mkdirSync(home);
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ agents: { providers: {
+    'claude-gone': { extends: 'claude', env: { CLAUDE_CONFIG_DIR: join(base, '.claude-gone') } },
+    'claude-other-user': { extends: 'claude', env: { CLAUDE_CONFIG_DIR: '/Users/someone-else/.claude' } },
+  } } }));
+  const client = { listUsageReports: async () => ({ reports: [] }), getProvidersSnapshot: async () => ({ entries: [] }) };
+  const reader = localQuotaReader(client as never, home, new AbortController().signal);
+  assert.match(quotaProblems(await reader.read('claude-gone'))[0]!, /未登录或登录已过期/);
+  assert.equal(await reader.read('claude-other-user'), undefined);
 });
 
 test('Cursor 有其他可用池即放行，Antigravity 跳过阈值但拒绝 avoid', () => {
@@ -29,15 +53,15 @@ test('Cursor 有其他可用池即放行，Antigravity 跳过阈值但拒绝 avo
     usage('antigravity', 'agy-isolated', available(window(2))), usage('antigravity', 'agy-exhausted', available(window(0)))];
   assert.equal(quotaUsable(quotaFromReports(quotas, 'cursor-isolated', 'cursor', undefined, 0), 10), true);
   assert.equal(quotaUsable(quotaFromReports(quotas, 'agy-isolated', 'antigravity', undefined, 0), 10), true);
-  assert.deepEqual(quotaProblems(quotaFromReports(quotas, 'agy-exhausted', 'antigravity', undefined, 0), 10), [
-    '额度已耗尽（allocationHint avoid）', 'weekly 窗口剩余 0%',
+  assert.deepEqual(quotaProblems(quotaFromReports(quotas, 'agy-exhausted', 'antigravity', undefined, 0)), [
+    '额度已耗尽（allocationHint avoid）', 'Weekly 窗口剩余 0%',
   ]);
 });
 
 test('只读目标账户，新快照的账号错误覆盖历史额度，付费余额与无限额度放行', () => {
   const stale = usage('codex', 'default', available(window(100)));
   const exact = usage('codex-multi', 'codex', { status: 'error', error: '敏感错误原文' });
-  assert.match(quotaProblems(quotaFromReports([stale, exact], 'codex', 'codex', undefined, 0), 10)[0]!, /account\.error/);
+  assert.match(quotaProblems(quotaFromReports([stale, exact], 'codex', 'codex', undefined, 0))[0]!, /account\.error/);
   assert.equal(quotaFromReports([stale, exact], 'codex-other', 'codex', undefined, 0), undefined);
   const paid = usage('codex-multi', 'codex-paid', {
     status: 'available', windows: [window(0)], balances: [{ id: 'credits', label: 'Credits', unit: 'usd', remaining: 1 }],
@@ -70,13 +94,13 @@ test('代理只查本机、不跟随重定向，按代理账户池评估且不�
   assert.ok(report);
   assert.equal(quotaUsable(proxyAccount(report, 'codex-proxy', 'codex'), 10), true);
   assert.equal(quotaUsable(proxyAccount(report, 'cursor-proxy', 'cursor'), 10), true);
-  assert.match(quotaProblems(proxyAccount(report, 'grok-proxy', 'grok'), 10)[0]!, /avoid/);
+  assert.match(quotaProblems(proxyAccount(report, 'grok-proxy', 'grok'))[0]!, /avoid/);
   const failed = await readProxyQuotas('http://127.0.0.1:4040/v1/magpie/quotas', signal, async () => { throw new Error('受保护的报错'); });
   assert.ok(failed);
-  assert.match(quotaProblems(proxyAccount(failed, 'grok', 'grok'), 10)[0]!, /upstream\.error/);
+  assert.match(quotaProblems(proxyAccount(failed, 'grok', 'grok'))[0]!, /upstream\.error/);
 });
 
-test('创建钩子拒绝目标，只列本机启用且额度通过的账号，未知记录警告后放行', async context => {
+test('创建钩子拒绝耗尽账号，只列本机启用且额度通过的账号，低额度和未知记录警告后放行', async context => {
   const home = mkdtempSync(join(tmpdir(), 'quota-gate-'));
   context.after(() => rmSync(home, { recursive: true, force: true }));
   writeFileSync(join(home, 'config.json'), '{}');
@@ -103,9 +127,12 @@ test('创建钩子拒绝目标，只列本机启用且额度通过的账号，�
   const passing = { config: { cwd: home, provider: 'codex-spare' } };
   assert.equal(await hook({ request: passing }), passing);
   const warn = context.mock.method(console, 'warn', () => {});
+  const low = { config: { cwd: home, provider: 'codex-low' } };
+  assert.equal(await hook({ request: low }), low);
+  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-low.*低于 10%.*Weekly 窗口剩余 8%/);
   const unknown = { config: { cwd: home, provider: 'codex-unknown' } };
   assert.equal(await hook({ request: unknown }), unknown);
-  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-unknown.*额度未知/);
+  assert.match(String(warn.mock.calls[1]?.arguments[0]), /codex-unknown.*额度未知/);
 });
 
 test('机器配置默认阈值、显式覆盖和非法值校验', () => {

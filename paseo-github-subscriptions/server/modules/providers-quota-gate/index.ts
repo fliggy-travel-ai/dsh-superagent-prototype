@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isMainInstance, type Module } from '../types.ts';
 import { localQuotaReader } from './reports.ts';
-import { quotaProblems } from './rules.ts';
+import { quotaProblems, quotaWarnings } from './rules.ts';
 
 const quotaGateSchema = z.strictObject({ minRemainingPct: z.number().min(0).max(100).default(10) });
 type QuotaGateConfig = z.infer<typeof quotaGateSchema>;
@@ -31,13 +31,16 @@ export const quotaGateModule: Module<QuotaGateConfig> = {
         const reader = localQuotaReader(client, services.home, deadline);
         return { reader, quota: await reader.read(provider, request.env) };
       }), deadline).catch(() => undefined);
-      const problems = quotaProblems(checked?.quota, floor);
+      const problems = quotaProblems(checked?.quota);
       if (checked && problems.length > 0) {
         const passing = await within(checked.reader.alternatives(provider, floor), deadline).catch(() => null);
         const alternatives = passing === null ? '读取失败' : passing.join('、') || '无';
         throw new Error(`新建会话额度检查拒绝 ${provider}：${problems.join('；')}。本机额度可用账号：${alternatives}`);
       }
-      if (!checked?.quota?.allocationHint || checked.quota.allocationHint === 'unknown') {
+      const warnings = quotaWarnings(checked?.quota, floor);
+      if (warnings.length > 0) {
+        console.warn(`[开发自动化][providers.quotaGate] ${provider} 额度低于 ${floor}%：${warnings.join('；')}，允许创建会话`);
+      } else if (!checked?.quota?.allocationHint || checked.quota.allocationHint === 'unknown') {
         console.warn(`[开发自动化][providers.quotaGate] ${provider} 的本机额度未知，允许创建会话`);
       }
       return request;
