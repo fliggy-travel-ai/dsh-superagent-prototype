@@ -134,8 +134,17 @@ export class ContinuousUsage {
     if (!before.state) return { status: "error", error: "未找到登录凭据，请在对应账号的 Claude Code 终端登录" };
     // Expired first-time logins without metadata can still show the upstream sign-in remedy.
     if (!this.history.matches(input, input.accountKey, before.state)) {
-      if ((before.state.identity?.key === input.accountKey || input.accountKey === digest(JSON.stringify(input.route))) && before.state.expires !== undefined && before.state.expires <= Date.now()) {
+      const sameLogin = before.state.identity?.key === input.accountKey || input.accountKey === digest(JSON.stringify(input.route));
+      if (sameLogin && before.state.expires !== undefined && before.state.expires <= Date.now()) {
         return this.history.restoreMessage(input.accountKey, { status: "unavailable", problem: { kind: "expired", expiresAt: new Date(before.state.expires).toISOString(), refreshedBy: "claude" } });
+      }
+      // 令牌未过期但已被吊销时，账号发现读不到个人资料，身份无法确认。实际查询一次：
+      // 只采用“被拒绝/过期”这类不含额度数据的结果，不会把额度算到错误账号上。
+      if (sameLogin) {
+        const probe = await fetchUsage(input, boundedFetch, {
+          env, readKeychainCredentials: async () => before.record ? { claudeAiOauth: { ...before.record.oauth, expiresAt: before.record.expires } } : null,
+        }).catch(() => null);
+        if (probe?.status === "unavailable") return this.history.restoreMessage(input.accountKey, probe);
       }
       return { status: "error", error: "登录凭据已变化，正在重新确认账号；请刷新额度，旧会话请重新打开" };
     }

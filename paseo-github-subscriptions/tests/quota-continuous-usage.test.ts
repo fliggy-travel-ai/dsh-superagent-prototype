@@ -141,3 +141,30 @@ test("真实适配层：过期保留身份，错误不变成功，旧会话不�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("令牌未过期但已被吊销时显示请求被拒绝，不提示凭据已变化", async () => {
+  const root = mkdtempSync(join(tmpdir(), "quota-revoked-test-"));
+  const config = join(root, "claude"); mkdirSync(config);
+  const oldHome = process.env.PASEO_HOME; process.env.PASEO_HOME = root;
+  const oldFetch = globalThis.fetch;
+  writeFileSync(join(config, ".credentials.json"), JSON.stringify({ claudeAiOauth: {
+    accessToken: "fake-revoked", refreshToken: "fake-refresh", expiresAt: Date.now() + 3600_000,
+  } }), { mode: 0o600 });
+  writeFileSync(join(config, ".claude.json"), JSON.stringify({ oauthAccount: {
+    accountUuid: "account-r", organizationUuid: "org-test", emailAddress: "r@example.invalid",
+  } }));
+  globalThis.fetch = async () => new Response(JSON.stringify({ type: "error", error: { type: "authentication_error" } }), { status: 401 });
+  try {
+    const service = new ContinuousUsage();
+    const [account] = await service.discover({ kind: "session", provider: "claude", env: { HOME: root, USER: "quota-test", CLAUDE_CONFIG_DIR: config } });
+    assert.equal(account.key, "account-r.org-test");
+    const report = await service.fetch(account.input as ContinuityInput);
+    assert.equal(report.status, "unavailable");
+    if (report.status === "unavailable") assert.deepEqual(report.problem, { kind: "rejected", status: 401, refreshedBy: "claude" });
+    await service.stop();
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = oldHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
