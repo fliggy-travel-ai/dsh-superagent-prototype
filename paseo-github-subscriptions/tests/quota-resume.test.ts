@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canResumeAgent, findReset, isQuotaError, ResumeService } from "../server/modules/usage-claude-accounts/resume.ts";
+import { canResumeAgent, quotaRecovered, findReset, isQuotaError, ResumeService } from "../server/modules/usage-claude-accounts/resume.ts";
 
 const now = Date.parse("2026-10-30T12:00:00Z");
 const report = (id = "five_hour", usedPct = 100, resetsAt = "2026-10-30T13:00:00Z") => [{ sourceId: "claude", report: { status: "available", windows: [{ id, usedPct, resetsAt }] } }];
@@ -245,4 +245,47 @@ test("读取会话失败时不安排；到期检查读取失败时不发送，�
     assert.equal(sent(), 1);
     assert.equal(jobs().length, 0);
   });
+});
+
+test('缓存未耗尽时等五分钟补查，限流后继续等待；新轮次取消补查', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quota-delayed-check-'));
+  const oldCli = process.env.PASEO_CLI, oldHome = process.env.PASEO_HOME, oldNow = Date.now;
+  let clock = now; Date.now = () => clock;
+  process.env.PASEO_HOME = dir; process.env.PASEO_CLI = join(dir, 'paseo');
+  writeFileSync(join(dir, 'reply'), JSON.stringify(report('five_hour', 99)));
+  writeFileSync(join(dir, 'paseo'), `#!/usr/bin/env node
+const fs=require('fs'),p=require('path'),d=process.env.PASEO_HOME;
+if(process.argv.includes('--refresh'))process.exit(5);
+if(process.argv[2]==='usage'){fs.appendFileSync(p.join(d,'calls'),'x');console.log(fs.readFileSync(p.join(d,'reply'),'utf8'));}
+else if(process.argv[2]==='inspect') console.log(JSON.stringify({Id:process.argv[3],Status:'idle',UpdatedAt:'before',PendingPermissions:[]}));
+else console.log('[]');`, { mode: 0o755 });
+  const service = new ResumeService();
+  try {
+    await service.consider('waiting', "You've hit your 5-hour limit");
+    await service.consider('canceled', "You've hit your 5-hour limit");
+    await service.cancel('canceled');
+    clock += 299999; await service.tick(); assert.equal(readFileSync(join(dir,'calls'),'utf8').length,2);
+    clock++; writeFileSync(join(dir, 'reply'), JSON.stringify([{sourceId:'claude',report:{status:'error',error:'429'}}]));
+    await service.tick(); assert.equal(service.retryAt('waiting'), null);
+    clock += 300000; writeFileSync(join(dir, 'reply'), JSON.stringify(report()));
+    await service.tick(); assert.equal(service.retryAt('waiting'), now + 3600_000 + 30_000);
+    assert.equal(service.retryAt('canceled'), null);
+    assert.equal(readFileSync(join(dir,'calls'),'utf8').length,4);
+  } finally {
+    service.stop(); Date.now = oldNow;
+    if(oldCli===undefined)delete process.env.PASEO_CLI;else process.env.PASEO_CLI=oldCli;
+    if(oldHome===undefined)delete process.env.PASEO_HOME;else process.env.PASEO_HOME=oldHome;
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
+
+
+test('查询恢复时额度已重置：仅接受错误之后的新鲜可用报告', () => {
+  const available=report('five_hour', 20).map(r=>({...r,fetchedAt:new Date(now+300001).toISOString()}));
+  assert.equal(quotaRecovered(available,now),true);
+  assert.equal(quotaRecovered(available.map(r=>({...r,fetchedAt:new Date(now+299999).toISOString()})),now),false);
+  assert.equal(quotaRecovered(available,now+1),false);
+  assert.equal(quotaRecovered(report('five_hour',20),now),false);
+  assert.equal(quotaRecovered([...available,...available],now),false);
+  assert.equal(quotaRecovered(report().map(r=>({...r,fetchedAt:new Date(now+300001).toISOString()})),now),false);
 });

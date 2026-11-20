@@ -81,6 +81,7 @@ test("真实适配层：过期保留身份，错误不变成功，旧会话不�
   const config = join(root, "claude"); mkdirSync(config);
   const oldHome = process.env.PASEO_HOME; process.env.PASEO_HOME = root;
   const oldFetch = globalThis.fetch;
+  const oldNow = Date.now; let clock = oldNow(); Date.now = () => clock;
   let offline = false;
   const scope = { kind: "session" as const, provider: "claude", env: { HOME: root, USER: "quota-test", CLAUDE_CONFIG_DIR: config } };
   function login(account: string, expired = false) {
@@ -131,12 +132,14 @@ test("真实适配层：过期保留身份，错误不变成功，旧会话不�
     assert.equal((await service.fetch(second.input as ContinuityInput)).status, "available");
     assert.equal((await service.fetch(input)).status, "error");
     offline = true;
+    assert.equal((await service.fetch(second.input as ContinuityInput)).status, "available");
+    clock += 300_001;
     const network = await service.fetch(second.input as ContinuityInput);
     assert.equal(network.status, "error");
     if (network.status === "error") assert.ok(!network.error.includes("must not escape"));
     await service.stop();
   } finally {
-    globalThis.fetch = oldFetch;
+    globalThis.fetch = oldFetch; Date.now = oldNow;
     if (oldHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = oldHome;
     rmSync(root, { recursive: true, force: true });
   }

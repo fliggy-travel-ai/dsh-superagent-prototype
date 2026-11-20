@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const GRACE_MS = 30_000;
 const PROMPT = "额度已恢复。请先检查会话进度和当前工作状态，然后继续完成未完成的任务。若任务已经完成，请不要重复操作。";
-type Report = { sourceId?: string; report?: { status?: string; windows?: { id?: string; usedPct?: number | null; remainingPct?: number | null; resetsAt?: string | null }[] } };
+type Report = { fetchedAt?: string; sourceId?: string; report?: { status?: string; windows?: { id?: string; usedPct?: number | null; remainingPct?: number | null; resetsAt?: string | null }[] } };
 type Snapshot = { Id: string; Status: string; Archived: boolean; UpdatedAt: string; PendingPermissions?: unknown[] };
 type Job = { agentId: string; resetAt: number; updatedAt: string; phase: "pending" | "sending" };
 // "claude" is Paseo's bundled source (default login); "claude-accounts" is this module's default source ID.
@@ -26,6 +26,15 @@ export function findReset(reports: Report[], now: number, sources: ReadonlySet<s
   if (!((w.usedPct != null && w.usedPct >= 100) || (w.remainingPct != null && w.remainingPct <= 0))) return null;
   const reset = Date.parse(w.resetsAt ?? "");
   return Number.isFinite(reset) && reset > now && reset <= now + 6 * 60 * 60 * 1000 ? reset : null;
+}
+
+/** 扣除底层最长五分钟缓存年龄后，仍须晚于额度错误。历史快照不参与。 */
+export function quotaRecovered(reports: Report[], detectedAt: number, sources = DEFAULT_CLAUDE_SOURCES): boolean {
+  const matches = reports.filter(r => sources.has(r.sourceId ?? "") && r.report?.status === "available");
+  if (matches.length !== 1 || !(Date.parse(matches[0].fetchedAt ?? "") > detectedAt + 5 * 60_000)) return false;
+  const windows = matches[0].report?.windows ?? [];
+  const remaining = (w: typeof windows[number]) => w.usedPct != null ? w.usedPct < 100 : w.remainingPct != null && w.remainingPct > 0;
+  return windows.some(w => w.id === "five_hour" && remaining(w)) && windows.every(remaining);
 }
 
 function cliPath(): string {
@@ -65,6 +74,7 @@ export class ResumeService {
   private jobs = new Map<string, Job>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private processing = new Set<string>();
+  private checks = new Map<string, { at: number; text: string; generation: number; attempts: number; detectedAt: number }>();
   private generations = new Map<string, number>();
   private readonly directory: string;
   private readonly path: string;
@@ -136,6 +146,7 @@ export class ResumeService {
   explicitCounts(): { enabled: number; disabled: number } { return { enabled: this.enabled.size, disabled: this.disabled.size }; }
   pendingCount(): number { return [...this.jobs.values()].filter(job => job.phase === "pending").length; }
   async cancel(agentId: string) {
+    this.checks.delete(agentId);
     this.generations.set(agentId, (this.generations.get(agentId) ?? 0) + 1);
     if (this.jobs.delete(agentId)) { this.save(); console.info("已取消待恢复任务：", agentId); }
   }
@@ -144,13 +155,18 @@ export class ResumeService {
     const known = this.enabled.delete(agentId) || this.disabled.delete(agentId);
     if (known) { this.write(this.enabledPath, [...this.enabled]); this.write(this.disabledPath, [...this.disabled]); console.info("已清除自动继续选择：", agentId); }
   }
-  async consider(agentId: string, text: string) {
+  async consider(agentId: string, text: string, attempts = 0, detectedAt = Date.now()) {
     if (this.jobs.has(agentId)) return;
     if (!isQuotaError(text)) return;
     const generation = this.generations.get(agentId) ?? 0;
     try {
-      const reports = JSON.parse(await cli(["usage", "--agent", agentId, "--refresh", "--json"])) as Report[];
-      const resetAt = findReset(reports, Date.now(), this.sources);
+      const reports = JSON.parse(await cli(["usage", "--agent", agentId, "--json"])) as Report[];
+      const resetAt = findReset(reports, Date.now(), this.sources)
+        ?? (attempts > 0 && quotaRecovered(reports, detectedAt, this.sources) ? Date.now() : null);
+      if (!resetAt && attempts < 72 && !this.stopped && generation === (this.generations.get(agentId) ?? 0)) {
+        // 首次命中额度上限时缓存可能仍未耗尽；缓存到期后补查；最多六小时，不绕过接口冷却。
+        this.checks.set(agentId, { at: Date.now() + 5 * 60_000, text, generation, detectedAt, attempts: attempts + 1 });
+      }
       if (!resetAt) { console.warn("未确认该会话的 5 小时额度重置时间，未安排自动继续：", agentId); return; }
       const snap = JSON.parse(await cli(["inspect", agentId, "--json"])) as Snapshot;
       if (this.stopped || generation !== (this.generations.get(agentId) ?? 0)) return;
@@ -160,7 +176,12 @@ export class ResumeService {
       this.jobs.set(agentId, { agentId, resetAt, updatedAt: snap.UpdatedAt, phase: "pending" });
       this.save();
       console.info(this.isEnabled(agentId) ? "已安排额度恢复后继续：" : "检测到额度耗尽，自动继续未开启，已记录重置时间：", agentId, new Date(resetAt + GRACE_MS).toISOString());
-    } catch (error) { console.warn("无法安排自动继续：", agentId, String(error)); }
+    } catch (error) {
+      if (attempts < 72 && !this.stopped && generation === (this.generations.get(agentId) ?? 0)) {
+        this.checks.set(agentId, { at: Date.now() + 5 * 60_000, text, generation, detectedAt, attempts: attempts + 1 });
+      }
+      console.warn("无法安排自动继续：", agentId, String(error));
+    }
   }
   private async scanExisting() {
     try {
@@ -179,6 +200,11 @@ export class ResumeService {
   }
   async tick() {
     const pending: Promise<void>[] = [];
+    for (const [id, check] of this.checks) {
+      if (this.stopped || Date.now() < check.at) continue;
+      this.checks.delete(id);
+      if (check.generation === (this.generations.get(id) ?? 0)) pending.push(this.consider(id, check.text, check.attempts, check.detectedAt));
+    }
     for (const job of this.jobs.values()) {
       if (this.stopped || job.phase !== "pending" || !this.isEnabled(job.agentId) || Date.now() < job.resetAt + GRACE_MS || this.processing.has(job.agentId)) continue;
       this.processing.add(job.agentId);

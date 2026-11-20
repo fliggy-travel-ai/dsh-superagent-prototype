@@ -9,7 +9,7 @@ import { isLocalUsageInput, type CombinedUsageInput } from "../../../shared/cont
 import { UsageContinuity, digest, readIdentity, type CredentialState } from "./continuity.ts";
 import { discover, fetchUsage, resolveClaudeCredentials, claudeKeychainAccount } from "../../vendor/paseo-0.15.0/claude-usage-source/server/usage.ts";
 import { paseoHome } from "./providers.ts";
-import { cli } from "./resume.ts";
+import { QuotaRequests } from "./quota-requests.ts";
 import { hasAuthOverride, initializeLogin, RenewalService, type RenewalTarget } from "./renewal.ts";
 
 /** Keep vendor requests comfortably below the host's 20-second usage deadline. */
@@ -27,6 +27,7 @@ export interface ContinuousUsageOptions {
 export class ContinuousUsage {
   private activeSessions: ActiveSessions;
   private crossUser: CrossUserUsage;
+  private requests: QuotaRequests;
   readonly history: UsageContinuity;
   private routes = new Map<string, NodeJS.ProcessEnv>();
   private renewal: RenewalService;
@@ -38,13 +39,15 @@ export class ContinuousUsage {
     this.renewalEnabled = options.renewal ?? true;
     this.activeSessions = new ActiveSessions(this.home);
     this.crossUser = new CrossUserUsage({ directory });
+    this.requests = new QuotaRequests(join(directory, "request-cooldowns.json"), boundedFetch);
     this.history = new UsageContinuity(join(directory, "usage-history.json"));
     this.renewal = new RenewalService({
       targets: () => this.targets(),
       read: target => this.targetState(target),
       run: (target, before, signal) => initializeLogin({ target, before, signal,
         cwd: join(directory, "renewal"), read: () => this.targetState(target) }),
-      onRenewed: async () => { await cli(["usage", "ls", "--refresh", "--json"]); },
+      // 正常查询会重新读取凭据；续期不触发全局额度请求。
+      onRenewed: async () => {},
     });
   }
   start() { if (this.renewalEnabled) this.renewal.start(); }
@@ -109,7 +112,9 @@ export class ContinuousUsage {
       const id = JSON.stringify(input.route);
       this.routes.set(id, env); before.set(id, (await this.read(input, env)).state);
     }
-    const accounts = await discover(scope, {}, boundedFetch);
+    const identity = [...before.values()].find(state => state?.identity)?.identity?.key
+      ?? env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir();
+    const accounts = await discover(scope, {}, this.requests.forAccount(identity, env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir()));
     const result: UsageAccount[] = [];
     for (const account of accounts) {
       const input = account.input as UsageInput;
@@ -141,7 +146,7 @@ export class ContinuousUsage {
       // 令牌未过期但已被吊销时，账号发现读不到个人资料，身份无法确认。实际查询一次：
       // 只采用“被拒绝/过期”这类不含额度数据的结果，不会把额度算到错误账号上。
       if (sameLogin) {
-        const probe = await fetchUsage(input, boundedFetch, {
+        const probe = await fetchUsage(input, this.requests.forAccount(before.state.identity?.key ?? env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir(), env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir()), {
           env, readKeychainCredentials: async () => before.record ? { claudeAiOauth: { ...before.record.oauth, expiresAt: before.record.expires } } : null,
         }).catch(() => null);
         if (probe?.status === "unavailable") return this.history.restoreMessage(input.accountKey, probe);
@@ -150,7 +155,7 @@ export class ContinuousUsage {
     }
     let report: UsageReport;
     try {
-      report = await fetchUsage(input, boundedFetch, {
+      report = await fetchUsage(input, this.requests.forAccount(before.state.identity?.key ?? env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir(), env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir()), {
         env, readKeychainCredentials: async () => before.record ? { claudeAiOauth: { ...before.record.oauth, expiresAt: before.record.expires } } : null,
       });
     } catch (error) {

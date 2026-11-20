@@ -156,3 +156,5 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+Claude 额度查询正常复用五分钟缓存，Provider 名称仍每分钟更新。登录续期不再强制刷新全部账号；会话刚触及额度上限而缓存尚未更新时，后台每五分钟补查，最多六小时，开始新轮次或归档会取消补查。普通账号在本插件内合并并发请求，429 按服务器 Retry-After 等待；响应缺少有效等待时间时等待十五分钟。等待记录只保存账号哈希和截止时间，插件重载或令牌续期不会清除已确认账号的等待。独立 macOS 用户查询程序暂不提供 Retry-After，连续 429 采用十五、三十、六十分钟等待，并跨重载保留。Paseo 自带额度来源仍使用自己的缓存，本插件不能统一其他进程的查询。

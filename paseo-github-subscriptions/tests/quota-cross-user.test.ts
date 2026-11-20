@@ -229,3 +229,17 @@ test('真实配置拒绝相对目录、空预检参数和未知续期字段', ()
     }
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
+
+test('独立用户连续429按十五、三十、六十分钟退避，重载不清除连续次数', async () => {
+  const temp = mkdtempSync(join(tmpdir(), 'quota-progressive-'));
+  const cacheFile = join(temp, 'cache.json'); let now=0, calls=0;
+  const options = { mappings, cacheFile, now:()=>now, run:async()=>{ calls++;return JSON.stringify({...reply,error:'http-429'}); } };
+  try {
+    await new CrossUserUsage(options).discover(dir);
+    now=900000;await new CrossUserUsage(options).discover(dir);assert.equal(calls,2);
+    now=2699999;await new CrossUserUsage(options).discover(dir);assert.equal(calls,2);
+    now=2700000;await new CrossUserUsage(options).discover(dir);assert.equal(calls,3);
+    now=6299999;await new CrossUserUsage(options).discover(dir);assert.equal(calls,3);
+    now=6300000;await new CrossUserUsage(options).discover(dir);assert.equal(calls,4);
+  } finally {rmSync(temp,{recursive:true,force:true});}
+});
