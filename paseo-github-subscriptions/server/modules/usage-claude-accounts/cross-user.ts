@@ -20,7 +20,7 @@ const replySchema = z.object({
     utilization: z.number().finite().min(0).max(100).nullable(), resetsAt: z.string().nullable() })).default([]),
 });
 type Reply = z.infer<typeof replySchema>;
-const cacheSchema = z.record(z.string(), z.object({ until: z.number().finite(), reply: replySchema }));
+const cacheSchema = z.record(z.string(), z.object({ until: z.number().finite(), reply: replySchema, rateLimits: z.number().int().min(0).max(3).optional() }));
 const QUERY_INTERVAL = 5 * 60_000;
 const RATE_LIMIT_WAIT = 15 * 60_000;
 const QUERY_TIMEOUT = 18_000;
@@ -34,7 +34,7 @@ export class CrossUserUsage {
   private load: () => Mappings;
   private run: (command: string, args: string[], timeout: number) => Promise<string>;
   private initialize: typeof initializeIsolatedLogin;
-  private cache = new Map<string, { until: number; reply: Reply }>();
+  private cache = new Map<string, { until: number; reply: Reply; rateLimits?: number }>();
   private now: () => number;
   private cacheFile?: string;
   private pending = new Map<string, Promise<Reply>>();
@@ -90,8 +90,9 @@ export class CrossUserUsage {
       catch { reply = { version: 1, error: 'query-failed', windows: [] }; }
       if (reply.account) this.identities.set(configDir, reply.account);
       else if (this.identities.has(configDir)) reply = { ...reply, account: this.identities.get(configDir) };
-      const until = this.now() + (reply.error === 'http-429' ? RATE_LIMIT_WAIT : QUERY_INTERVAL);
-      this.cache.set(configDir, { until, reply });
+      const rateLimits = reply.error === 'http-429' ? Math.min(3, (cached?.rateLimits ?? 0) + 1) : 0;
+      const until = this.now() + (rateLimits ? RATE_LIMIT_WAIT * 2 ** (rateLimits - 1) : QUERY_INTERVAL);
+      this.cache.set(configDir, { until, reply, rateLimits });
       if (this.cacheFile) {
         try {
           mkdirSync(dirname(this.cacheFile), { recursive: true, mode: 0o700 });
