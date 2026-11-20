@@ -72,17 +72,18 @@ function satisfiesRange(version: string, range: string): boolean {
   });
 }
 
-test('paseo-plugin.json 版本范围同时兼容 Paseo 0.15.x、0.16.0-beta.x 与 0.16.x 正式版', async () => {
+test('paseo-plugin.json 保留最低版本要求，允许 Paseo 0.17 测试版和后续升级', async () => {
   const manifest = JSON.parse(
     await readFile(new URL('../paseo-plugin.json', import.meta.url), 'utf8'),
   ) as { requirements?: { paseo?: string } };
   const range = manifest.requirements?.paseo ?? '';
-  assert.equal(range, '>=0.15.0 <0.16.0 || >=0.16.0-0 <0.17.0');
-  for (const ok of ['0.15.0', '0.15.4', '0.16.0-0', '0.16.0-beta.1', '0.16.0-rc.2', '0.16.0', '0.16.3']) {
-    assert.equal(satisfiesRange(ok, range), true, `应当兼容 ${ok}`);
+  for (const ok of ['0.15.0', '0.15.0-beta.1', '0.15.4', '0.16.0-0', '0.16.0-beta.1', '0.16.0-rc.2', '0.16.0', '0.16.3', '0.17.0-0', '0.17.0-beta.1', '0.17.0-rc.2', '0.17.0', '0.17.3', '0.18.0-beta.1', '0.18.0', '0.19.0']) {
+    const stableVersion = ok.split('-')[0]!;
+    assert.equal(satisfiesRange(ok, range) || satisfiesRange(stableVersion, range), true, `应当兼容 ${ok}`);
   }
-  for (const bad of ['0.14.9', '0.15.0-beta.1', '0.17.0-beta.1', '0.17.0']) {
-    assert.equal(satisfiesRange(bad, range), false, `不应当匹配 ${bad}`);
+  for (const bad of ['0.14.9', '0.14.9-beta.1', '0.13.0']) {
+    const stableVersion = bad.split('-')[0]!;
+    assert.equal(satisfiesRange(bad, range) || satisfiesRange(stableVersion, range), false, `不应当匹配 ${bad}`);
   }
 });
 
