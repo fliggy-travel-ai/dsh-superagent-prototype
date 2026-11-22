@@ -100,7 +100,7 @@ npm run test:daemon
 
 ## 账号额度与问题答复模块（#1737 第二期）
 
-`usage.claudeAccounts`、`answer.quietChildren`、`answer.escalation` 三个模块和 `core/session-roles`（主会话 = 置顶工作区中的会话）。默认关闭，在 `machine.json` 的 `modules` 中打开；区块 `claudeAccounts`、`quietChildren`、`escalation` 见 `config/machine.example.json`。行为变化、旧状态迁移（只复制）、旧插件保护和已知限制见 [docs/answer-usage-modules.md](docs/answer-usage-modules.md)。
+`usage.claudeAccounts`、`answer.quietChildren`、`answer.escalation` 三个模块和 `core/session-roles`（主会话 = 置顶工作区中的会话，与父会话同工作区的子会话除外）。默认关闭，在 `machine.json` 的 `modules` 中打开；区块 `claudeAccounts`、`quietChildren`、`escalation` 见 `config/machine.example.json`。行为变化、旧状态迁移（只复制）、旧插件保护和已知限制见 [docs/answer-usage-modules.md](docs/answer-usage-modules.md)。
 
 ## 原型复用边界
 

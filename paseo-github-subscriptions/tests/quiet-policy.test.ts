@@ -68,3 +68,25 @@ test('停止信号取消尚未发送的清除', async () => {
   await clearer.idle();
   assert.deepEqual(calls, []);
 });
+
+test('置顶工作区里与父会话同工作区的子会话：清除待查看，且只清它自己', () => {
+  const agents: Record<string, { workspaceId: string; archivedAt?: string | null }> = {
+    main: { workspaceId: 'wks_main' },
+    archivedMain: { workspaceId: 'wks_main', archivedAt: '2026-11-20T00:00:00Z' },
+    elsewhere: { workspaceId: 'wks_sub' },
+  };
+  const lookup = (id: string) => agents[id];
+  const child = { id: 'child', workspaceId: 'wks_main', status: 'idle', requiresAttention: true, attentionReason: 'finished', labels: { 'paseo.parent-agent-id': 'main' } };
+  assert.equal(shouldClearAttention(child, roles, { lookup }), true);
+  assert.equal(attentionClearScope(child, roles, { lookup }), 'agent');
+  // 没有父会话信息时按旧规则：置顶工作区里的会话是主会话。
+  assert.equal(shouldClearAttention(child, roles), false);
+  // 父会话已归档（接班后的前任）：自己是主会话，保留提醒。
+  assert.equal(shouldClearAttention({ ...child, labels: { 'paseo.parent-agent-id': 'archivedMain' } }, roles, { lookup }), false);
+  // 父会话在别的工作区（协调会话派出的主会话）：保留提醒。
+  assert.equal(shouldClearAttention({ ...child, labels: { 'paseo.parent-agent-id': 'elsewhere' } }, roles, { lookup }), false);
+  // 父会话查不到（在其他主机或已删除）：保留提醒。
+  assert.equal(shouldClearAttention({ ...child, labels: { 'paseo.parent-agent-id': 'missing' } }, roles, { lookup }), false);
+  // 普通子会话（非置顶工作区）仍按工作区清。
+  assert.equal(attentionClearScope({ id: 'sub', workspaceId: 'wks_sub', status: 'idle', requiresAttention: true, attentionReason: 'finished' }, roles, { lookup }), 'workspace');
+});

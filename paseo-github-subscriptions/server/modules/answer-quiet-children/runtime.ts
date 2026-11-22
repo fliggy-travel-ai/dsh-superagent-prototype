@@ -27,7 +27,7 @@ export interface QuietOptions {
   log?: (line: string) => void;
 }
 
-type ClearableAgent = AgentState & { id: string; title?: string | null; labels?: Record<string, string> };
+type ClearableAgent = AgentState & { id: string; title?: string | null; archivedAt?: string | null };
 const TITLE_CACHE_MS = 30_000;
 
 /**
@@ -39,6 +39,8 @@ export class QuietRuntime {
   private readonly options: QuietOptions;
   private readonly lifetime = new AbortController();
   private readonly titles = new Map<string, string>();
+  /** 订阅到的会话所在工作区，用来认出与父会话同在置顶工作区的子会话。 */
+  private readonly placements = new Map<string, { workspaceId: string | null; archivedAt: string | null }>();
   private clearer: AttentionClearer | null = null;
   private forward: ForwardRuntime | null = null;
   private forwardLifetime: AbortController | null = null;
@@ -72,15 +74,24 @@ export class QuietRuntime {
     const { subscription } = await paseo.agents.list({ subscribe: {}, signal: this.lifetime.signal });
     this.clearer = clearer;
     subscription.subscribe({
-      snapshot: ({ entries }) => { for (const { agent } of entries) void this.consider(agent as never); },
+      snapshot: ({ entries }) => {
+        for (const { agent } of entries) this.place(agent as never);
+        for (const { agent } of entries) void this.consider(agent as never);
+      },
       update: message => {
-        if (message.type !== 'agent_update' || message.payload.kind !== 'upsert') return;
+        if (message.type !== 'agent_update') return;
+        if (message.payload.kind !== 'upsert') { this.placements.delete(message.payload.agentId); return; }
+        this.place(message.payload.agent as never);
         void this.consider(message.payload.agent as never);
       },
     });
     this.connected = true;
     this.error = null;
     this.log('已连接守护进程');
+  }
+
+  private place(agent: ClearableAgent) {
+    this.placements.set(agent.id, { workspaceId: agent.workspaceId ?? null, archivedAt: agent.archivedAt ?? null });
   }
 
   private async consider(agent: ClearableAgent) {
@@ -99,7 +110,7 @@ export class QuietRuntime {
     const hasQuestion = (agent.pendingPermissions ?? []).some(request => request.kind === 'question');
     const forwarding = await this.forwardStatus(agent);
     const questionHandled = hasQuestion && (!!this.options.forwardBlocked || forwarding.status === 'forwarded');
-    const scope = attentionClearScope(agent, roles, { questionHandled });
+    const scope = attentionClearScope(agent, roles, { questionHandled, lookup: id => this.placements.get(id) });
     if (!scope) return;
     this.clearer?.enqueue(scope, agent.id, agent.workspaceId);
     this.handled.add({

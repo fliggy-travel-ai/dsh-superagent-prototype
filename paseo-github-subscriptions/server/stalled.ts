@@ -1,5 +1,5 @@
 import type { StalledHostTimings, StalledSnapshot } from '../shared/stalled.ts';
-import { isMainSession, type WorkspaceRoles } from './core/session-roles.ts';
+import { isMainSession, lookupFrom, type AgentLookup, type WorkspaceRoles } from './core/session-roles.ts';
 
 export const STALLED_SCAN_INTERVAL_MS = 10_000;
 export const STALLED_MAX_WAIT_MS = 50;
@@ -44,8 +44,10 @@ export interface StalledRuntimeOptions {
 const roundMs = (ms: number) => Math.round(ms * 10) / 10;
 const key = (agent: StalledAgent) => `${agent.hostId}:${agent.id}`;
 const working = (agent: StalledAgent) => ['running', 'initializing'].includes(agent.status) || !!agent.activeTurn || !!agent.pendingPermissions?.length;
-/** 主会话 = 置顶工作区中的会话（见 core/session-roles.ts）。父会话标签不再决定是否检查。 */
-const candidate = (agent: StalledAgent, roles: WorkspaceRoles) => !agent.archivedAt && !agent.internal && isMainSession(agent, roles) && ['idle', 'error'].includes(agent.status) && !working(agent);
+/** 主会话 = 置顶工作区中的会话，与父会话同在一个工作区的子会话除外（见 core/session-roles.ts）。 */
+const candidate = (agent: StalledAgent, roles: WorkspaceRoles, lookup?: AgentLookup) => !agent.archivedAt && !agent.internal && isMainSession(agent, roles, lookup) && ['idle', 'error'].includes(agent.status) && !working(agent);
+/** 同一主机的会话按编号查父会话。 */
+const hostLookup = (agents: readonly StalledAgent[], hostId: string) => lookupFrom(agents.filter(agent => agent.hostId === hostId) as never);
 
 export function descendants(parent: StalledAgent, agents: StalledAgent[]) {
   const found = new Set([key(parent)]);
@@ -76,6 +78,7 @@ export class StalledRuntime {
   private autoStarted = false;
   private lastHostId = 'local';
   private lastRoles: WorkspaceRoles | null = null;
+  private lastLookup: AgentLookup | undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
   private messages = new Map<string, { version: string; text: string | null }>();
 
@@ -140,7 +143,7 @@ export class StalledRuntime {
           if (!current) return null;
           if (
             this.lastRoles
-              ? !candidate(current, this.lastRoles)
+              ? !candidate(current, this.lastRoles, this.lastLookup)
               : Boolean(current.archivedAt) ||
                 Boolean(current.internal) ||
                 !['idle', 'error'].includes(current.status) ||
@@ -228,7 +231,9 @@ export class StalledRuntime {
       hostTimings = fleet.hosts;
       this.lastHostId = fleet.hostId;
       this.lastRoles = fleet.roles;
-      const candidates = fleet.agents.filter(agent => agent.hostId === fleet.hostId && candidate(agent, fleet.roles));
+      const lookup = hostLookup(fleet.agents, fleet.hostId);
+      this.lastLookup = lookup;
+      const candidates = fleet.agents.filter(agent => agent.hostId === fleet.hostId && candidate(agent, fleet.roles, lookup));
       const live = new Set(candidates.map(key));
       for (const identity of this.messages.keys()) if (!live.has(identity)) this.messages.delete(identity);
       let cursor = 0;
@@ -263,7 +268,7 @@ export class StalledRuntime {
             const tCur0 = performance.now();
             const current = await this.port.current(agent);
             currentMs += performance.now() - tCur0;
-            if (!current || !candidate(current, fleet.roles) || current.updatedAt !== agent.updatedAt) continue;
+            if (!current || !candidate(current, fleet.roles, lookup) || current.updatedAt !== agent.updatedAt) continue;
             sessions.push({ agentId: agent.id, title: agent.title || '未命名会话', since: agent.attentionTimestamp || agent.updatedAt, lastMessage: message?.text ?? null, messageError });
           } catch { errors.add('部分会话的子代理状态无法确认，暂未列为停滞。'); }
         }

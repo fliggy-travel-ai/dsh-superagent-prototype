@@ -126,17 +126,20 @@ export class ForwardRuntime {
         this.rolesError = message;
       }
     };
+    // 订阅列表中还在的会话（订阅不含已归档会话）。查父会话只认列表里的，归档的前任不算父会话。
+    const listed = new Set<string>();
+    const lookup = (id: string) => listed.has(id) ? engine.state.agents![id] as RoleAgent | undefined : undefined;
     const updateAgent = (agent: AgentInfo) => {
       const previous = engine.state.agents![agent.id];
       const labels = agent.labels || previous?.labels;
       const info: AgentInfo = { id: agent.id, workspaceId: agent.workspaceId ?? previous?.workspaceId, title: agent.title ?? previous?.title, provider: agent.provider ?? previous?.provider, labels, parentAgentId: agent.parentAgentId ?? previous?.parentAgentId };
       engine.metadata(info);
-      const main = isMainSession(info, this.roles);
+      const main = isMainSession(info, this.roles, lookup);
       const at = config.mains.indexOf(agent.id);
       if (main && at < 0) config.mains.push(agent.id);
       else if (!main && at >= 0) config.mains.splice(at, 1);
       // 主会话不转发；其余会话沿父会话标签逐层向上，事件转给置顶工作区中的主会话（多层子会话也一样）。
-      const ancestor = main ? null : findMainAncestor({ agentId: agent.id, lookup: id => engine.state.agents![id] as RoleAgent | undefined, roles: this.roles, localServerId: this.localServerId });
+      const ancestor = main ? null : findMainAncestor({ agentId: agent.id, lookup, roles: this.roles, localServerId: this.localServerId });
       if (!ancestor) delete config.children[agent.id];
       else config.children[agent.id] = ancestor.serverId ? { agentId: ancestor.agentId, serverId: ancestor.serverId } : { agentId: ancestor.agentId };
     };
@@ -199,6 +202,10 @@ export class ForwardRuntime {
     attempt.add(subscription.subscribe({
       snapshot: ({ entries }) => {
         run(async () => {
+          // 先登记全部会话，再逐个判定：子会话排在父会话前面时也能查到父会话。
+          listed.clear();
+          for (const { agent } of entries) listed.add(agent.id);
+          for (const { agent } of entries) updateAgent(agent as never);
           for (const { agent } of entries) {
             updateAgent(agent as never);
             watch(agent);
@@ -208,9 +215,11 @@ export class ForwardRuntime {
         });
       },
       update: message => {
-        if (message.type !== 'agent_update' || message.payload.kind !== 'upsert') return;
+        if (message.type !== 'agent_update') return;
+        if (message.payload.kind !== 'upsert') { const { agentId } = message.payload; run(async () => { listed.delete(agentId); refreshClassification(); }); return; }
         const agent = message.payload.agent;
         run(async () => {
+          listed.add(agent.id);
           updateAgent(agent as never);
           watch(agent);
           for (const request of agent.pendingPermissions ?? []) await childQuestion(agent, request as never);

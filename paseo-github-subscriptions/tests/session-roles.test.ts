@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRolesReader, isChildSession, isMainSession, parentLink, parseWorkspaceRoles, resolveForwardTarget, type RoleAgent } from '../server/core/session-roles.ts';
+import { createRolesReader, isChildSession, isMainSession, lookupFrom, parentLink, parseWorkspaceRoles, resolveForwardTarget, type RoleAgent } from '../server/core/session-roles.ts';
 
 const roles = parseWorkspaceRoles([
   { workspaceId: 'wks_main', pinnedAt: '2026-11-03T00:00:00Z' },
@@ -20,7 +20,7 @@ test('只取置顶且未归档的工作区为主会话工作区', () => {
   assert.equal(parseWorkspaceRoles(null).pinned.size, 0);
 });
 
-test('置顶工作区中的会话是主会话，与父会话标签无关', () => {
+test('不传父会话查询时，置顶工作区中的会话是主会话，与父会话标签无关', () => {
   assert.equal(isMainSession(agent('a'), roles), true);
   assert.equal(isMainSession(agent('a', { labels: { 'paseo.parent-agent-id': 'x' } }), roles), true);
   assert.equal(isMainSession(agent('a', { workspaceId: 'wks_sub' }), roles), false);
@@ -124,4 +124,41 @@ test('父会话标签成环时不死循环；跨主机的上层不能继续向�
   assert.ok(findMainAncestor({ agentId: 'a', lookup, roles }));
   assert.deepEqual(findMainAncestor({ agentId: 'remote-child', lookup, roles, localServerId: 'srv_local' }), { agentId: 'far', serverId: 'srv_other' });
   assert.deepEqual(findMainAncestor({ agentId: 'remote-child', lookup, roles, localServerId: 'srv_other' }), { agentId: 'far' });
+});
+
+test('置顶工作区里与父会话同工作区的会话是子会话（Paseo 0.17 起子会话默认建在调用方工作区）', () => {
+  const main = agent('main');
+  const child = agent('child', { labels: { 'paseo.parent-agent-id': 'main' } });
+  const grandchild = agent('grand', { labels: { 'paseo.parent-agent-id': 'child' } });
+  const successor = agent('next', { labels: { 'paseo.parent-agent-id': 'old' } });
+  const old = agent('old', { archivedAt: '2026-11-20T00:00:00Z' });
+  const dispatched = agent('dispatched', { labels: { 'paseo.parent-agent-id': 'coordinator' } });
+  const coordinator = agent('coordinator', { workspaceId: 'wks_sub' });
+  const self = agent('self', { labels: { 'paseo.parent-agent-id': 'self' } });
+  const lookup = lookupFrom([main, child, grandchild, successor, old, dispatched, coordinator, self]);
+  assert.equal(isMainSession(main, roles, lookup), true);
+  assert.equal(isMainSession(child, roles, lookup), false);
+  assert.equal(isChildSession(child, roles, lookup), true);
+  assert.equal(isChildSession(grandchild, roles, lookup), true);
+  // 前任已归档：接班会话是主会话。
+  assert.equal(isMainSession(successor, roles, lookup), true);
+  // 父会话在其他工作区（协调会话派出的主会话）：仍是主会话。
+  assert.equal(isMainSession(dispatched, roles, lookup), true);
+  // 父会话查不到（其他主机）：按工作区判定。
+  assert.equal(isMainSession(agent('remote', { labels: { 'paseo.parent-agent-id': 'x', 'paseo.parent-server-id': 'srv_other' } }), roles, lookup), true);
+  assert.equal(isMainSession(self, roles, lookup), true);
+  // 归档工作区里的会话两者都不是。
+  assert.equal(isChildSession(agent('z', { workspaceId: 'wks_old', labels: { 'paseo.parent-agent-id': 'main' } }), roles, lookup), false);
+});
+
+test('同工作区子会话：事件转给父会话，接班时不选子会话，多层时找到主会话', () => {
+  const main = agent('main', { updatedAt: '2026-11-08T01:00:00Z' });
+  const child = agent('child', { updatedAt: '2026-11-08T05:00:00Z', labels: { 'paseo.parent-agent-id': 'main' } });
+  const grandchild = agent('grand', { labels: { 'paseo.parent-agent-id': 'child' } });
+  const agents = [main, child, grandchild];
+  assert.deepEqual(resolveForwardTarget({ parentId: 'main', childId: 'grand', agents, roles }), { agentId: 'main', reason: 'parent' });
+  // 中间层是同工作区子会话：不把它当作主会话，转给父会话所在工作区的主会话。
+  assert.deepEqual(resolveForwardTarget({ parentId: 'child', childId: 'grand', agents, roles }), { agentId: 'main', reason: 'successor' });
+  const lookup = lookupFrom(agents);
+  assert.deepEqual(findMainAncestor({ agentId: 'grand', lookup, roles }), { agentId: 'main' });
 });

@@ -5,7 +5,7 @@ import type { PluginServerContext } from '@getpaseo/plugin/server';
 import type { EscalationSnapshot } from '../../../shared/escalation.ts';
 import type { Question } from '../../../shared/presence.ts';
 import type { SharedDaemon } from '../../core/daemon.ts';
-import { isMainSession, type RolesReader, type WorkspaceRoles, parseWorkspaceRoles } from '../../core/session-roles.ts';
+import { isMainSession, type RoleAgent, type RolesReader, type WorkspaceRoles, parseWorkspaceRoles } from '../../core/session-roles.ts';
 import type { SettingsStore } from '../../core/settings-store.ts';
 import { summarizeError } from '../../core/modules.ts';
 import { Attempt } from '../../core/attempt.ts';
@@ -202,6 +202,9 @@ export class EscalationRuntime {
         this.rolesError = message;
       }
     };
+    // 订阅列表中还在的会话（订阅不含已归档会话）。查父会话只认列表里的，归档的前任不算父会话。
+    const listed = new Set<string>();
+    const lookup = (id: string) => listed.has(id) ? engine.state.agents![id] as RoleAgent | undefined : undefined;
     const updateAgent = (agent: AgentInfo & { status?: string }) => {
       const previous = engine.state.agents![agent.id];
       const labels = agent.labels || previous?.labels;
@@ -209,7 +212,7 @@ export class EscalationRuntime {
       const info: AgentInfo = { id: agent.id, workspaceId: agent.workspaceId ?? previous?.workspaceId, title: agent.title ?? previous?.title, provider: agent.provider ?? previous?.provider, labels, parentAgentId };
       engine.metadata(info);
       const at = config.mains.indexOf(agent.id);
-      const main = isMainSession(info, this.roles);
+      const main = isMainSession(info, this.roles, lookup);
       if (main && at < 0) config.mains.push(agent.id);
       else if (!main && at >= 0) config.mains.splice(at, 1);
     };
@@ -258,6 +261,10 @@ export class EscalationRuntime {
     attempt.add(subscription.subscribe({
       snapshot: ({ entries }) => {
         run(async () => {
+          // 先登记全部会话，再逐个判定：子会话排在父会话前面时也能查到父会话。
+          listed.clear();
+          for (const { agent } of entries) listed.add(agent.id);
+          for (const { agent } of entries) updateAgent(agent as never);
           for (const { agent } of entries) {
             updateAgent(agent as never);
             statuses.set(agent.id, agent.status);
@@ -270,9 +277,10 @@ export class EscalationRuntime {
       update: message => {
         if (message.type !== 'agent_update') return;
         // 移出列表（例如归档）时逐个查询现状，不凭移出本身结束。
-        if (message.payload.kind !== 'upsert') { run(() => reconciler.sweep()); return; }
+        if (message.payload.kind !== 'upsert') { const { agentId } = message.payload; run(async () => { listed.delete(agentId); refreshClassification(); await reconciler.sweep(); }); return; }
         const agent = message.payload.agent;
         run(async () => {
+          listed.add(agent.id);
           updateAgent(agent as never);
           await settle(agent);
           const previous = statuses.get(agent.id);

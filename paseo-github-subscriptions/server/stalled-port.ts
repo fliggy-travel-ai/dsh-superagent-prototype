@@ -3,7 +3,7 @@ import type { PresenceHosts } from './presence-port.ts';
 import type { StalledAgent, StalledPort } from './stalled.ts';
 import type { StalledHostTimings } from '../shared/stalled.ts';
 import { SnapshotSchema, type Snapshot } from '../shared/model.ts';
-import { isMainSession, type RolesReader } from './core/session-roles.ts';
+import { isMainSession, lookupFrom, type RolesReader } from './core/session-roles.ts';
 
 /** 远端主机会话清单、定时任务与订阅快照的常规缓存有效期（45 秒）。 */
 export const REMOTE_COLLECT_CACHE_TTL_MS = 45_000;
@@ -128,11 +128,12 @@ export function stalledPort(
         cached: false,
       });
 
+      const localLookup = lookupFrom(localAgents as never);
       const localCandidates = localAgents.filter(
         agent =>
           !agent.archivedAt &&
           !agent.internal &&
-          isMainSession(agent, workspaceRoles) &&
+          isMainSession(agent, workspaceRoles, localLookup) &&
           ['idle', 'error'].includes(agent.status) &&
           !isWorking(agent) &&
           !listeners.has(`${selfId}:${agent.id}`),
