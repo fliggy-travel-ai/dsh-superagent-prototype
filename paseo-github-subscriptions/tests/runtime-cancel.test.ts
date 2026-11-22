@@ -121,3 +121,29 @@ test('额度报警已开启但找不到凭据：页面给出警告；有凭据�
     assert.equal((await make(false, null).snapshot()).error, null);
   } finally { f.done(); }
 });
+
+test('子会话免提醒：置顶工作区里与父会话同工作区的子会话只清它自己；父会话移出列表（归档）后按主会话保留提醒', async () => {
+  const f = fixture();
+  try {
+    const enqueued: Array<[string, string]> = [];
+    const runtime = new QuietRuntime({
+      server: f.server as never, daemon: f.daemon as never, roles: { read: async () => parseWorkspaceRoles([{ workspaceId: 'wks_main', pinnedAt: 'x' }]) }, directory: f.dir, machineName: 'test',
+      settings: createSettingsStore(join(f.dir, 'q2.json'), QuietSettingsSchema, { enabled: true, forwardEvents: false } as { enabled: boolean; forwardEvents: boolean }),
+      resolveLocal: async () => ({ agentId: null, workspaceId: null }), log: () => {},
+    });
+    const internals = runtime as unknown as { clearer: unknown; place(agent: unknown): void; placements: Map<string, unknown>; consider(agent: unknown): Promise<void> };
+    internals.clearer = { enqueue: (scope: string, id: string) => { enqueued.push([scope, id]); } };
+    const main = { id: 'main', workspaceId: 'wks_main', status: 'idle', requiresAttention: true, attentionReason: 'finished' };
+    const child = { id: 'child', workspaceId: 'wks_main', status: 'idle', requiresAttention: true, attentionReason: 'finished', labels: { 'paseo.parent-agent-id': 'main' } };
+    // 快照：子会话排在父会话前面，先登记全部会话再判定。
+    for (const agent of [child, main]) internals.place(agent);
+    await internals.consider(child);
+    await internals.consider(main);
+    assert.deepEqual(enqueued, [['agent', 'child']]);
+    // 父会话被移出列表（归档）：子会话按主会话处理，保留提醒。
+    enqueued.length = 0;
+    internals.placements.delete('main');
+    await internals.consider(child);
+    assert.deepEqual(enqueued, []);
+  } finally { f.done(); }
+});

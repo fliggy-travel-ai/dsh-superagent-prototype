@@ -2,9 +2,10 @@ import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
- * 会话角色。主会话 = 置顶且未归档的工作区中的会话。
- * 父会话标签 `paseo.parent-agent-id` 不决定谁是主会话，只用来找子会话事件的转发目标。
- * 停滞会话、子会话免提醒、升级通知使用同一判定。
+ * 会话角色。主会话 = 置顶且未归档的工作区中的会话，但与父会话同在一个工作区的子会话除外。
+ * Paseo 0.17 起 create_agent 默认把子会话建在调用方的工作区，所以置顶工作区里也会有子会话。
+ * 父会话标签 `paseo.parent-agent-id` 另用来找子会话事件的转发目标。
+ * 停滞会话、子会话免提醒、升级通知、事件转发使用同一判定。
  */
 export interface WorkspaceRoles {
   readonly pinned: ReadonlySet<string>;
@@ -35,13 +36,44 @@ export function parseWorkspaceRoles(records: unknown): WorkspaceRoles {
   return { pinned, archived };
 }
 
-export function isMainSession(agent: Pick<RoleAgent, 'workspaceId'>, roles: WorkspaceRoles): boolean {
-  return text(agent.workspaceId) && roles.pinned.has(agent.workspaceId);
+/** 判定角色需要的会话字段；没有父会话信息时只用 workspaceId。 */
+export type RoleRef = Pick<RoleAgent, 'workspaceId' | 'labels'> & { id?: string };
+
+/** 按编号查本机会话；查不到返回 undefined。 */
+export type AgentLookup = (id: string) => Pick<RoleAgent, 'workspaceId' | 'archivedAt'> | undefined;
+
+/**
+ * 与父会话同在一个工作区：父会话标签指向本机一个未归档的会话，且两者工作区相同。
+ * 父会话已归档（通常是接班后的前任）、在其他主机或查不到时不算，按工作区判定。
+ * 不看父会话是否 closed：空闲久了的主会话会被卸载成 closed，它的子会话仍是子会话。
+ */
+export function inParentWorkspace(agent: RoleRef, lookup?: AgentLookup): boolean {
+  if (!lookup || !text(agent.workspaceId)) return false;
+  const link = parentLink(agent);
+  if (!link || link.agentId === agent.id) return false;
+  const parent = lookup(link.agentId);
+  return !!parent && !parent.archivedAt && parent.workspaceId === agent.workspaceId;
 }
 
-/** 子会话：知道所在工作区，且该工作区未置顶、未归档。不知道工作区时不动它（与旧子会话免提醒一致）。 */
-export function isChildSession(agent: Pick<RoleAgent, 'workspaceId'>, roles: WorkspaceRoles): boolean {
-  return text(agent.workspaceId) && !roles.pinned.has(agent.workspaceId) && !roles.archived.has(agent.workspaceId);
+/** 不传 lookup 时只按工作区判定（置顶工作区里的子会话也会算作主会话）。 */
+export function isMainSession(agent: RoleRef, roles: WorkspaceRoles, lookup?: AgentLookup): boolean {
+  return text(agent.workspaceId) && roles.pinned.has(agent.workspaceId) && !inParentWorkspace(agent, lookup);
+}
+
+/**
+ * 子会话：知道所在工作区，工作区未归档，且工作区未置顶或与父会话同在一个工作区。
+ * 不知道工作区时不动它（与旧子会话免提醒一致）。
+ */
+export function isChildSession(agent: RoleRef, roles: WorkspaceRoles, lookup?: AgentLookup): boolean {
+  if (!text(agent.workspaceId) || roles.archived.has(agent.workspaceId)) return false;
+  return !roles.pinned.has(agent.workspaceId) || inParentWorkspace(agent, lookup);
+}
+
+/** 用会话列表建查询函数。 */
+export function lookupFrom<T extends RoleAgent>(agents: Iterable<T>): (id: string) => T | undefined {
+  const byId = new Map<string, T>();
+  for (const agent of agents) byId.set(agent.id, agent);
+  return id => byId.get(id);
 }
 
 export function parentLink(agent: Pick<RoleAgent, 'labels'>): { agentId: string; serverId?: string } | null {
@@ -62,12 +94,13 @@ export interface ForwardTarget { agentId: string; reason: 'parent' | 'successor'
  */
 export function resolveForwardTarget(input: { parentId: string; parentWorkspaceId?: string | null; childId: string; agents: readonly RoleAgent[]; roles: WorkspaceRoles }): ForwardTarget | null {
   const { parentId, childId, agents, roles } = input;
-  const parent = agents.find(agent => agent.id === parentId);
-  if (parent && live(parent) && isMainSession(parent, roles)) return { agentId: parentId, reason: 'parent' };
+  const lookup = lookupFrom(agents);
+  const parent = lookup(parentId);
+  if (parent && live(parent) && isMainSession(parent, roles, lookup)) return { agentId: parentId, reason: 'parent' };
   const workspaceId = parent?.workspaceId ?? input.parentWorkspaceId;
   if (!text(workspaceId) || !roles.pinned.has(workspaceId)) return null;
   const successors = agents
-    .filter(agent => agent.id !== childId && agent.id !== parentId && agent.workspaceId === workspaceId && live(agent))
+    .filter(agent => agent.id !== childId && agent.id !== parentId && agent.workspaceId === workspaceId && live(agent) && isMainSession(agent, roles, lookup))
     .sort((left, right) => (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''));
   return successors[0] ? { agentId: successors[0].id, reason: 'successor' } : null;
 }
@@ -116,7 +149,7 @@ export interface AncestorTarget { agentId: string; serverId?: string }
  */
 export function findMainAncestor(input: { agentId: string; lookup: (id: string) => RoleAgent | undefined; roles: WorkspaceRoles; localServerId?: string | null }): AncestorTarget | null {
   const start = input.lookup(input.agentId);
-  let link = start && !isMainSession(start, input.roles) ? parentLink(start) : null;
+  let link = start && !isMainSession(start, input.roles, input.lookup) ? parentLink(start) : null;
   const seen = new Set<string>([input.agentId]);
   let last: AncestorTarget | null = null;
   while (link) {
@@ -125,7 +158,7 @@ export function findMainAncestor(input: { agentId: string; lookup: (id: string) 
     if (remote || seen.has(link.agentId)) return last;
     seen.add(link.agentId);
     const parent = input.lookup(link.agentId);
-    if (!parent || isMainSession(parent, input.roles)) return last;
+    if (!parent || isMainSession(parent, input.roles, input.lookup)) return last;
     link = parentLink(parent);
   }
   return last;
