@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { writeJsonFile } from '../server/core/provider-config.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +14,8 @@ import {
   antigravityModule,
   registerAntigravityRpcs,
 } from '../server/modules/providers-antigravity/index.ts';
-import { createAntigravityProvider } from '../server/modules/providers-antigravity/provider.ts';
+import { createAntigravityProvider, ensureAcpCommand } from '../server/modules/providers-antigravity/provider.ts';
+import { antigravityTransformer } from '../server/modules/providers-antigravity/acp/provider.ts';
 import type { Services } from '../server/modules/types.ts';
 
 function createFakeEnv(options: {
@@ -139,13 +140,13 @@ test('providers.antigravity：按配置注册多个账号，保持 antigravity-c
       {
         id: 'antigravity-cy517',
         label: 'Antigravity · 账号一',
-        command: ['/usr/local/bin/agy-paseo'],
+        command: ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry'],
         icon: 'icons/antigravity.svg',
       },
       {
         id: 'antigravity-beibeimao',
         label: 'Antigravity · 账号二',
-        command: ['/usr/local/bin/agy-paseo-2'],
+        command: ['/usr/local/bin/agy-paseo-2', 'acp', '--disable-telemetry'],
         icon: 'icons/antigravity.svg',
       },
     ],
@@ -155,14 +156,10 @@ test('providers.antigravity：按配置注册多个账号，保持 antigravity-c
     providerId: 'antigravity-cy517',
     label: 'Antigravity · 账号一',
   });
-  assert.deepEqual(created.command, ['agy-paseo']);
+  assert.deepEqual(created.command, ['agy', 'acp', '--disable-telemetry']);
   const noLaunchStatus = await created.status!({ launch: undefined } as never);
   assert.equal(noLaunchStatus.available, false);
-  const cacheKey = await created.getCatalogCacheKey!({
-    launch: { command: 'agy', args: [], env: { HOME: '/tmp/a' } },
-  } as never);
-  assert.equal(typeof cacheKey, 'string');
-  assert.equal(cacheKey?.length, 64);
+  assert.match((noLaunchStatus as { diagnostic?: string }).diagnostic ?? '', /Antigravity 1\.5\.0/);
 });
 
 test('providers.antigravity：旧插件仍启用时跳过对应账号并标记模块出错', () => {
@@ -276,7 +273,7 @@ test('account.add：先备份两处配置，直接写 Paseo 配置（command/env
   assert.deepEqual(result.accounts[1], { providerId: 'antigravity-beibeimao', label: 'Antigravity · 账号二', enabled: true, homeDir: '~/.agy-2' });
   assert.deepEqual(patches, []);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-beibeimao'], {
-    enabled: true, label: 'Antigravity · 账号二', command: ['agy-paseo'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
+    enabled: true, label: 'Antigravity · 账号二', command: ['agy', 'acp', '--disable-telemetry'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
   });
   assert.equal(readMachine(machinePath).antigravity.accounts[1].providerId, 'antigravity-beibeimao');
   assert.equal(backupsOf(root, 'config.json').length, 1);
@@ -332,4 +329,88 @@ test('“需要重载”由实际注册情况推出：配置变化后为 true，
   assert.equal((await env.handlers.get('antigravity.snapshot')!({})).reloadRequired, true);
   start();
   assert.equal((await env.handlers.get('antigravity.snapshot')!({})).reloadRequired, false);
+});
+
+test('ensureAcpCommand：旧 stream-json 命令补上 acp 参数，已是 ACP 形式的不动', () => {
+  assert.deepEqual(ensureAcpCommand(['/usr/local/bin/agy-paseo']), ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']);
+  assert.deepEqual(ensureAcpCommand(['/usr/local/bin/agy-paseo-cy517']), ['/usr/local/bin/agy-paseo-cy517', 'acp', '--disable-telemetry']);
+  assert.deepEqual(ensureAcpCommand(['agy']), ['agy', 'acp', '--disable-telemetry']);
+  assert.deepEqual(ensureAcpCommand(['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']), ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']);
+  assert.deepEqual(ensureAcpCommand(['agy', 'acp']), ['agy', 'acp']);
+});
+
+test('sessionOpen：兼容 0.15 stream-json 版的 { version:1, data:{ conversationId } } 持久化，旧会话可恢复', () => {
+  const legacy = antigravityTransformer.sessionOpen!({
+    persistence: { version: 1, data: { conversationId: 'conv-abc' } } as never,
+    agentMetadata: {},
+  });
+  assert.equal(legacy?.sessionId, 'conv-abc');
+  // ACP 原生持久化（data.sessionId）由 runAcpProvider 直接读取，transformer 返回 undefined 不覆盖。
+  const native = antigravityTransformer.sessionOpen!({
+    persistence: { data: { sessionId: 'native-1' } } as never,
+    agentMetadata: {},
+  });
+  assert.equal(native?.sessionId, undefined);
+  // 无法识别的持久化同样返回 undefined，按新会话打开。
+  const fresh = antigravityTransformer.sessionOpen!({ persistence: undefined, agentMetadata: {} });
+  assert.equal(fresh?.sessionId, undefined);
+  // 旧格式缺少 conversationId 时不当作可恢复会话。
+  const broken = antigravityTransformer.sessionOpen!({
+    persistence: { version: 1, data: {} } as never,
+    agentMetadata: {},
+  });
+  assert.equal(broken?.sessionId, undefined);
+});
+
+test('sessionOpen：agent 支持 antigravity.systemPrompt.append 时透传 systemPrompt 元数据', () => {
+  const withPrompt = antigravityTransformer.sessionOpen!({
+    persistence: undefined,
+    systemPrompt: '保持中文回复',
+    agentMetadata: { antigravity: { systemPrompt: { append: true } } },
+  });
+  assert.deepEqual(withPrompt?.metadata, { antigravity: { systemPrompt: { append: '保持中文回复' } } });
+  const unsupported = antigravityTransformer.sessionOpen!({
+    persistence: undefined,
+    systemPrompt: '保持中文回复',
+    agentMetadata: {},
+  });
+  assert.equal(unsupported?.metadata, undefined);
+});
+
+test('注册时把 Paseo 配置里旧 stream-json 形式的命令迁移为 ACP 形式（备份、写入、读回核对），重复注册不重写', () => {
+  const { root, providers, server, services, machine } = createFakeEnv({
+    machineJson: baseMachine,
+    paseoConfigJson: {
+      plugins: {},
+      agents: { providers: { 'antigravity-cy517': { enabled: true, label: 'Antigravity · 账号一', command: ['/usr/local/bin/agy-paseo'], env: { HOME: '~/.agy-1' } } } },
+    },
+  });
+  const start = () => startModules([antigravityModule], { server, instance: resolveInstance('provider'), machine: loadMachineConfig(machine.path, { [antigravityModule.config!.section]: antigravityModule.config!.spec }), services, stateDirectory: root, baseDirectory: root });
+  const host0 = start();
+  assert.equal(host0.status().modules[0]?.state, 'running');
+  const afterFirst = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8'));
+  assert.deepEqual(afterFirst.agents.providers['antigravity-cy517'].command, ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']);
+  assert.equal(afterFirst.agents.providers['antigravity-cy517'].env.HOME, '~/.agy-1', '条目其余键保留');
+  assert.equal(backupsOf(root, 'config.json').length, 1, '迁移前有备份');
+  assert.deepEqual(providers.map(p => p.command), [['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']]);
+  // 第二次注册（重载）不再改动：命令已是 ACP 形式，无新备份。
+  start();
+  assert.equal(backupsOf(root, 'config.json').length, 1);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-cy517'].command, ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']);
+});
+
+test('注册时迁移失败（config.json 目录不可写）不注册该账号，模块报错', () => {
+  const { root, server, services, machine, providers } = createFakeEnv({
+    machineJson: baseMachine,
+    paseoConfigJson: basePaseo,
+  });
+  chmodSync(root, 0o500);
+  try {
+    const host = startModules([antigravityModule], { server, instance: resolveInstance('provider'), machine: loadMachineConfig(machine.path, { [antigravityModule.config!.section]: antigravityModule.config!.spec }), services, stateDirectory: root, baseDirectory: root });
+    assert.equal(host.status().modules[0]?.state, 'error');
+    assert.match(host.status().modules[0]?.reason ?? '', /迁移为 ACP 形式/);
+    assert.deepEqual(providers, []);
+  } finally {
+    chmodSync(root, 0o700);
+  }
 });

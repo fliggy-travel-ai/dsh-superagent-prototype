@@ -16,7 +16,7 @@ import {
 import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
 import { backupConfigFile, backupFile, readJsonStrict, restoreFromBackup, verifyProviderEntry, writeJsonFile, writeProviderEntry } from '../../core/provider-config.ts';
 import type { Module, Services } from '../types.ts';
-import { createAntigravityProvider } from './provider.ts';
+import { createAntigravityProvider, DEFAULT_ANTIGRAVITY_COMMAND, ensureAcpCommand, isAcpCommand } from './provider.ts';
 
 const ProviderIdSchema = z.string().regex(ANTIGRAVITY_ID_PATTERN, ANTIGRAVITY_ID_MESSAGE);
 
@@ -234,7 +234,7 @@ export function registerAntigravityRpcs(options: AntigravityRpcOptions): void {
     const env: Record<string, string> = { ...(existing.env ?? {}) };
     if (input.homeDir) env.HOME = input.homeDir;
     if (input.proxy) { env.HTTPS_PROXY = input.proxy; env.HTTP_PROXY = input.proxy; }
-    const entry = { ...existing, enabled: true, label: input.label, command: input.command ?? normalizeCommand(existing.command) ?? ['agy-paseo'], ...(Object.keys(env).length > 0 ? { env } : {}) };
+    const entry = { ...existing, enabled: true, label: input.label, command: input.command ?? normalizeCommand(existing.command) ?? [...DEFAULT_ANTIGRAVITY_COMMAND], ...(Object.keys(env).length > 0 ? { env } : {}) };
     const configBackup = backupConfigFile(services.home);
     try {
       if (readJsonStrict(machinePath)) backupFile(machinePath);
@@ -273,19 +273,38 @@ export const antigravityModule: Module<AntigravityConfig> = {
     let providersMap: Record<string, PaseoProviderConfigEntry> = {};
     try { providersMap = (readJsonStrict(join(services.home, 'config.json')) as PaseoConfigFile | null)?.agents?.providers ?? {}; } catch { /* 下面的冲突检查会报告 */ }
     const conflicts: string[] = [];
+    const migrated: string[] = [];
     const registered = new Set<string>();
 
     for (const account of config.accounts) {
       if (!account.enabled) continue;
       const conflict = findLegacyAntigravityConflict(services.home, account.providerId);
       if (conflict) { conflicts.push(conflict.reason); continue; }
-      const configuredCmd = account.command ?? normalizeCommand(providersMap[account.providerId]?.command);
+      // Paseo 配置里的 command 以 replace 模式覆盖注册默认值，所以旧 stream-json 形式（没有 acp 子命令）
+      // 必须就地迁移：补上 acp 参数后写回配置（备份、原子写入、读回核对，与 account.add 相同）。
+      const configEntry = providersMap[account.providerId];
+      const configCommand = normalizeCommand(configEntry?.command);
+      if (configCommand && !isAcpCommand(configCommand)) {
+        const converted = [...ensureAcpCommand(configCommand)];
+        try {
+          const backup = backupConfigFile(services.home);
+          const entry = { ...configEntry, command: converted };
+          writeProviderEntry(services.home, account.providerId, entry);
+          verifyProviderEntry(services.home, account.providerId, entry, backup);
+        } catch (error) {
+          conflicts.push(`无法把 ${account.providerId} 的旧命令迁移为 ACP 形式：${(error as Error).message}`);
+          continue;
+        }
+        migrated.push(`已把 ${account.providerId} 的命令迁移为 ACP 形式（${converted.join(' ')}），守护进程重载配置后生效`);
+      }
+      const configuredCmd = account.command ?? configCommand;
       server.registerProvider(createAntigravityProvider({ providerId: account.providerId, label: account.label, command: configuredCmd, description: account.description }));
       registered.add(account.providerId);
     }
     registeredAccounts.set(services, registered);
     touched.delete(services);
-    lastErrors.delete(services);
+    if (migrated.length > 0) lastErrors.set(services, migrated.join('；'));
+    else lastErrors.delete(services);
 
     if (conflicts.length > 0) {
       const message = conflicts.join('；');
