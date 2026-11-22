@@ -1,8 +1,8 @@
 import type { ProviderRegistration } from '@getpaseo/plugin/server/provider';
 import { createAntigravityAcpProvider } from './acp/provider.ts';
 
-/** 与 Paseo 0.17 内置 antigravity-provider 一致的默认命令。 */
-export const DEFAULT_ANTIGRAVITY_COMMAND: readonly [string, ...string[]] = ['agy', 'acp', '--disable-telemetry'];
+/** 默认启动命令：agy-paseo 包装脚本负责代理、钥匙串绕过和隔离用户（见提交 7aadd56），acp 参数与内置版一致。 */
+export const DEFAULT_ANTIGRAVITY_COMMAND: readonly [string, ...string[]] = ['agy-paseo', 'acp', '--disable-telemetry'];
 
 export interface AntigravityProviderAccount {
   readonly providerId: string;

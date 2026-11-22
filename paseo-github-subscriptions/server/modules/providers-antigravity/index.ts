@@ -127,6 +127,30 @@ async function countRunningAntigravitySessions(services: Services): Promise<numb
 
 interface SnapshotData { enabled: boolean; accounts: AntigravityAccountItem[]; enabledIds: string[]; conflicts: string[]; configError: string | null }
 
+/**
+ * 迁移改写的是磁盘上的 config.json；守护进程不监听文件变化，只在收到配置重载请求时重读
+ * （reloadDaemonConfig → daemon.config.reload）。内存里仍是旧命令（replace 模式覆盖注册默认值），
+ * 不重载的话 ACP 启动不带 acp 子命令，账号会一直显示 "Antigravity ACP did not start"。
+ * `agents.providers` 在守护进程的可热重载路径里，重载即更新 Provider 的运行时命令，无需重启。
+ */
+async function requestConfigReloadAfterMigration(services: Services, migrated: readonly { providerId: string; command: readonly string[] }[]): Promise<void> {
+  const detail = migrated.map(item => `${item.providerId} → ${item.command.join(' ')}`).join('；');
+  try {
+    const { client } = await services.daemon.ready();
+    const reload = await (client as unknown as {
+      reloadDaemonConfig(requestId?: string): Promise<{ appliedPaths?: readonly string[]; restartRequiredPaths?: readonly string[] }>;
+    }).reloadDaemonConfig();
+    const applied = reload.appliedPaths ?? [];
+    if (applied.some(path => path === 'agents.providers' || path.startsWith('agents.providers.'))) {
+      console.error(`[开发自动化·Antigravity] 已把旧 stream-json 命令迁移为 ACP 形式（${detail}），守护进程配置已重载生效。`);
+    } else {
+      console.error(`[开发自动化·Antigravity] 已把旧命令迁移为 ACP 形式（${detail}），但守护进程重载返回的应用路径不含 agents.providers（appliedPaths：${applied.join('、') || '空'}），请检查 Provider 是否仍用旧命令。`);
+    }
+  } catch (error) {
+    console.error(`[开发自动化·Antigravity] 已把旧命令迁移为 ACP 形式（${detail}），但请求守护进程重载配置失败：${error instanceof Error ? error.message : error}。需要手动重载配置或重启守护进程，否则 Provider 仍用旧命令。`);
+  }
+}
+
 function readSnapshotData(machinePath: string, paseoHome: string): SnapshotData {
   let rawMachine: Record<string, any> | null = null;
   let paseoConfig: PaseoConfigFile | null = null;
@@ -273,7 +297,7 @@ export const antigravityModule: Module<AntigravityConfig> = {
     let providersMap: Record<string, PaseoProviderConfigEntry> = {};
     try { providersMap = (readJsonStrict(join(services.home, 'config.json')) as PaseoConfigFile | null)?.agents?.providers ?? {}; } catch { /* 下面的冲突检查会报告 */ }
     const conflicts: string[] = [];
-    const migrated: string[] = [];
+    const migrated: Array<{ providerId: string; command: readonly string[] }> = [];
     const registered = new Set<string>();
 
     for (const account of config.accounts) {
@@ -282,20 +306,20 @@ export const antigravityModule: Module<AntigravityConfig> = {
       if (conflict) { conflicts.push(conflict.reason); continue; }
       // Paseo 配置里的 command 以 replace 模式覆盖注册默认值，所以旧 stream-json 形式（没有 acp 子命令）
       // 必须就地迁移：补上 acp 参数后写回配置（备份、原子写入、读回核对，与 account.add 相同）。
-      const configEntry = providersMap[account.providerId];
-      const configCommand = normalizeCommand(configEntry?.command);
+      const configCommand = normalizeCommand(providersMap[account.providerId]?.command);
       if (configCommand && !isAcpCommand(configCommand)) {
         const converted = [...ensureAcpCommand(configCommand)];
         try {
           const backup = backupConfigFile(services.home);
-          const entry = { ...configEntry, command: converted };
+          // 只写 command：启动时读到的整条快照可能过期（守护进程期间改过 enabled 等），整条写回会把它覆盖回去。
+          const entry = { command: converted };
           writeProviderEntry(services.home, account.providerId, entry);
           verifyProviderEntry(services.home, account.providerId, entry, backup);
         } catch (error) {
           conflicts.push(`无法把 ${account.providerId} 的旧命令迁移为 ACP 形式：${(error as Error).message}`);
           continue;
         }
-        migrated.push(`已把 ${account.providerId} 的命令迁移为 ACP 形式（${converted.join(' ')}），守护进程重载配置后生效`);
+        migrated.push({ providerId: account.providerId, command: converted });
       }
       const configuredCmd = account.command ?? configCommand;
       server.registerProvider(createAntigravityProvider({ providerId: account.providerId, label: account.label, command: configuredCmd, description: account.description }));
@@ -303,8 +327,9 @@ export const antigravityModule: Module<AntigravityConfig> = {
     }
     registeredAccounts.set(services, registered);
     touched.delete(services);
-    if (migrated.length > 0) lastErrors.set(services, migrated.join('；'));
-    else lastErrors.delete(services);
+    lastErrors.delete(services);
+
+    if (migrated.length > 0) void requestConfigReloadAfterMigration(services, migrated);
 
     if (conflicts.length > 0) {
       const message = conflicts.join('；');

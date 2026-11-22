@@ -36,6 +36,7 @@ function createFakeEnv(options: {
 
   const providers: ProviderRegistration[] = [];
   const handlers = new Map<string, (input: any, ctx?: any) => Promise<any>>();
+  const reloadCalls: number[] = [];
   const server = {
     registerProvider(provider: ProviderRegistration) {
       providers.push(provider);
@@ -55,6 +56,7 @@ function createFakeEnv(options: {
     paseo: {} as never,
     client: {
       patchDaemonConfig: async (patch: unknown) => (options.patch ? options.patch(patch) : { requestId: 'r', config: { providers: Object.fromEntries(Object.entries((patch as { providers: Record<string, unknown> }).providers)) } }),
+      reloadDaemonConfig: async () => { reloadCalls.push(1); return { appliedPaths: ['agents.providers'], restartRequiredPaths: [] }; },
       fetchAgents: async () => ({
         entries: (options.runningAgents ?? []).map(agent => ({ agent })),
         pageInfo: { hasMore: false },
@@ -72,7 +74,7 @@ function createFakeEnv(options: {
   };
   const machine = loadMachineConfig(machinePath, sections);
 
-  return { root, machinePath, providers, handlers, server, services, machine };
+  return { root, machinePath, providers, handlers, server, services, machine, reloadCalls };
 }
 
 test('providers.antigravity：默认关闭时不注册 Provider', () => {
@@ -156,7 +158,7 @@ test('providers.antigravity：按配置注册多个账号，保持 antigravity-c
     providerId: 'antigravity-cy517',
     label: 'Antigravity · 账号一',
   });
-  assert.deepEqual(created.command, ['agy', 'acp', '--disable-telemetry']);
+  assert.deepEqual(created.command, ['agy-paseo', 'acp', '--disable-telemetry']);
   const noLaunchStatus = await created.status!({ launch: undefined } as never);
   assert.equal(noLaunchStatus.available, false);
   assert.match((noLaunchStatus as { diagnostic?: string }).diagnostic ?? '', /Antigravity 1\.5\.0/);
@@ -273,7 +275,7 @@ test('account.add：先备份两处配置，直接写 Paseo 配置（command/env
   assert.deepEqual(result.accounts[1], { providerId: 'antigravity-beibeimao', label: 'Antigravity · 账号二', enabled: true, homeDir: '~/.agy-2' });
   assert.deepEqual(patches, []);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-beibeimao'], {
-    enabled: true, label: 'Antigravity · 账号二', command: ['agy', 'acp', '--disable-telemetry'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
+    enabled: true, label: 'Antigravity · 账号二', command: ['agy-paseo', 'acp', '--disable-telemetry'], env: { HOME: '~/.agy-2', HTTPS_PROXY: 'http://127.0.0.1:7897', HTTP_PROXY: 'http://127.0.0.1:7897' },
   });
   assert.equal(readMachine(machinePath).antigravity.accounts[1].providerId, 'antigravity-beibeimao');
   assert.equal(backupsOf(root, 'config.json').length, 1);
@@ -377,8 +379,8 @@ test('sessionOpen：agent 支持 antigravity.systemPrompt.append 时透传 syste
   assert.equal(unsupported?.metadata, undefined);
 });
 
-test('注册时把 Paseo 配置里旧 stream-json 形式的命令迁移为 ACP 形式（备份、写入、读回核对），重复注册不重写', () => {
-  const { root, providers, server, services, machine } = createFakeEnv({
+test('注册时把 Paseo 配置里旧 stream-json 形式的命令迁移为 ACP 形式（只写 command、备份、读回核对），并请求守护进程重载配置；重复注册不重写', async () => {
+  const { root, providers, server, services, machine, handlers, reloadCalls } = createFakeEnv({
     machineJson: baseMachine,
     paseoConfigJson: {
       plugins: {},
@@ -388,14 +390,23 @@ test('注册时把 Paseo 配置里旧 stream-json 形式的命令迁移为 ACP �
   const start = () => startModules([antigravityModule], { server, instance: resolveInstance('provider'), machine: loadMachineConfig(machine.path, { [antigravityModule.config!.section]: antigravityModule.config!.spec }), services, stateDirectory: root, baseDirectory: root });
   const host0 = start();
   assert.equal(host0.status().modules[0]?.state, 'running');
+  // 迁移在注册后异步请求守护进程重载配置（agents.providers 热重载，无需重启）。
+  await services.daemon.ready();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reloadCalls.length, 1);
+  const snapshot = await handlers.get('antigravity.snapshot')!({});
+  assert.equal(snapshot.error, null, '迁移成功不进错误提示');
   const afterFirst = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8'));
   assert.deepEqual(afterFirst.agents.providers['antigravity-cy517'].command, ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']);
   assert.equal(afterFirst.agents.providers['antigravity-cy517'].env.HOME, '~/.agy-1', '条目其余键保留');
+  assert.equal(afterFirst.agents.providers['antigravity-cy517'].enabled, true);
   assert.equal(backupsOf(root, 'config.json').length, 1, '迁移前有备份');
   assert.deepEqual(providers.map(p => p.command), [['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']]);
-  // 第二次注册（重载）不再改动：命令已是 ACP 形式，无新备份。
+  // 第二次注册（重载）不再改动：命令已是 ACP 形式，无新备份、无新的重载请求。
   start();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(backupsOf(root, 'config.json').length, 1);
+  assert.equal(reloadCalls.length, 1);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')).agents.providers['antigravity-cy517'].command, ['/usr/local/bin/agy-paseo', 'acp', '--disable-telemetry']);
 });
 
