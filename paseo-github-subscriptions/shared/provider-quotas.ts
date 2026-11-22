@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 export const PROVIDER_QUOTA_SOURCE_IDS = [
   'opencode-token-switch',
-  'antigravity',
+  'antigravity-multi',
   'codex-multi',
   'qoder',
   'glm',
@@ -42,7 +42,7 @@ export type ProviderQuotasSnapshot = z.infer<typeof ProviderQuotasSnapshotSchema
 
 const BUILTIN_ID_SET = new Set<string>(BUILTIN_USAGE_SOURCE_IDS);
 const EFFECTIVE_WINDOW_SOURCES = new Set<string>([
-  'antigravity',
+  'antigravity-multi',
   'codex-multi',
   'cursor-cli',
   'grok-multi',

@@ -1424,7 +1424,7 @@ export function createUsageSources(): UsageSourceRegistration[] {
       ),
     },
     {
-      id: "antigravity",
+      id: "antigravity-multi",
       label: "Antigravity",
       icon: "icons/antigravity.svg",
       input: AccountInputSchema,

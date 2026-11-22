@@ -50,7 +50,7 @@ test('本机用户的 Claude 账号凭据缺失时拒绝，独立系统用户的
 
 test('Cursor 有其他可用池即放行，Antigravity 跳过阈值但拒绝 avoid', () => {
   const quotas = [usage('cursor-cli', 'cursor-isolated', available(window(0), window(2))),
-    usage('antigravity', 'agy-isolated', available(window(2))), usage('antigravity', 'agy-exhausted', available(window(0)))];
+    usage('antigravity-multi', 'agy-isolated', available(window(2))), usage('antigravity-multi', 'agy-exhausted', available(window(0)))];
   assert.equal(quotaUsable(quotaFromReports(quotas, 'cursor-isolated', 'cursor', undefined, 0), 10), true);
   assert.equal(quotaUsable(quotaFromReports(quotas, 'agy-isolated', 'antigravity', undefined, 0), 10), true);
   assert.deepEqual(quotaProblems(quotaFromReports(quotas, 'agy-exhausted', 'antigravity', undefined, 0)), [

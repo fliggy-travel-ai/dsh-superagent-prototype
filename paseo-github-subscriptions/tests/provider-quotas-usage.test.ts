@@ -196,7 +196,7 @@ test('Antigravity 刷新令牌：原子写入、权限 0600、不留临时文件
     ? { status: 200, body: JSON.stringify({ access_token: 'at-new', expires_in: 3600 }) }
     : { status: 500, body: '{}' });
   try {
-    await source('antigravity').fetch({ providerId: 'antigravity-x', authPath } as never);
+    await source('antigravity-multi').fetch({ providerId: 'antigravity-x', authPath } as never);
     const saved = JSON.parse(readFileSync(authPath, 'utf8'));
     assert.equal(saved.token.access_token, 'at-new');
     assert.equal(saved.token.refresh_token, 'rt-old');
@@ -227,4 +227,12 @@ test('stopUsageChildren：模块停止时结束进行中的子进程', async () 
   assert.equal(report.status, 'error');
   assert.ok(Date.now() - started < 5_000);
   assert.equal(usage.runningUsageChildren(), 0);
+});
+
+test('额度来源 ID 不与 Paseo 内置插件重名：重名会让整个开发自动化插件加载失败', () => {
+  // Paseo 0.17.1 内置插件注册的额度来源 ID（builtin-plugins/*/index.server.ts 与 antigravity-provider、muse-provider）。
+  const builtin = ['antigravity', 'claude', 'codex', 'copilot', 'cursor', 'grok', 'kimi', 'minimax', 'muse', 'opencode-go', 'openrouter-host', 'zai'];
+  const ours = usage.createUsageSources().map(item => item.id);
+  assert.deepEqual(ours.filter(id => builtin.includes(id)), []);
+  assert.ok(ours.includes('antigravity-multi'));
 });

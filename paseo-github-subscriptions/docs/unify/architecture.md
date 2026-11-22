@@ -91,7 +91,7 @@ Paseo 0.15 对模块注册的约束（feasibility 第 3、5 项）：
   "modules": {
     "providers.antigravity": true,
     "usage.claudeAccounts": false,
-    "usage.providerQuotas": ["antigravity", "codex-multi", "grok-multi", "qoder", "glm", "opencode-token-switch"],
+    "usage.providerQuotas": ["antigravity-multi", "codex-multi", "grok-multi", "qoder", "glm", "opencode-token-switch"],
     "usage.hideBuiltin": ["codex", "grok", "cursor", "kimi", "zai"],
     "answer.escalation": "shadow"
   },
@@ -130,7 +130,7 @@ Paseo 0.15 对模块注册的约束（feasibility 第 3、5 项）：
 |---|---|---|
 | Antigravity 账号 | 无 | 2 个（1 个停用） |
 | Claude 账号额度和显示名称 | 开 | 关（无 Claude Provider） |
-| 其他 Provider 额度 | `glm` | `antigravity`、`codex-multi`、`grok-multi`、`qoder`、`glm`、`opencode-token-switch`、`cursor-cli` |
+| 其他 Provider 额度 | `glm` | `antigravity-multi`、`codex-multi`、`grok-multi`、`qoder`、`glm`、`opencode-token-switch`、`cursor-cli` |
 | 隐藏内置额度来源 | 无（自带 Claude 来源已改名停用） | `codex`、`grok`、`cursor`、`kimi`、`zai` |
 | 新建会话默认设置 | Codex 规则 | Codex、OpenCode、GLM、Qoder 规则 |
 | 蓝牙与声音来源主机 | 按现有设置 | 按现有设置 |
