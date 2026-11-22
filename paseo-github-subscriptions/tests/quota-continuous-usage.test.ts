@@ -29,7 +29,7 @@ test("独立用户从缓存读取额度时仍统计本账号未关闭会话，�
   const root = mkdtempSync(join(tmpdir(), "quota-cross-user-sessions-"));
   const oldHome = process.env.PASEO_HOME; process.env.PASEO_HOME = root;
   const configDir = join(root, "isolated-claude");
-  const stateDir = join(root, "claude-quota-resume"); mkdirSync(stateDir);
+  const stateDir = join(root, "github-subscriptions", "quota"); mkdirSync(stateDir, { recursive: true });
   const agentsDir = join(root, "agents"); mkdirSync(agentsDir);
   const cachePath = join(stateDir, "cross-user-cache.json");
   const input: CombinedUsageInput = { route: { store: "cross-user", configDir }, accountKey: "isolated.account" };
@@ -67,7 +67,9 @@ test("独立用户从缓存读取额度时仍统计本账号未关闭会话，�
     assert.equal(closed.status, "available");
     if (closed.status === "available") assert.equal(closed.details?.[0].value, "0");
     saveCache("network");
-    const failed = await new ContinuousUsage().fetch(input);
+    const failedDirectory = join(root, 'failed-state'); mkdirSync(failedDirectory);
+    for (const name of ['cross-user-cache.json', 'cross-user-providers.json']) writeFileSync(join(failedDirectory, name), readFileSync(join(stateDir, name)));
+    const failed = await new ContinuousUsage({ directory: failedDirectory }).fetch(input);
     assert.equal(failed.status, "error");
     assert.equal("details" in failed, false);
   } finally {
@@ -107,7 +109,7 @@ test("真实适配层：过期保留身份，错误不变成功，旧会话不�
     const input = first.input as ContinuityInput;
     assert.equal((await service.fetch(input)).status, "available");
     assert.equal((await service.fetch({ ...input, accountKey: routeKey(input) })).status, "error");
-    const saved = readFileSync(join(root, "claude-quota-resume", "usage-history.json"), "utf8");
+    const saved = readFileSync(join(root, "github-subscriptions", "quota", "usage-history.json"), "utf8");
     assert.equal(saved.includes("@example.invalid"), false); assert.equal(saved.includes("fake-"), false);
     login("a", true);
     const [expired] = await service.discover(scope);
@@ -170,4 +172,121 @@ test("令牌未过期但已被吊销时显示请求被拒绝，不提示凭据�
     if (oldHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = oldHome;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+for (const fault of ['429', '503', 'network'] as const) {
+  test(`资料查询 ${fault} 时保留真实原因，不探测额度；刷新和重载遵守等待，恢复后正确显示`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'quota-profile-failure-'));
+    const config = join(root, 'claude'); mkdirSync(config);
+    const oldHome = process.env.PASEO_HOME; process.env.PASEO_HOME = root;
+    const oldFetch = globalThis.fetch, oldNow = Date.now;
+    const started = oldNow(); let clock = started, healthy = false, profiles = 0, usages = 0;
+    Date.now = () => clock;
+    const scope = { kind: 'session' as const, provider: 'claude', env: { HOME: root, USER: 'quota-test', CLAUDE_CONFIG_DIR: config } };
+    const key = `account-${fault}.org-failure`;
+    writeFileSync(join(config, '.credentials.json'), JSON.stringify({ claudeAiOauth: {
+      accessToken: `fake-profile-${fault}`, expiresAt: clock + 3600_000,
+    } }), { mode: 0o600 });
+    writeFileSync(join(config, '.claude.json'), JSON.stringify({ oauthAccount: {
+      accountUuid: `account-${fault}`, organizationUuid: 'org-failure', emailAddress: 'failure@example.invalid',
+    } }));
+    globalThis.fetch = async url => {
+      if (String(url).endsWith('/profile')) {
+        profiles++;
+        if (!healthy) {
+          if (fault === 'network') throw new Error('private network detail');
+          return new Response(null, { status: Number(fault), headers: { 'retry-after': '600' } });
+        }
+        return Response.json({ account: { uuid: `account-${fault}`, email: 'failure@example.invalid' }, organization: { uuid: 'org-failure' } });
+      }
+      usages++;
+      return Response.json({ five_hour: { utilization: 7, resets_at: null } });
+    };
+    const expected = fault === '429' ? /HTTP 429/ : fault === '503' ? /HTTP 503/ : /连接失败或超时/;
+    const check = async (service: InstanceType<typeof ContinuousUsage>) => {
+      const [account] = await service.discover(scope);
+      assert.equal(account.key, key);
+      const report = await service.fetch(account.input as ContinuityInput);
+      assert.equal(report.status, 'error');
+      if (report.status === 'error') {
+        assert.match(report.error, expected);
+        assert.match(report.error, /后允许重试/);
+        assert.doesNotMatch(report.error, /凭据已变化|private network detail/);
+      }
+    };
+    try {
+      const service = new ContinuousUsage();
+      await check(service);
+      clock += 60_000; await check(service);
+      const reloaded = new ContinuousUsage(); await check(reloaded);
+      assert.equal(profiles, 1); assert.equal(usages, 0);
+      healthy = true; clock = started + (fault === 'network' ? 300_001 : 600_001);
+      const [account] = await reloaded.discover(scope);
+      const recovered = await reloaded.fetch(account.input as ContinuityInput);
+      assert.equal(recovered.status, 'available');
+      if (recovered.status === 'available') assert.equal(recovered.windows[0].remainingPct, 93);
+      assert.equal(profiles, 2); assert.equal(usages, 1);
+      await service.stop(); await reloaded.stop();
+    } finally {
+      globalThis.fetch = oldFetch; Date.now = oldNow;
+      if (oldHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = oldHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test('额度面板、容量计算和会话检查共用并发查询与429等待', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'quota-shared-local-'));
+  const config = join(root, 'claude'); mkdirSync(config);
+  const directory = join(root, 'github-subscriptions', 'quota');
+  const oldFetch = globalThis.fetch, oldNow = Date.now;
+  let clock = oldNow(), profiles = 0, usages = 0, healthy = false; Date.now = () => clock;
+  const scope = { kind: 'session' as const, provider: 'claude', env: { HOME: root, USER: 'quota-test', CLAUDE_CONFIG_DIR: config } };
+  writeFileSync(join(config, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'fake-shared-local', expiresAt: clock + 3600_000 } }));
+  writeFileSync(join(config, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'shared-local', organizationUuid: 'org-shared' } }));
+  globalThis.fetch = async url => {
+    if (String(url).endsWith('/profile')) { profiles++; return Response.json({ account: { uuid: 'shared-local' }, organization: { uuid: 'org-shared' } }); }
+    usages++;
+    return healthy ? Response.json({ five_hour: { utilization: 43, resets_at: null } }) : new Response(null, { status: 429, headers: { 'retry-after': '600' } });
+  };
+  const services = [new ContinuousUsage({ home: root, directory, renewal: false }), new ContinuousUsage({ home: root, directory, renewal: false }), new ContinuousUsage({ home: root, renewal: false })];
+  const query = async (service: InstanceType<typeof ContinuousUsage>) => {
+    const [account] = await service.discover(scope);
+    return service.fetch(account.input as ContinuityInput);
+  };
+  try {
+    const reports = await Promise.all(services.map(query));
+    assert.ok(reports.every(report => report.status === 'error' && report.error.includes('HTTP 429')));
+    assert.equal(profiles, 1); assert.equal(usages, 1);
+    clock += 60_000;
+    await Promise.all(services.map(query));
+    await query(new ContinuousUsage({ home: root, renewal: false }));
+    assert.equal(usages, 1, '新增检查实例也不能绕过等待');
+    healthy = true; clock += 540_001;
+    const recovered = await Promise.all(services.map(query));
+    assert.ok(recovered.every(report => report.status === 'available' && report.windows[0].remainingPct === 57));
+    assert.equal(profiles, 2); assert.equal(usages, 2);
+  } finally {
+    globalThis.fetch = oldFetch; Date.now = oldNow;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const limited of [false, true]) test(`独立用户多个消费者共用一次查询与缓存，限流=${limited}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'quota-shared-isolated-'));
+  const directory = join(root, 'github-subscriptions', 'quota'); mkdirSync(directory, { recursive: true });
+  const configDir = join(root, 'isolated'), counter = join(root, 'calls.txt'), helper = join(root, 'helper.mjs');
+  const reply = { version: 1, account: { key: 'shared-isolated.org', label: 'shared@example.invalid' },
+    ...(limited ? { error: 'http-429' } : {}), windows: limited ? [] : [{ id: 'five_hour', label: 'Session', shortLabel: '5h', summary: true, utilization: 3, resetsAt: null }] };
+  writeFileSync(helper, `import {appendFileSync} from 'node:fs'; appendFileSync(process.argv[2], 'query\\n'); process.stdout.write(${JSON.stringify(JSON.stringify(reply))});`);
+  writeFileSync(join(directory, 'cross-user-providers.json'), JSON.stringify({ [configDir]: { command: process.execPath, args: [helper, counter] } }));
+  const scope = { kind: 'session' as const, provider: 'claude', env: { HOME: root, CLAUDE_CONFIG_DIR: configDir } };
+  const services = [new ContinuousUsage({ home: root, directory }), new ContinuousUsage({ home: root, directory }), new ContinuousUsage({ home: root })];
+  try {
+    const accounts = await Promise.all(services.map(service => service.discover(scope)));
+    const reports = await Promise.all(services.map((service, index) => service.fetch(accounts[index][0].input as CombinedUsageInput)));
+    assert.ok(reports.every(report => report.status === (limited ? 'error' : 'available')));
+    await new ContinuousUsage({ home: root }).discover(scope);
+    assert.equal(readFileSync(counter, 'utf8'), 'query\n', '不能为每个消费者分别运行查询程序');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

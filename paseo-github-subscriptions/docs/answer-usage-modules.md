@@ -27,6 +27,8 @@
 - **旧插件保护**：同步读取 `~/.paseo/config.json` 的 `plugins`。旧插件 `claude-quota-resume` 仍启用时，**不注册额度来源，整个模块报错**（页面 `claude-accounts.snapshot` 返回原因，写操作被拒绝）。原因：来源 ID 重复会让整个实例停止；两处同时运行还会重复改写 Provider 显示名称、重复发送继续消息。
 - **自动继续默认值**：`claudeAccounts.autoResumeDefault`（默认 `false`）。没有单独选择过的会话（含新会话）按这个值处理；会话卡片上的勾选是单独选择，保存在 `enabled-agents.json` 或 `disabled-agents.json`，默认值改变后仍保留。归档会话时清掉它的选择。页面（“本机配置”面板的“新建 Claude 会话默认开启自动继续”开关）保存在 `quota/settings.json`，优先于 `machine.json`。
 - **状态目录** `~/.paseo/github-subscriptions/quota/`：`jobs.json`、`enabled-agents.json`、`disabled-agents.json`、`usage-history.json`、`cross-user-providers.json`、`cross-user-cache.json`、`renewal/`、`settings.json`。账号显示标签在 `~/.paseo/github-subscriptions/labels.json`（隐藏邮箱 → 显示名称）。
+- **查询合并与失败等待**：额度面板、容量计算和新建会话检查在同一插件进程、同一状态目录内共用普通账号和独立用户的查询、缓存及等待；各自的登录续期和额度身份校验仍独立，保存前合并较新的额度历史。成功结果缓存五分钟，401/403 按凭据缓存五分钟，新凭据不复用旧响应。普通账号的连接失败、超时和 5xx 按五、十、二十、三十分钟递增等待，成功后恢复正常缓存；服务端要求更长等待时遵守服务端时间。429 按账号遵守 Retry-After，缺失时等待十五分钟。界面刷新和创建新的检查实例不会绕过等待。
+- **失败记录与提示**：`request-cooldowns.json` 保留原有账号哈希 → 429 截止时间，并新增 `failures`（账号与接口哈希 → 故障类别、次数、截止时间）和 `aliases`（配置目录哈希 → 账号哈希），不保存凭据、凭据指纹、邮箱或接口响应。启动时只读合并旧 `claude-quota-resume/request-cooldowns.json`，采用较晚截止时间；身份资料暂时缺失时继续遵守原账号等待。资料接口临时失败时不额外探测额度，提示具体原因和下次允许重试时间。日志只记实际失败请求的账号哈希前缀、接口、结果和重试时间，本地等待不重复记为服务端限流。
 - **浏览器重复账号**：同一邮箱和登录方式已有启用的 Claude Code Provider 时，`claude-browser` 不再发现对应的浏览器额度项。邮箱和登录方式来自 AdsPower 环境名称与登录标签，CLI 身份优先使用本地身份元数据，隔离用户使用 Provider 账号标签；Apple 隐藏邮箱通过 `labels.json` 映射。同邮箱的 Apple 登录与直接登录分别处理，缺少或冲突的浏览器登录标签保留展示。每次发现重新读取 Provider 配置，停用或删除 Provider 后浏览器项自动恢复。上报、网页提问和原始额度记录保留，不增加 Claude 额度请求。旧浏览器记录首次加载时补取 AdsPower 登录标签，并将 `adspowerLoginMethod` 写入 `browser-usage.json`；回滚到不识别该字段的旧插件前需移除该字段。
 
 ### 复制自 Paseo 自带插件的文件
