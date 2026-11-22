@@ -27,9 +27,9 @@
     "scan": "node --experimental-strip-types scripts/scan-secrets.ts"
   },
   "dependencies": {
-    "@getpaseo/client": "0.15.0",
-    "@getpaseo/plugin": "0.15.0",
-    "@getpaseo/protocol": "0.15.0",
+    "@getpaseo/client": "0.17.1",
+    "@getpaseo/plugin": "0.17.1",
+    "@getpaseo/protocol": "0.17.1",
     "node-edge-tts": "1.2.12",
     "zod": "4.4.3"
   },

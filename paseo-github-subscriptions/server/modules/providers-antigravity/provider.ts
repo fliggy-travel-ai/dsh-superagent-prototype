@@ -1,24 +1,8 @@
-import { createHash } from 'node:crypto';
-import {
-  negotiateProviderCapabilities,
-  requireProviderCapabilities,
-  type ProviderCatalog,
-  type ProviderConnection,
-  type ProviderEvent,
-  type ProviderInput,
-  type ProviderLaunch,
-  type ProviderRegistration,
-} from '@getpaseo/plugin/server/provider';
-import { getCatalog, getStatus } from './server/internal/catalog.ts';
-import { Session } from './server/internal/session.ts';
-import { AntigravityError } from './server/internal/wire.ts';
+import type { ProviderRegistration } from '@getpaseo/plugin/server/provider';
+import { createAntigravityAcpProvider } from './acp/provider.ts';
 
-const capabilities = [
-  'prompt.message',
-  'prompt.image',
-  'session.configure',
-  'session.persistence',
-] as const;
+/** 默认启动命令：agy-paseo 包装脚本负责代理、钥匙串绕过和隔离用户（见提交 7aadd56），acp 参数与内置版一致。 */
+export const DEFAULT_ANTIGRAVITY_COMMAND: readonly [string, ...string[]] = ['agy-paseo', 'acp', '--disable-telemetry'];
 
 export interface AntigravityProviderAccount {
   readonly providerId: string;
@@ -27,166 +11,32 @@ export interface AntigravityProviderAccount {
   readonly description?: string;
 }
 
+/** 命令是否已经是 ACP 形式（带 acp 子命令）。 */
+export const isAcpCommand = (command: readonly string[]): boolean => command.includes('acp');
+
 /**
- * 按配置创建 Antigravity Provider 注册对象。
- * 不写死邮箱、账号名或机器路径；Provider ID 从配置原样读取以保持已有会话可恢复。
+ * 旧 stream-json 形式的命令（0.15 及以前：只写可执行文件，`--input-format stream-json` 由复制代码在运行时追加，
+ * 例如各机器的 agy-paseo 包装脚本）转换成 ACP 形式：补上 acp 子命令。包装脚本对未知参数原样透传给 agy，
+ * 所以补上 `acp --disable-telemetry` 后仍经过包装脚本（代理、钥匙串绕过等环境保持不变）。
  */
-export function createAntigravityProvider(account: AntigravityProviderAccount): ProviderRegistration {
-  const command: readonly [string, ...string[]] =
-    account.command && account.command.length > 0
-      ? [account.command[0]!, ...account.command.slice(1)]
-      : ['agy-paseo'];
-  return {
-    id: account.providerId,
-    label: account.label,
-    icon: 'icons/antigravity.svg',
-    command,
-    description: account.description ?? `Google AI Pro (${account.label})`,
-    async status({ launch }) {
-      if (!launch) {
-        return {
-          available: false,
-          diagnostic: 'agy not found on PATH. Install Antigravity, then run `agy` and sign in.',
-        };
-      }
-      return getStatus(launch);
-    },
-    async getCatalogCacheKey({ launch }) {
-      if (!launch) return undefined;
-      const env = Object.entries(launch.env).sort(([left], [right]) => left.localeCompare(right));
-      return createHash('sha256')
-        .update(JSON.stringify([launch.command, launch.args, env]))
-        .digest('hex');
-    },
-    async connect(request) {
-      if (!request.versions.includes(1)) {
-        throw new AntigravityError('Provider protocol version 1 is required');
-      }
-      if (!request.launch) {
-        throw new AntigravityError('The daemon must supply the Antigravity launch');
-      }
-      const negotiated = negotiateProviderCapabilities(request.capabilities, capabilities);
-      return createConnection(request.launch, negotiated);
-    },
-  };
+export function ensureAcpCommand(command: readonly string[]): readonly [string, ...string[]] {
+  if (isAcpCommand(command)) return [command[0]!, ...command.slice(1)];
+  return [command[0]!, ...command.slice(1), 'acp', '--disable-telemetry'];
 }
 
-function createConnection(
-  launch: ProviderLaunch,
-  negotiated: readonly string[],
-): ProviderConnection {
-  const sessions = new Map<string, Session>();
-  const listeners = new Set<(event: ProviderEvent) => void>();
-  let discovered: ProviderCatalog | null = null;
-  let closed = false;
-  let pending = Promise.resolve();
-
-  function emit(event: ProviderEvent): void {
-    if (closed) return;
-    for (const listener of listeners) listener(event);
-  }
-  function catalog(): ProviderCatalog {
-    if (discovered === null) {
-      throw new AntigravityError('Antigravity catalog has not been discovered');
-    }
-    return discovered;
-  }
-  function session(id: string): Session {
-    const found = sessions.get(id);
-    if (!found) throw new AntigravityError(`Unknown Antigravity session: ${id}`);
-    return found;
-  }
-  async function dispatch(input: ProviderInput): Promise<void> {
-    switch (input.type) {
-      case 'catalog':
-        discovered = await getCatalog(launch, input.cwd);
-        emit({
-          type: 'catalog',
-          requestId: input.requestId,
-          catalog: catalog(),
-        });
-        return;
-      case 'session.open': {
-        if (sessions.has(input.sessionId)) {
-          throw new AntigravityError(`Session already exists: ${input.sessionId}`);
-        }
-        if (discovered === null) discovered = await getCatalog(launch, input.config.cwd);
-        const opened = new Session({
-          id: input.sessionId,
-          config: input.config,
-          persistence: input.persistence,
-          catalog,
-          launch,
-          emit,
-        });
-        sessions.set(input.sessionId, opened);
-        try {
-          await opened.open(input.requestId, negotiated);
-        } catch (error) {
-          sessions.delete(input.sessionId);
-          await opened.close();
-          throw error;
-        }
-        return;
-      }
-      case 'session.prompt':
-        await session(input.sessionId).prompt(input.prompt);
-        return;
-      case 'session.configure':
-        session(input.sessionId).configure(input.changes);
-        break;
-      case 'session.interrupt':
-        await session(input.sessionId).interrupt();
-        break;
-      case 'session.close': {
-        await session(input.sessionId).close();
-        sessions.delete(input.sessionId);
-        emit({ type: 'session.closed', sessionId: input.sessionId });
-        break;
-      }
-      default:
-        throw new AntigravityError(`Unsupported Antigravity operation: ${input.type}`);
-    }
-    emit({ type: 'request.completed', requestId: input.requestId });
-  }
-  function failed(input: ProviderInput, error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    const code = error instanceof AntigravityError ? error.code : 'ANTIGRAVITY_ERROR';
-    if (input.type === 'session.prompt') {
-      emit({
-        type: 'session.prompt_result',
-        sessionId: input.sessionId,
-        clientMessageId: input.prompt.clientMessageId,
-        result: { type: 'failed', error: { message, code } },
-      });
-    } else if ('requestId' in input) {
-      emit({ type: 'request.failed', requestId: input.requestId, error: { message, code } });
-    }
-  }
-  return {
-    version: 1,
-    capabilities: negotiated,
-    async send(input) {
-      if (closed) throw new AntigravityError('Antigravity connection is closed');
-      requireProviderCapabilities(negotiated, input);
-      pending = pending
-        .then(async () => {
-          if (!closed) await dispatch(input);
-          return undefined;
-        })
-        .catch(error => failed(input, error));
-    },
-    onEvent(listener) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    async close() {
-      if (closed) return;
-      closed = true;
-      await pending;
-      await Promise.all([...sessions.values()].map(opened => opened.close()));
-      sessions.clear();
-      listeners.clear();
-    },
-  };
+/**
+ * 按配置创建 Antigravity Provider 注册对象（套用 Paseo 0.17 内置的 ACP 实现，见 ./acp/）。
+ * 不写死邮箱、账号名或机器路径；Provider ID 从配置原样读取以保持已有会话可恢复。
+ * env（HOME、代理等）由守护进程按 Paseo 配置的 `agents.providers[id].env` 注入 launch，这里不需要传。
+ */
+export function createAntigravityProvider(account: AntigravityProviderAccount): ProviderRegistration {
+  const command = account.command && account.command.length > 0
+    ? ensureAcpCommand(account.command)
+    : DEFAULT_ANTIGRAVITY_COMMAND;
+  return createAntigravityAcpProvider({
+    id: account.providerId,
+    label: account.label,
+    description: account.description ?? `Google AI Pro (${account.label})`,
+    command,
+  });
 }

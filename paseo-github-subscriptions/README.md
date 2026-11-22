@@ -16,7 +16,7 @@
 
 新建会话额度检查默认启用。确认账号报错、代理上游查询报错、本机用户的 Claude 账号未登录或登录已过期、额度用尽时，插件拒绝创建，并列出本机额度可用且不低于阈值的 Provider ID。任一适用窗口低于阈值但还没用完时，插件记录警告并允许创建。提示文案显示原窗口名（例如 7d），不显示 effective。Cursor 和 Antigravity 的模型族窗口及有付费余额的账号跳过百分比阈值。API Key、外部网关和独立系统用户的 Claude 账号不做登录检查。没有可判定的额度时，插件记录警告并允许创建。检查仅用于新建会话。可在 `machine.json` 中设置 `quotaGate.minRemainingPct`（默认 `10`，范围 `0` 到 `100`），或在 `modules` 中设置 `"providers.quotaGate": false`。修改后重载插件生效。
 
-实现使用 `@getpaseo/plugin`、`@getpaseo/client`、`@getpaseo/protocol` 的 0.15.0 版本。清单使用最低版本要求 `>=0.15.0`，避免后续升级被未经验证的版本上限阻止。Paseo 按正式版本号核对测试版的兼容范围，因此该声明也允许 0.16 和 0.17 的测试版。已用 Paseo 0.17.0-beta.1 检查实际构建和加载；后续版本的接口兼容性仍需实测。
+实现使用 `@getpaseo/plugin`、`@getpaseo/client`、`@getpaseo/protocol` 的 0.17.1 版本。清单使用最低版本要求 `>=0.17.0`：Antigravity 多账号模块套用 0.17 内置 Antigravity Provider 的 ACP 实现（`runAcpProvider`），旧版本没有这套接口。已用 Paseo 0.17.1（应用与 npm 包同版本）检查实际构建和加载；后续版本的接口兼容性仍需实测。
 
 核对过的 npm 0.15.0–0.15.3 未提供在线文档所示的 subscription API。因此客户端通过一个共用 store 每五秒读取一次 snapshot RPC。胶囊和侧边栏共用刷新，不要求用户打开插件页面。客户端使用 React Native 原语；TypeScript 不引入 DOM 库。
 

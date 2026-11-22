@@ -180,7 +180,8 @@ type Wrap = <T>(operation: () => T) => T;
 function scopedServer(server: PluginServerContext, wrap: Wrap): PluginServerContext {
   const callback = <F extends (...args: never[]) => unknown>(fn: F): F => ((...args: Parameters<F>) => wrap(() => fn(...args))) as F;
   const scoped: Partial<PluginServerContext> = {
-    handle: (contract, handler) => server.handle(contract, callback(handler)),
+    // 0.17 起 handle 有 RPC 和订阅两个重载，联合签名无法直接转发，按目标上下文的原签名整体强转。
+    handle: ((contract: never, handler: never) => server.handle(contract, callback(handler))) as PluginServerContext['handle'],
     addHook: ((name: never, handler: never) => server.addHook(name, callback(handler as (...args: never[]) => unknown) as never)) as PluginServerContext['addHook'],
     on: ((name: never, handler: never) => server.on(name, callback(handler as (...args: never[]) => unknown) as never)) as PluginServerContext['on'],
     before: ((name: never, handler: never) => server.before(name, callback(handler as (...args: never[]) => unknown) as never)) as PluginServerContext['before'],
