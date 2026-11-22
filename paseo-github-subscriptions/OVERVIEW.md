@@ -110,7 +110,7 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 - **`hideBuiltin` 目前只保存配置，还没有生效**：过滤内置额度来源的显示需要在客户端实现，尚未做；快照的 `hideBuiltinApplied` 为 `false`。
 - 各额度来源读取的本机文件与环境变量（不复制凭据）。**令牌刷新会写回原文件**：Antigravity 和 Cursor 刷新访问令牌后，以原子写入（临时文件再改名，权限 0600）写回原凭据文件，Cursor 同时保存新的刷新令牌；Codex 令牌过期时只提示，插件不刷新、不写回（刷新会让 Codex CLI 登出）：
   - 公共配置与代理：读取环境变量 `PASEO_HOME`（默认 `~/.paseo`）、`~/.paseo/config.json` 的 `plugins` 与 `agents.providers`；网络请求读取 Provider `env.HTTPS_PROXY` / `env.HTTP_PROXY`、进程环境变量 `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` / `http_proxy`，以及 macOS 系统代理（`scutil --proxy`，先读 HTTPS 再读 HTTP，遵守例外列表；调用带 2 秒超时，结果缓存 60 秒）。账号显式配置的代理连接失败时报错，不改直连；带刷新令牌的请求即使走系统代理，失败也不直连。
-  - `antigravity`（Antigravity 额度）：读取会话或 Provider `env.HOME`（默认系统主目录 `~`）下的 `<HOME>/.gemini/antigravity-cli/antigravity-oauth-token`；OAuth 刷新读取环境变量 `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` 或 `~/.paseo/github-subscriptions/agy-oauth.json`。
+  - `antigravity-multi`（Antigravity 多账号额度）：Paseo 0.17 起内置插件 `antigravity-provider` 自带额度来源 `antigravity`，同名会让整个插件加载失败，所以本来源改名。`machine.json` 里的旧写法 `antigravity` 按新 ID 处理，不用改配置。读取会话或 Provider `env.HOME`（默认系统主目录 `~`）下的 `<HOME>/.gemini/antigravity-cli/antigravity-oauth-token`；OAuth 刷新读取环境变量 `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` 或 `~/.paseo/github-subscriptions/agy-oauth.json`。
   - `codex-multi`（Codex 多账号额度）：读取会话或 Provider `env.CODEX_HOME`（默认 `~/.codex`）下的 `<CODEX_HOME>/auth.json`。
   - `cursor-cli`（Cursor 额度）：读取会话或 Provider `env.HOME`（默认 `~`）下的 `<HOME>/.cursor/auth.json` 或 `<HOME>/.config/cursor/auth.json`。
   - `grok-multi`（Grok 多账号额度）：读取会话或 Provider `env.GROK_HOME`（默认 `~/.grok`）下的 `<GROK_HOME>/auth.json`，令牌失效时调用 Provider 配置的 `grok` 命令刷新。

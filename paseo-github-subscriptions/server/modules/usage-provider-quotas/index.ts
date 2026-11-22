@@ -21,7 +21,14 @@ import { createUsageSources, stopUsageChildren } from './server/usage.ts';
 
 const SOURCE_ID_SET = new Set<string>(PROVIDER_QUOTA_SOURCE_IDS);
 
-const SourceIdSchema = z.enum(PROVIDER_QUOTA_SOURCE_IDS);
+/**
+ * 旧来源 ID 改名对照。Paseo 0.17 内置插件 antigravity-provider 注册了额度来源 `antigravity`，
+ * 本插件再注册同名来源会让整个插件加载失败，所以改为 `antigravity-multi`。机器配置里的旧写法照常生效。
+ */
+const RENAMED_SOURCE_IDS: Record<string, ProviderQuotaSourceId> = { antigravity: 'antigravity-multi' };
+const renameSourceId = (value: unknown) => (typeof value === 'string' && RENAMED_SOURCE_IDS[value]) || value;
+
+const SourceIdSchema = z.preprocess(renameSourceId, z.enum(PROVIDER_QUOTA_SOURCE_IDS));
 
 const HideBuiltinItemSchema = z
   .string()

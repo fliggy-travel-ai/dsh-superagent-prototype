@@ -18,7 +18,7 @@ interface ProviderConfig {
 
 const directSources = new Map([
   ['codex-multi', 'codex'], ['cursor-cli', 'cursor'], ['grok-multi', 'grok'],
-  ['antigravity', 'antigravity'], ['glm', 'glm'], ['qoder', 'qoder'], ['opencode-token-switch', 'opencode'],
+  ['antigravity-multi', 'antigravity'], ['glm', 'glm'], ['qoder', 'qoder'], ['opencode-token-switch', 'opencode'],
 ]);
 const builtinSources = new Set(['codex', 'cursor', 'grok']);
 const identityEnvKeys = ['HOME', 'CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'CLAUDE_CONFIG_DIR',

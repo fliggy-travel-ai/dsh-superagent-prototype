@@ -406,7 +406,7 @@ export class FakeDaemon {
       case 'provider-quotas.snapshot':
         return {
           enabled: Boolean(this.machineSettings.modules.find(m => m.id === 'usage.providerQuotas')?.enabled),
-          enabledSources: ['antigravity', 'codex-multi', 'qoder', 'glm'],
+          enabledSources: ['antigravity-multi', 'codex-multi', 'qoder', 'glm'],
           hideBuiltin: ['codex', 'grok', 'cursor', 'kimi', 'zai'],
           hideBuiltinApplied: false,
           skippedConflicts: [],
@@ -416,7 +416,7 @@ export class FakeDaemon {
       case 'provider-quotas.configure':
         return {
           enabled: input.enabled !== undefined ? Boolean(input.enabled) : true,
-          enabledSources: Array.isArray(input.enabledSources) ? (input.enabledSources as string[]) : ['antigravity', 'codex-multi', 'qoder', 'glm'],
+          enabledSources: Array.isArray(input.enabledSources) ? (input.enabledSources as string[]) : ['antigravity-multi', 'codex-multi', 'qoder', 'glm'],
           hideBuiltin: Array.isArray(input.hideBuiltin) ? (input.hideBuiltin as string[]) : ['codex', 'grok', 'cursor', 'kimi', 'zai'],
           hideBuiltinApplied: false,
           skippedConflicts: [],

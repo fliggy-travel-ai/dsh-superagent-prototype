@@ -114,7 +114,8 @@ test('usage.providerQuotas：按配置开关逐个来源启用，并确保 glm �
   assert.equal(host.status().modules[0]?.state, 'running');
   assert.deepEqual(
     usageSources.map(s => s.id),
-    ['antigravity', 'codex-multi', 'qoder', 'glm'],
+    // 机器配置里的旧 ID antigravity 按改名后的 antigravity-multi 注册。
+    ['antigravity-multi', 'codex-multi', 'qoder', 'glm'],
   );
 });
 
@@ -234,7 +235,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
 
   assert.deepEqual(updated, {
     enabled: true,
-    enabledSources: ['antigravity', 'codex-multi', 'grok-multi'],
+    enabledSources: ['antigravity-multi', 'codex-multi', 'grok-multi'],
     hideBuiltin: ['codex', 'grok'],
     hideBuiltinApplied: false,
     skippedConflicts: [],
@@ -245,7 +246,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
   const savedMachine = JSON.parse(readFileSync(machinePath, 'utf8'));
   assert.equal(savedMachine.modules['usage.providerQuotas'], true);
   assert.deepEqual(savedMachine.providerQuotas, {
-    sources: ['antigravity', 'codex-multi', 'grok-multi'],
+    sources: ['antigravity-multi', 'codex-multi', 'grok-multi'],
     hideBuiltin: ['codex', 'grok'],
   });
 });

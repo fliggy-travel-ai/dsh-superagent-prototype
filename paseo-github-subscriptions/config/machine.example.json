@@ -120,7 +120,7 @@
   },
   "providerQuotas": {
     "sources": [
-      "antigravity",
+      "antigravity-multi",
       "codex-multi",
       "grok-multi",
       "qoder",
