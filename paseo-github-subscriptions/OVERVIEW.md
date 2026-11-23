@@ -76,6 +76,8 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 三个模块默认关闭。行为、配置和迁移见 `docs/answer-usage-modules.md`。主会话是置顶工作区中的会话，但与父会话同在一个工作区的子会话除外（Paseo 0.17 起子会话默认建在调用方工作区；父会话已归档时按接班处理，仍算主会话）。置顶工作区里的子会话只清除它自己的待查看，不按工作区清除。停滞会话、子会话免提醒、升级通知和事件转发使用同一判定。
 
+打开事件转发后，Antigravity 子会话在本轮之外自己续跑（后台命令结束后继续工作，Paseo 显示为空闲且不发完成通知）时，静默 60 秒后告诉主会话“子会话后台续跑已结束”，附最后一条助手消息。不给子会话发续接。
+
 ### 复制自 Paseo 自带插件的文件
 
 `server/vendor/paseo-0.15.0/claude-usage-source/` 原样复制 Paseo 0.15.0 自带插件 `claude-usage-source` 的 `server/usage.ts`、`server/stores.ts`、`shared/input.ts` 和 `icon.svg`，保持相对路径，没有修改。Paseo 更新后运行 `npm run vendor:check` 比较，有变化时重新复制。自有逻辑放在 `server/modules/usage-claude-accounts/`。
@@ -118,6 +120,10 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
   - `glm`（GLM Coding Plan 额度）：读取会话或 Provider `env.XDG_CONFIG_HOME`、进程环境变量 `XDG_CONFIG_HOME`（默认 `~/.config`）下的 `<XDG_CONFIG_HOME>/glm-acp-agent/credentials.json` 中的 `z_ai_api_key`。
   - `qoder`（Qoder 额度）：调用 Provider `command[0]` 或 `~/.local/bin/qodercli`（以 `--sdk` 协议运行，传入 Provider `env.HOME` 或系统主目录）。
   - `opencode-token-switch`（OpenCode TokenHub 额度）：只读打开 `<HOME>/.token-switch/token-switch.db`（SQLite）、读取 `env.OPENCODE_CONFIG` 或 `<XDG_CONFIG_HOME|~/.config>/opencode/opencode.json`、读取 `~/.paseo/token-hub-browser.json` 并通过 `~/.local/bin/ego-browser` 查询同账号共享额度，脱敏后的观测时间缓存在 `~/.paseo/cache/provider-quotas-usage-source/`。
+
+## 新建会话额度拦截
+
+「开发自动化 → Provider 与账号」中的「新建会话额度检查」卡片按本机 Provider 清单逐个调整拦截：选择一个 Provider 后「停止拦截」或「恢复拦截」，保存写回本机 `machine.json` 的 `quotaGate.excludeProviders` 并立即生效，不需要重载插件。恢复被 `codex*` 之类通配模式放行的 Provider 时，通配按本机现有 Provider 展开成精确项，只影响这台机器。卡片右上开关整体启停模块（需重载插件）；阈值 `minRemainingPct` 与手写配置见插件 README。守护进程暂不可用时 Provider 清单读取失败，按钮停用并自动重试。
 
 ## 主会话收尾与容量
 

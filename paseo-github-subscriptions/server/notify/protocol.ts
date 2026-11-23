@@ -6,6 +6,8 @@ export type EventName =
   | 'idle'
   | 'error'
   | 'bg_cmd_done'
+  /** Antigravity 子会话在本轮外续跑并已静默（Paseo 不发回合事件，MCP 也不通知）。 */
+  | 'background_resumed'
   | 'subagent_done'
   | 'new_project'
   | 'new_workspace'
