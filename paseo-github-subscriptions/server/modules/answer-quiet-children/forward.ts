@@ -18,6 +18,7 @@ import { loadState, saveState } from '../../notify/store.ts';
 import type { HandledRecords } from './handled.ts';
 import type { MainResolution } from './resolver.ts';
 import { TimelineWatchers } from './watchers.ts';
+import { OutOfTurnTracker, type OutOfTurnReport } from './out-of-turn.ts';
 
 export interface ForwardOptions {
   server: PluginServerContext;
@@ -42,6 +43,7 @@ export class ForwardRuntime {
   private readonly options: ForwardOptions;
   private attempt: Attempt | null = null;
   private readonly watchers = new TimelineWatchers();
+  private outOfTurn: OutOfTurnTracker | null = null;
   private readonly lifetime = new AbortController();
   private engine: Engine | null = null;
   private roles: WorkspaceRoles = parseWorkspaceRoles(null);
@@ -66,6 +68,7 @@ export class ForwardRuntime {
   /** 每次 await 之后检查 attempt，停止或失败清理后不再注册任何东西；清理后才登记的清理函数立即执行。 */
   private async begin(attempt: Attempt): Promise<void> {
     attempt.add(() => this.watchers.releaseAll());
+    attempt.add(() => { this.outOfTurn?.dropAll(); this.outOfTurn = null; });
     const { paseo, client } = await this.options.daemon.ready();
     attempt.check();
     const { directory, machineName, server } = this.options;
@@ -146,11 +149,23 @@ export class ForwardRuntime {
     const refreshClassification = () => {
       for (const agent of Object.values(engine.state.agents!)) updateAgent(agent);
       // 不再是子会话（成了主会话或没有可转发的上层）的，释放它的时间线订阅。
-      for (const id of this.watchers.ids()) if (!config.children[id]) this.watchers.release(id);
+      for (const id of this.watchers.ids()) if (!config.children[id]) { this.watchers.release(id); this.outOfTurn?.drop(id); }
     };
     const run = (fn: () => Promise<unknown>) => {
       void engine.serial(async () => { await refreshRoles(); refreshClassification(); return fn(); }).catch(error => this.log(`通知处理失败，保留待处理状态：${summarizeError(error)}`));
     };
+    // Antigravity 子会话本轮外续跑静默后，告诉主会话（不给子会话发续接）。
+    const outOfTurn = new OutOfTurnTracker({
+      report: (report: OutOfTurnReport) => run(async () => {
+        if (attempt.cancelled) return;
+        const target = config.children[report.agentId];
+        if (!target) return;
+        const data = { message: '子会话后台续跑已结束', ...report };
+        await engine.enqueue('background_resumed', report.agentId, data, `out-of-turn:${report.agentId}:${report.firstAt}`, target);
+        await engine.tick();
+      }),
+    });
+    this.outOfTurn = outOfTurn;
     const childQuestion = async (agent: { id: string }, request: { id: string }) => {
       const target = config.children[agent.id];
       if (target && questionRequest(request)) await engine.enqueue('asked', agent.id, request, `child-permission:${agent.id}:${request.id}`, target, request.id);
@@ -178,7 +193,10 @@ export class ForwardRuntime {
     // 命令文字含合并 master 或复盘时才转给主会话。
     const observe = (id: string) => this.watchers.watch(id, () => {
       const subscription = paseo.agents.ref(id).timeline.subscribe(message => {
-        if (!config.children[id] || message.event.type !== 'timeline') return;
+        if (!config.children[id] || attempt.cancelled) return;
+        const at = Date.parse((message as { timestamp?: string }).timestamp ?? '') || Date.now();
+        outOfTurn.observe(id, message.event as never, at, engine.state.agents![id]?.provider);
+        if (message.event.type !== 'timeline') return;
         const notice = shellCommandNotice(id, message.event.item);
         if (!notice) return;
         run(async () => {
@@ -192,7 +210,7 @@ export class ForwardRuntime {
     });
     const watch = (agent: { id: string; archivedAt?: string | null; status?: string }) => {
       // 归档或关闭的会话不会再有新命令：释放订阅。
-      if (agent.archivedAt || agent.status === 'closed') { this.watchers.release(agent.id); return; }
+      if (agent.archivedAt || agent.status === 'closed') { this.watchers.release(agent.id); outOfTurn.drop(agent.id); return; }
       if (!config.children[agent.id] || attempt.cancelled) return;
       void observe(agent.id).catch(() => this.log('子会话时间线订阅失败，稍后重试'));
     };

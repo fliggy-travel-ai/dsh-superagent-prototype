@@ -104,6 +104,13 @@ export function expireOutbox(
   });
   return dropped;
 }
+/**
+ * 带转发目标（子会话）的事件哪些要发给主会话：待答的提问、需要用户接续的事件，
+ * 以及本轮外续跑结束（没有其他通知渠道：Paseo MCP 只在回合结束时通知）。其余只记录。
+ */
+export function forwardsChildEvent(notice: Pick<Notice, 'event' | 'needsUser'>): boolean {
+  return notice.event === 'asked' || notice.event === 'background_resumed' || notice.needsUser;
+}
 export class Engine {
   config: Config;
   state: State;
@@ -245,7 +252,7 @@ export class Engine {
     const route=deliveryClass(event,this.config.mains.includes(agentId),!!target,!!(data as any)?.orphaned);
     // 子会话 wake=none 且无需用户处理的普通事件（命令错误/后台完成/状态变化/完结）只记录，
     // 不叫醒主会话；真正待答的问题、权限与需要接续（needsUser）的事件保留投递。
-    const quiet=!!target&&event!=='asked'&&!notice.needsUser;
+    const quiet=!!target&&!forwardsChildEvent(notice);
     if(route==='record'||quiet||(!target&&event==='error'&&typeof(data as any)?.callId==='string')||(event==='asked'&&!questionRequest(data))){
       await this.audit({phase:'recorded-only',mode:this.config.delivery,notice});
       this.state.seen[key]=now;await this.save(this.state);return;
@@ -455,9 +462,9 @@ export class Engine {
     for (const job of [...this.state.outbox]) {
       if (job.next > now) continue;
       // 重载后同样过滤旧版本积压，不能把旧批次中的静默事件继续发出。
-      if(job.notice.events){job.notice.events=job.notice.events.filter(n=>deliveryClass(n.event,this.config.mains.includes(n.agentId),!!n.target,!!(n.data as any)?.orphaned)!=='record'&&!(n.event==='error'&&!n.target&&typeof(n.data as any)?.callId==='string')&&(!n.target||n.event==='asked'||n.needsUser));
+      if(job.notice.events){job.notice.events=job.notice.events.filter(n=>deliveryClass(n.event,this.config.mains.includes(n.agentId),!!n.target,!!(n.data as any)?.orphaned)!=='record'&&!(n.event==='error'&&!n.target&&typeof(n.data as any)?.callId==='string')&&(!n.target||forwardsChildEvent(n)));
         if(job.notice.events.length){const members=job.notice.events;job.notice={...members[0],id:job.notice.id,events:members};}}
-      if((job.notice.event==='error'&&!job.notice.target&&typeof(job.notice.data as any)?.callId==='string')||(job.notice.events&&job.notice.events.length===0)||deliveryClass(job.notice.event,this.config.mains.includes(job.notice.agentId),!!job.notice.target,!!(job.notice.data as any)?.orphaned)==='record'||(job.notice.target&&job.notice.event!=='asked'&&!job.notice.needsUser)){
+      if((job.notice.event==='error'&&!job.notice.target&&typeof(job.notice.data as any)?.callId==='string')||(job.notice.events&&job.notice.events.length===0)||deliveryClass(job.notice.event,this.config.mains.includes(job.notice.agentId),!!job.notice.target,!!(job.notice.data as any)?.orphaned)==='record'||(job.notice.target&&!forwardsChildEvent(job.notice))){
         await this.audit({phase:'recorded-only',mode:this.config.delivery,notice:job.notice});this.state.outbox=this.state.outbox.filter(x=>x!==job);await this.save(this.state);continue;
       }
       try {
