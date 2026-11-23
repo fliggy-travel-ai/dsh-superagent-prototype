@@ -103,7 +103,27 @@ test('有运行中的本轮外工具时继续等待，超过上限后照常报�
   assert.equal(h.reports[0]!.runningTools, 1);
 });
 
-test('订阅建立时回放的旧事件不报告', () => {
+test('出现本轮内事件时放弃跟踪（重连时可能漏掉回合开始）', () => {
+  const h = harness();
+  h.feed(recorded.slice(5, 7));
+  h.feed([['00:58:30.000', { type: 'timeline', provider: PROVIDER, turnId: 'acp:next', item: { type: 'reasoning', text: '想' } }]]);
+  h.advance(at('01:30:00.000'));
+  assert.equal(h.reports.length, 0);
+});
+
+test('没有 messageId 的连续助手消息分片拼成一条', () => {
+  const h = harness();
+  h.feed([
+    ['00:58:00.000', { type: 'timeline', provider: PROVIDER, item: { type: 'assistant_message', text: '旧消息' } }],
+    ['00:58:01.000', { type: 'timeline', provider: PROVIDER, item: { type: 'tool_call', callId: 'x', status: 'completed' } }],
+    ['00:58:02.000', { type: 'timeline', provider: PROVIDER, item: { type: 'assistant_message', text: '第二步' } }],
+    ['00:58:02.100', { type: 'timeline', provider: PROVIDER, item: { type: 'assistant_message', text: '完成' } }],
+  ]);
+  h.advance(at('01:00:00.000'));
+  assert.equal(h.reports[0]!.lastAssistant, '第二步完成');
+});
+
+test('早于 10 分钟的事件不报告（按事件时间判断）', () => {
   const h = harness();
   h.advance(at('02:00:00.000'));
   h.tracker.observe('child', recorded[8]![1], at('00:58:20.733'));

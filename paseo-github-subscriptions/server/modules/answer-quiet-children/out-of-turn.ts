@@ -47,6 +47,8 @@ interface Run {
   /** messageId → 已拼接的文本；最后一条助手消息取 lastMessageId。 */
   messages: Map<string, string>;
   lastMessageId: string | null;
+  /** 上一个计入的条目类型：没有 messageId 的连续助手消息分片拼在一起。 */
+  lastType: string | null;
   timer: unknown;
 }
 
@@ -76,14 +78,15 @@ export class OutOfTurnTracker {
 
   /** 子会话时间线订阅收到的每个事件。provider 取事件自带的，缺省用会话登记的。 */
   observe(agentId: string, event: StreamEvent, at: number = this.now(), agentProvider?: string | null) {
-    if (event.type === 'turn_started') { this.drop(agentId); return; }
-    if (event.type !== 'timeline' || event.turnId || !event.item) return;
+    // 新回合开始或出现本轮内事件（重连时可能漏掉 turn_started）：由回合通知接手。
+    if (event.type === 'turn_started' || event.turnId) { this.drop(agentId); return; }
+    if (event.type !== 'timeline' || !event.item) return;
     const provider = event.provider ?? agentProvider ?? '';
     if (!isAntigravityProvider(provider) || !counts(event.item)) return;
     if (this.now() - at > this.maxAgeMs) return;
     let run = this.runs.get(agentId);
     if (!run) {
-      run = { provider, firstAt: at, lastAt: at, count: 0, tools: new Map(), messages: new Map(), lastMessageId: null, timer: null };
+      run = { provider, firstAt: at, lastAt: at, count: 0, tools: new Map(), messages: new Map(), lastMessageId: null, lastType: null, timer: null };
       this.runs.set(agentId, run);
     }
     run.count++;
@@ -92,10 +95,11 @@ export class OutOfTurnTracker {
     if (item.type === 'tool_call' && item.callId) run.tools.set(item.callId, item.status ?? '');
     if (item.type === 'assistant_message') {
       // 实时事件按分片到达，同一 messageId 拼接。
-      const id = item.messageId ?? `message-${run.count}`;
+      const id = item.messageId ?? (run.lastType === 'assistant_message' && run.lastMessageId ? run.lastMessageId : `message-${run.count}`);
       run.messages.set(id, (run.messages.get(id) ?? '') + (item.text ?? ''));
       run.lastMessageId = id;
     }
+    run.lastType = item.type;
     this.schedule(agentId, run, this.quietMs);
   }
 

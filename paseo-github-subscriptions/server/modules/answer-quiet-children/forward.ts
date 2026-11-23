@@ -157,6 +157,7 @@ export class ForwardRuntime {
     // Antigravity 子会话本轮外续跑静默后，告诉主会话（不给子会话发续接）。
     const outOfTurn = new OutOfTurnTracker({
       report: (report: OutOfTurnReport) => run(async () => {
+        if (attempt.cancelled) return;
         const target = config.children[report.agentId];
         if (!target) return;
         const data = { message: '子会话后台续跑已结束', ...report };
@@ -192,7 +193,7 @@ export class ForwardRuntime {
     // 命令文字含合并 master 或复盘时才转给主会话。
     const observe = (id: string) => this.watchers.watch(id, () => {
       const subscription = paseo.agents.ref(id).timeline.subscribe(message => {
-        if (!config.children[id]) return;
+        if (!config.children[id] || attempt.cancelled) return;
         const at = Date.parse((message as { timestamp?: string }).timestamp ?? '') || Date.now();
         outOfTurn.observe(id, message.event as never, at, engine.state.agents![id]?.provider);
         if (message.event.type !== 'timeline') return;
