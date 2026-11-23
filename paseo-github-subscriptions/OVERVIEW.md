@@ -121,6 +121,10 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
   - `qoder`（Qoder 额度）：调用 Provider `command[0]` 或 `~/.local/bin/qodercli`（以 `--sdk` 协议运行，传入 Provider `env.HOME` 或系统主目录）。
   - `opencode-token-switch`（OpenCode TokenHub 额度）：只读打开 `<HOME>/.token-switch/token-switch.db`（SQLite）、读取 `env.OPENCODE_CONFIG` 或 `<XDG_CONFIG_HOME|~/.config>/opencode/opencode.json`、读取 `~/.paseo/token-hub-browser.json` 并通过 `~/.local/bin/ego-browser` 查询同账号共享额度，脱敏后的观测时间缓存在 `~/.paseo/cache/provider-quotas-usage-source/`。
 
+## 新建会话额度拦截
+
+「开发自动化 → Provider 与账号」中的「新建会话额度检查」卡片按本机 Provider 清单逐个调整拦截：选择一个 Provider 后「停止拦截」或「恢复拦截」，保存写回本机 `machine.json` 的 `quotaGate.excludeProviders` 并立即生效，不需要重载插件。恢复被 `codex*` 之类通配模式放行的 Provider 时，通配按本机现有 Provider 展开成精确项，只影响这台机器。卡片右上开关整体启停模块（需重载插件）；阈值 `minRemainingPct` 与手写配置见插件 README。守护进程暂不可用时 Provider 清单读取失败，按钮停用并自动重试。
+
 ## 主会话收尾与容量
 
 可选模块自动整理带需求单号的主会话，并按 Claude 实时额度计算可承接数。额度用尽时，可在已核实的 Claude 账号之间迁移主会话；点名账号的会话保留原账号并报告异常。收尾、容量和迁移事件发送到现有总控 webhook。模块默认关闭，迁移默认关闭；配置和联调步骤见 `docs/answer-usage-modules.md`。

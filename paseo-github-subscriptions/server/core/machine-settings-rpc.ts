@@ -30,6 +30,7 @@ export function isModuleEnabled(
 
 const MODULE_DEFS = [
   { id: 'providers.defaults', label: '新建会话默认设置', defaultEnabled: false },
+  { id: 'providers.quotaGate', label: '新建会话额度检查', defaultEnabled: true },
   { id: 'answer.presence', label: '问答模式与蓝牙', defaultEnabled: true },
   { id: 'answer.browser', label: '网页版 claude.ai', defaultEnabled: true },
   { id: 'answer.escalation', label: '升级通知', defaultEnabled: false },
@@ -163,6 +164,7 @@ export function registerMachineSettingsRpcs(options: {
 
   const moduleSections: Record<string, string> = {
     'providers.defaults': 'agentDefaults', 'providers.antigravity': 'antigravity',
+    'providers.quotaGate': 'quotaGate',
     'answer.escalation': 'escalation', 'answer.quietChildren': 'quietChildren',
     'usage.claudeAccounts': 'claudeAccounts', 'usage.providerQuotas': 'providerQuotas',
   };

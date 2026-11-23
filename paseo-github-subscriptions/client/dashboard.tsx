@@ -5,6 +5,7 @@ import type { Question, QuestionAnswer, QuestionPrompt } from '../shared/presenc
 import type { TodoItem, TodoType } from '../shared/todo.ts';
 import { DrawerOverlay, type DrawerId } from './drawers.tsx';
 import { ago } from './format.ts';
+import { gateExcluded, toggleGateExclusion } from '../shared/quota-gate.ts';
 import { GitHubSubscriptionsViews } from './screen/index.tsx';
 import { computeHasAlert, computeTodoCount, setLastNonTodoPage } from './sidebar-state.ts';
 import { errorMessage } from './store.ts';
@@ -130,9 +131,26 @@ function ProvidersPage({
     moduleReloading,
     modules,
     todo,
+    quotaGate,
+    quotaGateStatus,
+    quotaGateError,
   } = useControlState();
   const [actionError, setActionError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const gateProviders = quotaGate?.providers ?? null;
+  const [gateProviderId, setGateProviderId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!gateProviders?.length) return;
+    if (!gateProviders.some(entry => entry.id === gateProviderId)) setGateProviderId(gateProviders[0]!.id);
+  }, [gateProviders, gateProviderId]);
+  const gateSelected = gateProviders?.find(entry => entry.id === gateProviderId) ?? null;
+  const gateExcludedNow = gateSelected ? gateExcluded(quotaGate?.excludeProviders ?? [], gateSelected.id) : false;
+  const adjustQuotaGate = (excluded: boolean) => {
+    if (!quotaGate || !gateProviders || !gateSelected) return;
+    setActionError(null);
+    const excludeProviders = toggleGateExclusion(quotaGate.excludeProviders, gateSelected.id, excluded, gateProviders.map(entry => entry.id));
+    void control.configureQuotaGate({ excludeProviders }).catch(e => setActionError(errorMessage(e)));
+  };
   const pausedAll = machineSettings?.pausedAll ?? false;
   const claudeAccountsDisabled =
     isModuleOff('usage.claudeAccounts', machineSettings, modules) ||
@@ -263,6 +281,63 @@ function ProvidersPage({
             )
           }
           actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
+        />
+
+        <ModuleFeatureCard
+          title="新建会话额度检查"
+          moduleId="providers.quotaGate"
+          label="启用新建会话额度检查"
+          belowTitle={
+            isModuleOff('providers.quotaGate', machineSettings, modules) || !gateProviders ? null : (
+              <View style={s.wrap}>
+                {gateProviders.map(entry => (
+                  <Btn
+                    key={entry.id}
+                    small
+                    primary={entry.id === gateSelected?.id}
+                    label={entry.label || entry.id}
+                    onPress={() => setGateProviderId(entry.id)}
+                  />
+                ))}
+              </View>
+            )
+          }
+          description="新建会话前检查本机额度：账号报错、登录失效或额度用尽时拒绝创建。选择一个 Provider 单独停止或恢复拦截，保存后立即生效，不需要重载插件。"
+          kv={
+            isModuleOff('providers.quotaGate', machineSettings, modules) ? (
+              <ModuleOffHint />
+            ) : quotaGateError ? (
+              <>
+                <Chip label="读取失败" tone="danger" />
+                <Text style={s.small}>读取失败：{quotaGateError}</Text>
+              </>
+            ) : quotaGateStatus !== 'ready' || !quotaGate ? (
+              <Text style={s.small}>{quotaGateStatus === 'disabled' ? '未启用' : '正在读取…'}</Text>
+            ) : !gateProviders ? (
+              <>
+                <Chip label="Provider 清单读取失败" tone="warning" />
+                <Text style={s.small}>守护进程暂不可用，稍后自动重试</Text>
+              </>
+            ) : !gateSelected ? (
+              <Text style={s.small}>本机没有已配置的 Provider</Text>
+            ) : (
+              <>
+                <Chip label={gateExcludedNow ? '已放行' : '拦截中'} tone={gateExcludedNow ? 'warning' : 'success'} />
+                <Text style={s.small}>低于 {quotaGate.minRemainingPct}% 只警告不拦截</Text>
+                {quotaGate.excludeProviders.length > 0 ? (
+                  <Text style={s.small}>例外：{quotaGate.excludeProviders.join('、')}</Text>
+                ) : null}
+              </>
+            )
+          }
+          actions={
+            <Btn
+              small
+              label={gateExcludedNow ? '恢复拦截' : '停止拦截'}
+              disabled={!gateSelected || !gateProviders || quotaGateStatus !== 'ready'}
+              onPress={() => adjustQuotaGate(!gateExcludedNow)}
+            />
+          }
         />
 
       </View>
