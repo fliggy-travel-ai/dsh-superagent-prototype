@@ -2,23 +2,39 @@ import { CrossUserUsage } from "./cross-user.ts";
 import { ActiveSessions } from "./active-sessions.ts";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { UsageAccount, UsageReport, UsageScope } from "@getpaseo/plugin/server/usage";
 import type { UsageInput } from "../../vendor/paseo-0.15.0/claude-usage-source/shared/input.ts";
 import { isLocalUsageInput, type CombinedUsageInput } from "../../../shared/continuity-input.ts";
 import { UsageContinuity, digest, readIdentity, type CredentialState } from "./continuity.ts";
 import { discover, fetchUsage, resolveClaudeCredentials, claudeKeychainAccount } from "../../vendor/paseo-0.15.0/claude-usage-source/server/usage.ts";
 import { paseoHome } from "./providers.ts";
-import { QuotaRequests } from "./quota-requests.ts";
+import { QuotaRequests, quotaRequestMessage } from "./quota-requests.ts";
 import { hasAuthOverride, initializeLogin, RenewalService, type RenewalTarget } from "./renewal.ts";
 
 /** Keep vendor requests comfortably below the host's 20-second usage deadline. */
 const boundedFetch: typeof fetch = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(8000) });
 
+// 面板、容量计算与新建会话检查在同一进程内共用请求、缓存和等待。
+const queryClients = new Map<string, { crossUser: CrossUserUsage; requests: QuotaRequests }>();
+function sharedQueries(directory: string, home: string) {
+  const key = resolve(directory);
+  let clients = queryClients.get(key);
+  if (!clients) {
+    clients = {
+      crossUser: new CrossUserUsage({ directory: key }),
+      requests: new QuotaRequests(join(key, "request-cooldowns.json"), boundedFetch, Date.now,
+        join(home, "claude-quota-resume", "request-cooldowns.json")),
+    };
+    queryClients.set(key, clients);
+  }
+  return clients;
+}
+
 export interface ContinuousUsageOptions {
   /** Paseo home (config.json, agents, projects). Default: PASEO_HOME or ~/.paseo. */
   home?: string;
-  /** State directory (usage-history.json, cross-user-*.json, renewal/). Default: the old plugin's directory. */
+  /** State directory (usage-history.json, cross-user-*.json, renewal/). Default: github-subscriptions/quota. */
   directory?: string;
   /** Start the background login renewal. Default true. */
   renewal?: boolean;
@@ -35,11 +51,10 @@ export class ContinuousUsage {
   private readonly renewalEnabled: boolean;
   constructor(options: ContinuousUsageOptions = {}) {
     this.home = options.home ?? paseoHome(process.env);
-    const directory = options.directory ?? join(this.home, "claude-quota-resume");
+    const directory = options.directory ?? join(this.home, "github-subscriptions", "quota");
     this.renewalEnabled = options.renewal ?? true;
     this.activeSessions = new ActiveSessions(this.home);
-    this.crossUser = new CrossUserUsage({ directory });
-    this.requests = new QuotaRequests(join(directory, "request-cooldowns.json"), boundedFetch);
+    ({ crossUser: this.crossUser, requests: this.requests } = sharedQueries(directory, this.home));
     this.history = new UsageContinuity(join(directory, "usage-history.json"));
     this.renewal = new RenewalService({
       targets: () => this.targets(),
@@ -137,6 +152,12 @@ export class ContinuousUsage {
     if (!env) return { status: "error", error: "正在重新确认账号，请稍后刷新额度" };
     const before = await this.read(input, env);
     if (!before.state) return { status: "error", error: "未找到登录凭据，请在对应账号的 Claude Code 终端登录" };
+    const fallback = env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir();
+    const identity = before.state.identity?.key ?? fallback;
+    const requestProblem = (): UsageReport | null => {
+      const problem = this.requests.problem(identity, fallback);
+      return problem ? { status: "error", error: quotaRequestMessage(problem) } : null;
+    };
     // Expired first-time logins without metadata can still show the upstream sign-in remedy.
     if (!this.history.matches(input, input.accountKey, before.state)) {
       const sameLogin = before.state.identity?.key === input.accountKey || input.accountKey === digest(JSON.stringify(input.route));
@@ -146,21 +167,26 @@ export class ContinuousUsage {
       // 令牌未过期但已被吊销时，账号发现读不到个人资料，身份无法确认。实际查询一次：
       // 只采用“被拒绝/过期”这类不含额度数据的结果，不会把额度算到错误账号上。
       if (sameLogin) {
-        const probe = await fetchUsage(input, this.requests.forAccount(before.state.identity?.key ?? env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir(), env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir()), {
+        // 资料接口的临时故障不能靠再查额度确认身份，也不能误报为凭据变化。
+        const problem = requestProblem();
+        if (problem) return this.history.restoreMessage(input.accountKey, problem);
+        const probe = await fetchUsage(input, this.requests.forAccount(identity, fallback), {
           env, readKeychainCredentials: async () => before.record ? { claudeAiOauth: { ...before.record.oauth, expiresAt: before.record.expires } } : null,
         }).catch(() => null);
         if (probe?.status === "unavailable") return this.history.restoreMessage(input.accountKey, probe);
+        const probeProblem = requestProblem();
+        if (probeProblem) return this.history.restoreMessage(input.accountKey, probeProblem);
       }
       return { status: "error", error: "登录凭据已变化，正在重新确认账号；请刷新额度，旧会话请重新打开" };
     }
     let report: UsageReport;
     try {
-      report = await fetchUsage(input, this.requests.forAccount(before.state.identity?.key ?? env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir(), env.CLAUDE_CONFIG_DIR ?? env.HOME ?? homedir()), {
+      report = await fetchUsage(input, this.requests.forAccount(identity, fallback), {
         env, readKeychainCredentials: async () => before.record ? { claudeAiOauth: { ...before.record.oauth, expiresAt: before.record.expires } } : null,
       });
     } catch (error) {
       const limited = error instanceof Error && error.message.startsWith("Rate limited by Claude.");
-      report = { status: "error", error: limited ? "额度接口暂时限流，将按服务要求等待后自动重试" : "额度查询暂时失败，后台会自动重试" };
+      report = requestProblem() ?? { status: "error", error: limited ? "额度接口暂时限流，将按服务要求等待后自动重试" : "额度查询暂时失败，后台会自动重试" };
     }
     const after = await this.read(input, env);
     if (!after.state || before.state.fingerprint !== after.state.fingerprint || before.state.identity?.key !== after.state.identity?.key) {

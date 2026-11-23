@@ -71,3 +71,23 @@ test("identity file parsing tolerates missing or malformed state", () => {
   assert.deepEqual(readIdentity(path), { key: original.key, label: original.label });
  } finally { f.close(); }
 });
+test("多个查询实例交替保存时保留其他账号和较新的历史，历史不能确认登录身份", () => {
+ const f = fixture(); try {
+  const first = f.create(); const second = f.create();
+  const otherInput: UsageInput = { route: { store: "claude", path: "/other/.credentials.json" } };
+  const other = { ...original, key: "other.org", input: otherInput };
+  const otherCredential = { ...credential, identity: { key: other.key } };
+  first.observe(original, credential, credential); first.record(input, credential, credential, report);
+  f.advance(1000);
+  second.observe(other, otherCredential, otherCredential); second.record(otherInput, otherCredential, otherCredential, report);
+  assert.equal(f.create().cached(original.key)?.report.windows[0].remainingPct, 20);
+  second.observe(original, credential, credential);
+  second.record(input, credential, credential, { ...report, windows: [{ ...report.windows[0], remainingPct: 80 }] });
+  f.advance(1000);
+  first.observe(other, otherCredential, otherCredential); first.record(otherInput, otherCredential, otherCredential, report);
+  const reloaded = f.create();
+  assert.equal(reloaded.cached(original.key)?.report.windows[0].remainingPct, 80);
+  assert.equal(reloaded.cached(other.key)?.report.windows[0].remainingPct, 20);
+  assert.equal(reloaded.matches(input, original.key, credential), false);
+ } finally { f.close(); }
+});

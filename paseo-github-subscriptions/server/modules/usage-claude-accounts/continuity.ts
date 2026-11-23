@@ -41,13 +41,21 @@ export class UsageContinuity {
   private now: () => number;
   constructor(path: string, now = Date.now) {
     this.path = path; this.now = now;
+    this.load();
+  }
+  private load() {
     try {
-      this.history = new Map(Object.entries(historySchema.parse(JSON.parse(readFileSync(path, "utf8"))).entries));
+      const saved = historySchema.parse(JSON.parse(readFileSync(this.path, "utf8"))).entries;
+      for (const [key, value] of Object.entries(saved)) {
+        if (value.at > (this.history.get(key)?.at ?? -Infinity)) this.history.set(key, value);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("额度历史文件无法读取，将重新查询");
     }
   }
   private save() {
+    // 面板、容量计算和会话检查各自确认身份，但不能覆盖其他实例保存的历史。
+    this.load();
     try {
       for (const [key, value] of this.history) if (this.now() - value.at > HISTORY_MS || value.at > this.now()) this.history.delete(key);
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
