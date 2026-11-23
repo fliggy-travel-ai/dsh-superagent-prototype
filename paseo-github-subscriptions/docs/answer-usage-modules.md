@@ -52,6 +52,7 @@
 - **免提醒**（`quietChildren.enabled`，默认开）：子会话结束、出错或提问后清除“待查看”；等待工具授权的子会话保留提醒。清除用未公开接口 `clearAgentAttention` 和 `clearWorkspaceAttention`，Paseo 升级后要核对。Paseo 先发通知、插件后清除，所以系统弹窗仍会出现一下。
 - **提问提醒**：子会话的提问提醒**只有在提问有人接手时才清除**——事件转发已打开且找到转发目标，或旧的转发插件仍在运行；否则保留。
 - **事件转发**（`quietChildren.forwardEvents`，默认**关**）：子会话的提问，以及需要用户接续的事件（合并 master、复盘），发给所属主会话；主会话有待答问题时先等。普通的完成、出错、命令失败只记录，不叫醒主会话。与旧插件一致，还会订阅每个子会话的时间线检查 shell 命令失败（带退出码的终态或失败；`gh pr checks` 退出码 8 不算）：普通失败只记录，命令文字含合并 master 或复盘时才转给主会话。每个子会话一个订阅，随事件转发开关一起启停。
+- **Antigravity 本轮外续跑**（#2258，随事件转发启停）：Antigravity 的后台命令（`IsDaemon`）不保持本轮，本轮先结束；命令结束后它会自己继续推理、调用工具和回复，但这些时间线事件没有 `turnId`，会话一直是空闲，不触发回合事件，Paseo MCP 也不发完成通知。转发模块在子会话时间线订阅上识别这类事件（只对 `antigravity` 及 `antigravity-*` 提供方），最后一条事件之后静默 60 秒，向主会话发一次 `background_resumed` 事件（`data.message` 为“子会话后台续跑已结束”，附条目数、起止时间和最后一条助手消息末尾 600 字）。仍有运行中的本轮外工具时继续等待，最多 10 分钟后照常发送并注明运行中工具数（常驻服务不会结束）。新回合开始时放弃跟踪；订阅回放的 10 分钟前的事件不算。不给子会话发续接。巡检脚本可用 `scripts/out-of-turn.ts <会话 ID> [--server <serverId>]` 只读判定同一状态。
 - **旧插件保护**：旧插件 `event-notifications` 仍启用时，事件转发不能打开（页面显示原因）。免提醒可以和旧插件 `subsession-quiet` 同时运行，清除操作是幂等的。
 - **跨主机**：父会话在另一台主机时，经已登记的主机通道转发，并调用对方的 RPC `quiet.resolve-main` 确认现任主会话；两台都要安装本版插件。
 - 状态目录 `quiet-children/`：`settings.json`、`handled.json`（最近处理记录）、`forward-state.json`、`forward-events.jsonl`。旧 `subsession-quiet` 没有状态，不需要迁移。

@@ -76,6 +76,8 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 三个模块默认关闭。行为、配置和迁移见 `docs/answer-usage-modules.md`。主会话是置顶工作区中的会话，但与父会话同在一个工作区的子会话除外（Paseo 0.17 起子会话默认建在调用方工作区；父会话已归档时按接班处理，仍算主会话）。置顶工作区里的子会话只清除它自己的待查看，不按工作区清除。停滞会话、子会话免提醒、升级通知和事件转发使用同一判定。
 
+打开事件转发后，Antigravity 子会话在本轮之外自己续跑（后台命令结束后继续工作，Paseo 显示为空闲且不发完成通知）时，静默 60 秒后告诉主会话“子会话后台续跑已结束”，附最后一条助手消息。不给子会话发续接。
+
 ### 复制自 Paseo 自带插件的文件
 
 `server/vendor/paseo-0.15.0/claude-usage-source/` 原样复制 Paseo 0.15.0 自带插件 `claude-usage-source` 的 `server/usage.ts`、`server/stores.ts`、`shared/input.ts` 和 `icon.svg`，保持相对路径，没有修改。Paseo 更新后运行 `npm run vendor:check` 比较，有变化时重新复制。自有逻辑放在 `server/modules/usage-claude-accounts/`。
