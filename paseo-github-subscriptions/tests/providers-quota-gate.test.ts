@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { loadMachineConfig } from '../server/core/machine-config.ts';
+import type { SharedDaemon } from '../server/core/daemon.ts';
+import { resolveInstance } from '../shared/instances.ts';
 import { quotaGateModule } from '../server/modules/providers-quota-gate/index.ts';
 import { proxyAccount, proxyQuotaUrl, readProxyQuotas } from '../server/modules/providers-quota-gate/proxy.ts';
 import { quotaFromReports } from '../server/modules/providers-quota-gate/reports.ts';
 import { localQuotaReader } from '../server/modules/providers-quota-gate/reports.ts';
 import { quotaProblems, quotaUsable, quotaWarnings } from '../server/modules/providers-quota-gate/rules.ts';
+import { gateExcluded, toggleGateExclusion, quotaGateSnapshot, quotaGateConfigure } from '../shared/quota-gate.ts';
 
 type UsageEntry = Parameters<typeof quotaFromReports>[0][number];
 const window = (remainingPct: number) => ({ id: 'weekly', label: 'Weekly', remainingPct });
@@ -117,10 +120,19 @@ test('创建钩子拒绝耗尽账号，只列本机启用且额度通过的账�
     })) }),
   };
   quotaGateModule.register({
-    server: { addHook: (name: string, handler: typeof hook) => { assert.equal(name, 'agent.create.before'); hook = handler; return () => {}; } },
-    services: { home, daemon: { ready: async () => ({ client }) } },
+    id: 'providers.quotaGate',
+    server: {
+      addHook: (name: string, handler: typeof hook) => { assert.equal(name, 'agent.create.before'); hook = handler; return () => {}; },
+      handle: () => () => {},
+    } as never,
+    instance: resolveInstance('main'),
+    machine: loadMachineConfig(join(home, 'machine.json'), {}),
+    services: { home, daemon: { ready: async () => ({ client }) } } as never,
     config: quotaGateModule.config!.spec.fallback,
-  } as Parameters<typeof quotaGateModule.register>[0]);
+    stateDirectory: home,
+    baseDirectory: home,
+    fail: () => {},
+  });
   assert.ok(hook);
   const request = { config: { cwd: home, provider: 'codex-empty' } };
   await assert.rejects(hook({ request }), /codex-empty.*0%.*本机额度可用账号：codex-spare$/);
@@ -137,7 +149,113 @@ test('创建钩子拒绝耗尽账号，只列本机启用且额度通过的账�
 
 test('机器配置默认阈值、显式覆盖和非法值校验', () => {
   const sections = { quotaGate: quotaGateModule.config!.spec };
-  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1}').section('quotaGate'), { ok: true, value: { minRemainingPct: 10 } });
-  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"minRemainingPct":0}}').section('quotaGate'), { ok: true, value: { minRemainingPct: 0 } });
+  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1}').section('quotaGate'), { ok: true, value: { minRemainingPct: 10, excludeProviders: [] } });
+  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"minRemainingPct":0}}').section('quotaGate'), { ok: true, value: { minRemainingPct: 0, excludeProviders: [] } });
+  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"excludeProviders":["codex","codex-*"]}}').section('quotaGate'), { ok: true, value: { minRemainingPct: 10, excludeProviders: ['codex', 'codex-*'] } });
   assert.equal(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"minRemainingPct":101}}').section('quotaGate').ok, false);
+  assert.equal(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"excludeProviders":[""]}}').section('quotaGate').ok, false);
+});
+
+test('excludeProviders 命中的 Provider 完全跳过额度检查，未命中的仍走门控', async context => {
+  const home = mkdtempSync(join(tmpdir(), 'quota-gate-exclude-'));
+  context.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, 'config.json'), '{}');
+  let hook: ((input: { request: { config: { cwd: string; provider: string } } }) => Promise<unknown>) | undefined;
+  let readyCalls = 0;
+  const ready: SharedDaemon['ready'] = () => { readyCalls++; throw new Error('不应读取额度'); };
+  quotaGateModule.register({
+    id: 'providers.quotaGate',
+    server: {
+      addHook: (name: string, handler: typeof hook) => { assert.equal(name, 'agent.create.before'); hook = handler; return () => {}; },
+      handle: () => () => {},
+    } as never,
+    instance: resolveInstance('main'),
+    machine: loadMachineConfig(join(home, 'machine.json'), {}),
+    services: { home, daemon: { ready } } as never,
+    config: { minRemainingPct: 10, excludeProviders: ['codex*', 'claude-user'] },
+    stateDirectory: home,
+    baseDirectory: home,
+    fail: () => {},
+  });
+  assert.ok(hook);
+  for (const provider of ['codex', 'codex-2', 'claude-user']) {
+    const request = { config: { cwd: home, provider } };
+    assert.equal(await hook({ request }), request);
+  }
+  assert.equal(readyCalls, 0);
+  // 未列出的 Provider 仍进入额度读取（ready 抛错即证明走到了读取路径）。
+  await assert.rejects(hook({ request: { config: { cwd: home, provider: 'grok' } } }), /不应读取额度/);
+});
+
+test('toggleGateExclusion：精确添加、精确移除、通配按本机 Provider 展开，无关模式保持', () => {
+  assert.deepEqual(toggleGateExclusion([], 'codex', true, ['codex', 'grok']), ['codex']);
+  assert.deepEqual(toggleGateExclusion(['codex'], 'codex', true, ['codex']), ['codex']);
+  assert.deepEqual(toggleGateExclusion(['codex', 'grok'], 'codex', false, ['codex', 'grok', 'glm']), ['grok']);
+  assert.deepEqual(toggleGateExclusion(['codex*'], 'codex-2', false, ['codex', 'codex-2', 'codex-3', 'grok']), ['codex', 'codex-3']);
+  assert.deepEqual(toggleGateExclusion(['codex*', 'grok'], 'grok', false, ['codex', 'codex-2', 'grok']), ['codex*']);
+  assert.equal(gateExcluded(['codex', 'codex-*'], 'codex-3'), true);
+});
+
+test('snapshot 列出本机 Provider，configure 写回 machine.json 并让钩子立即生效', async context => {
+  const base = mkdtempSync(join(tmpdir(), 'quota-gate-rpc-'));
+  context.after(() => rmSync(base, { recursive: true, force: true }));
+  const configPath = join(base, 'machine.json');
+  writeFileSync(configPath, JSON.stringify({ version: 1, quotaGate: { excludeProviders: ['grok'] } }));
+  const home = join(base, '.paseo');
+  mkdirSync(home);
+  writeFileSync(join(home, 'config.json'), '{}');
+  const handlers = new Map<string, (input: unknown) => Promise<unknown>>();
+  let hook: ((input: { request: { config: { cwd: string; provider: string } } }) => Promise<unknown>) | undefined;
+  let reportCalls = 0;
+  const client = {
+    listUsageReports: async () => { reportCalls += 1; return { reports: [] }; },
+    getProvidersSnapshot: async () => ({
+      entries: [
+        { provider: 'codex', label: 'Codex', enabled: true, status: 'ok' },
+        { provider: 'grok', enabled: false, status: 'ok' },
+      ],
+    }),
+  };
+  const machine = loadMachineConfig(configPath, { quotaGate: quotaGateModule.config!.spec });
+  const section = machine.section<{ minRemainingPct: number; excludeProviders: string[] }>('quotaGate');
+  assert.equal(section.ok, true);
+  if (!section.ok) return;
+  quotaGateModule.register({
+    id: 'providers.quotaGate',
+    server: {
+      addHook: (name: string, handler: typeof hook) => { assert.equal(name, 'agent.create.before'); hook = handler; return () => {}; },
+      handle: (contract: { name: string }, handler: (input: unknown) => Promise<unknown>) => { handlers.set(contract.name, handler as never); return () => {}; },
+    } as never,
+    instance: resolveInstance('main'),
+    machine,
+    services: { home, daemon: { ready: async () => ({ client }) } } as never,
+    config: section.value,
+    stateDirectory: home,
+    baseDirectory: home,
+    fail: () => {},
+  });
+  assert.ok(hook);
+  assert.deepEqual(await handlers.get(quotaGateSnapshot.name)!({}), {
+    minRemainingPct: 10,
+    excludeProviders: ['grok'],
+    providers: [
+      { id: 'codex', label: 'Codex', enabled: true },
+      { id: 'grok', label: null, enabled: false },
+    ],
+  });
+  // glm 未被排除：进入额度读取路径（listUsageReports 被调用），额度未知时放行。
+  const warn = context.mock.method(console, 'warn', () => {});
+  const gated = { config: { cwd: home, provider: 'glm' } };
+  assert.equal(await hook({ request: gated }), gated);
+  assert.equal(reportCalls, 1);
+  warn.mock.restore();
+  // 保存后 codex* 立即生效，不需要重载插件，也不再读本机额度。
+  await handlers.get(quotaGateConfigure.name)!({ excludeProviders: ['grok', 'codex*'] });
+  const saved = JSON.parse(readFileSync(configPath, 'utf8'));
+  assert.deepEqual(saved.quotaGate, { minRemainingPct: 10, excludeProviders: ['grok', 'codex*'] });
+  for (const provider of ['codex', 'codex-2']) {
+    const request = { config: { cwd: home, provider } };
+    assert.equal(await hook({ request }), request);
+  }
+  assert.equal(reportCalls, 1);
 });

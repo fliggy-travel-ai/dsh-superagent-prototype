@@ -30,6 +30,11 @@ import {
   type ProviderQuotasConfigureInput,
   type ProviderQuotasSnapshot,
 } from '../shared/provider-quotas.ts';
+import {
+  quotaGateSnapshot,
+  quotaGateConfigure,
+  type QuotaGateSnapshot,
+} from '../shared/quota-gate.ts';
 import { syncHideBuiltinUsage } from './paseo-internal.ts';
 import {
   escalationSnapshot,
@@ -71,6 +76,9 @@ export interface ControlState {
   claudeAccountsError: string | null;
   providerQuotas: ProviderQuotasSnapshot | null;
   providerQuotasStatus: OptionalFeatureStatus;
+  quotaGate: QuotaGateSnapshot | null;
+  quotaGateStatus: OptionalFeatureStatus;
+  quotaGateError: string | null;
   escalation: EscalationSnapshot | null;
   escalationStatus: OptionalFeatureStatus;
   escalationError: string | null;
@@ -119,6 +127,9 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
     claudeAccountsError: null,
     providerQuotas: null,
     providerQuotasStatus: 'loading',
+    quotaGate: null,
+    quotaGateStatus: 'loading',
+    quotaGateError: null,
     escalation: null,
     escalationStatus: 'loading',
     escalationError: null,
@@ -272,6 +283,15 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
           emit({ providerQuotas: { ...value, hideBuiltinApplied: applied }, providerQuotasStatus: 'ready' });
         }).catch(error => {
           emit({ providerQuotasStatus: isRpcDisabledError(error, 'usage.providerQuotas', mods) ? 'disabled' : 'error' });
+        }),
+        client.rpc(quotaGateSnapshot, {}).then(value => {
+          emit({ quotaGate: value, quotaGateStatus: 'ready', quotaGateError: null });
+        }).catch(error => {
+          if (isRpcDisabledError(error, 'providers.quotaGate', mods)) {
+            emit({ quotaGateStatus: 'disabled', quotaGateError: null });
+          } else {
+            emit({ quotaGateStatus: 'error', quotaGateError: errorMessage(error) });
+          }
         }),
         client.rpc(escalationSnapshot, {}).then(value => {
           emit({ escalation: value, escalationStatus: 'ready', escalationError: null });
@@ -427,6 +447,11 @@ export function createControlStore(client: Pick<PluginClientContext, 'rpc'>, lis
       const result = await client.rpc(providerQuotasConfigure, input);
       const { applied } = syncHideBuiltinUsage(result.hideBuiltin);
       emit({ providerQuotas: { ...result, hideBuiltinApplied: applied }, providerQuotasStatus: 'ready' });
+      return result;
+    }),
+    configureQuotaGate: (input: { excludeProviders: string[] }) => write(async () => {
+      const result = await client.rpc(quotaGateConfigure, input);
+      emit({ quotaGate: result, quotaGateStatus: 'ready', quotaGateError: null });
       return result;
     }),
     configureEscalation: (input: {

@@ -1,9 +1,14 @@
 import { z } from 'zod';
+import { patchMachineConfig } from '../../core/machine-writer.ts';
+import { quotaGateConfigure, quotaGateSnapshot, gateExcluded, type QuotaGateSnapshot } from '../../../shared/quota-gate.ts';
 import { isMainInstance, type Module } from '../types.ts';
 import { localQuotaReader } from './reports.ts';
 import { quotaProblems, quotaWarnings } from './rules.ts';
 
-const quotaGateSchema = z.strictObject({ minRemainingPct: z.number().min(0).max(100).default(10) });
+const quotaGateSchema = z.strictObject({
+  minRemainingPct: z.number().min(0).max(100).default(10),
+  excludeProviders: z.array(z.string().min(1)).default([]),
+});
 type QuotaGateConfig = z.infer<typeof quotaGateSchema>;
 
 function within<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<Value> {
@@ -21,11 +26,34 @@ export const quotaGateModule: Module<QuotaGateConfig> = {
   defaultEnabled: true,
   appliesTo: isMainInstance,
   config: { section: 'quotaGate', spec: { schema: quotaGateSchema, fallback: quotaGateSchema.parse({}) } },
-  register({ server, services, config }) {
+  register({ server, services, config, machine }) {
+    // 页面保存例外后立即更新闭包并写回 machine.json，不需要重载插件。
+    let current = config;
+    const localProviders = async () => {
+      const { client } = await services.daemon.ready();
+      const { entries, compactSnapshot } = await client.getProvidersSnapshot();
+      const byId = new Map((compactSnapshot?.entries ?? entries).map(entry => [entry.provider, entry]));
+      return [...byId.values()]
+        .map(entry => ({ id: entry.provider, label: entry.label ?? null, enabled: entry.enabled ?? true }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    };
+    const snapshot = async (): Promise<QuotaGateSnapshot> => ({
+      minRemainingPct: current.minRemainingPct,
+      excludeProviders: [...current.excludeProviders],
+      providers: await localProviders().catch(() => null),
+    });
+    server.handle(quotaGateSnapshot, snapshot);
+    server.handle(quotaGateConfigure, async input => {
+      const next = { minRemainingPct: current.minRemainingPct, excludeProviders: [...input.excludeProviders] };
+      await patchMachineConfig(machine.path, raw => ({ ...raw, quotaGate: next }));
+      current = next;
+      return snapshot();
+    });
     return server.addHook('agent.create.before', async ({ request }) => {
       const { provider } = request.config;
+      if (gateExcluded(current.excludeProviders, provider)) return request;
       const deadline = AbortSignal.timeout(15_000);
-      const floor = config.minRemainingPct;
+      const floor = current.minRemainingPct;
       const checked = await within(services.daemon.ready().then(async ({ client }) => {
         if (deadline.aborted) return;
         const reader = localQuotaReader(client, services.home, deadline);
