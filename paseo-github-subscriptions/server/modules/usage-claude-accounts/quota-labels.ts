@@ -75,9 +75,15 @@ export class QuotaLabelService {
 
   private async update() {
     if (!this.enabled) return;
+    const providers = providerEnvs(this.home);
+    if (providers.size === 0) {
+      this.lastQuotas.clear();
+      if (!this.stopped) await this.write(new Map());
+      return;
+    }
     const reports = JSON.parse(await cli(["usage", "ls", "--json"])) as Report[];
     const quotas = new Map<string, Quota | null>();
-    for (const [id, env] of providerEnvs(this.home)) {
+    for (const [id, env] of providers) {
       try {
         const [account] = await this.discover({ kind: "session", provider: "claude", env });
         let quota = account ? accountQuota(reports, account.key, Date.now(), this.sources) : null;

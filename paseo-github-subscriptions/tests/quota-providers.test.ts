@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { accountLabels, bundledClaudeUsageInstalled, configDirProviders, discoverAccounts, isClaudeProvider } from "../server/modules/usage-claude-accounts/providers.ts";
+import { accountMap, providerEnvs } from "../server/modules/usage-claude-accounts/account-map.ts";
 
 const RELAY = "relay@" + "private" + "relay.appleid.example";
 
@@ -33,6 +34,33 @@ test("只选择继承 claude、设置了配置目录且未停用的 Provider", (
 test("配置文件不存在时返回空列表", () => {
   assert.equal(configDirProviders({ PASEO_HOME: "/nonexistent-paseo-home" }).size, 0);
   assert.equal(isClaudeProvider("claude", { PASEO_HOME: "/nonexistent-paseo-home" }), true);
+});
+
+test("默认 Claude 停用时，后台只发现仍启用的独立账号", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "claude-disabled-default-"));
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ agents: { providers: {
+    claude: { enabled: false },
+    "claude-2": { extends: "claude", env: { CLAUDE_CONFIG_DIR: "/u/.claude-2" } },
+    "claude-off": { extends: "claude", enabled: false, env: { CLAUDE_CONFIG_DIR: "/u/.claude-off" } },
+  } } }));
+  assert.deepEqual([...providerEnvs(dir).keys()], ["claude-2"]);
+  const directories: string[] = [];
+  await accountMap(dir, async scope => {
+    assert.equal(scope.kind, "session");
+    if (scope.kind === "session") directories.push(scope.env.CLAUDE_CONFIG_DIR);
+    return [];
+  });
+  assert.deepEqual(directories, ["/u/.claude-2"]);
+  const seen: string[] = [];
+  await discoverAccounts({ kind: "global" }, async scope => {
+    assert.equal(scope.kind, "session");
+    if (scope.kind === "session") {
+      seen.push(`${scope.provider}:${scope.env.CLAUDE_CONFIG_DIR ?? ""}`);
+      if (scope.provider !== "claude") assert.ok(scope.model?.startsWith("anthropic/"));
+    }
+    return [];
+  }, { includeDefault: true, env: { PASEO_HOME: dir }, providers: () => configDirProviders({ PASEO_HOME: dir }) });
+  assert.deepEqual(seen, ["pi:", "omp:", "claude:/u/.claude-2"]);
 });
 
 const providers = () => new Map([
@@ -102,6 +130,7 @@ test("没有自带额度插件时，同时报告默认账号，并使用显示�
     providers: () => new Map([["claude-2", { CLAUDE_CONFIG_DIR: "/u/.claude-2" }]]),
     labels: () => ({ [RELAY]: "real@example.com" }),
     includeDefault: true,
+    env: { PASEO_HOME: home },
   });
   assert.deepEqual(seen, ["default", "/u/.claude-2"]);
   assert.deepEqual(accounts.map(a => a.label), ["real@example.com", "b@example.com"]);
