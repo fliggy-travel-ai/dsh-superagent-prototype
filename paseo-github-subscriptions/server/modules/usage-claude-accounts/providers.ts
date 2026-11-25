@@ -29,6 +29,11 @@ function readProviders(env: NodeJS.ProcessEnv): Record<string, ProviderConfig> {
   }
 }
 
+/** Explicitly disabled default accounts must not trigger background credential reads. */
+export function defaultClaudeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return readProviders(env).claude?.enabled !== false;
+}
+
 /** The standard claude provider, or a config.json provider that extends it. */
 export function isClaudeProvider(id: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
   if (!id) return false;
@@ -100,7 +105,17 @@ export async function discoverAccounts(
   const labels: Record<string, string> = (deps.labels ?? (() => ({})))();
   const baseEnv = scope.kind === "session" ? scope.env : stringEnv(deps.env ?? process.env);
   const selected = scope.kind === "global" ? [...providers.values()] : [];
-  const scopes: UsageScope[] = scope.kind === "global" && deps.includeDefault ? [scope] : [];
+  const scopes: UsageScope[] = [];
+  if (scope.kind === "global" && deps.includeDefault) {
+    if (defaultClaudeEnabled(deps.env)) scopes.push(scope);
+    else {
+      // The bundled global discovery always reads Claude's keychain. Select the
+      // other Anthropic stores through their session routes instead.
+      for (const provider of ["pi", "omp"]) {
+        scopes.push({ kind: "session", provider, model: "anthropic/claude", env: baseEnv });
+      }
+    }
+  }
   if (scope.kind === "session") {
     const providerEnv = providers.get(scope.provider);
     if (scope.provider === "claude" || providerEnv) {
