@@ -70,7 +70,7 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 ## 浏览器环境剩余额度
 
-已配对的浏览器环境在 Paseo 面板额度区域展示 `claude.ai` 的 5 小时窗口和每周窗口剩余额度及重置时间。条目名称优先由插件服务端通过 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，可通过配置或环境变量覆盖）查询当前浏览器环境在 AdsPower 中的名称：可在插件“额度设置”中填写 AdsPower API key（只保存在本机权限 0600 的插件状态文件中，不写日志，不返回给前端，前端仅显示“已配置/已配置（来自环境变量）/未配置”，支持清除与重新填写，并保留环境变量 `PASEO_ADSPOWER_API_KEY` / `ADSPOWER_API_KEY` 作为后备来源）；要准确显示环境名称需在扩展选项页填写一次环境序号，单环境自动识别只在本机单个活跃环境且单个扩展上报时生效；读不到名称时按顺序回退显示环境序号、`user_id` 或扩展上报的环境名称，查询失败时在额度详情中显示具体原因（连接失败、需要在额度设置填写 AdsPower API key、API key 无效，请在额度设置重新填写、被限流、未找到环境）。扩展在每个已配对浏览器环境中保持一个后台 `https://claude.ai/settings/usage`（跳转到 `/new#settings/usage`）用量页面标签页，每 10 分钟刷新该标签页并在页面加载完成后只读页面显示的额度比例与重置文字，每分钟通过本机 `/usage` 路由上报当前状态。用户把该用量标签页切走、改地址或关闭时，扩展不强行改回，下一轮读取时另开一个后台用量页面标签页。浏览器未打开、通道关闭、未登录或读取失败时，面板保留并展示上一次同步的额度、环境名称与相对同步时间，超过三天未连接的环境自动移除。扩展不构造 `claude.ai` 请求，不点击任何页面，不刷新业务会话标签页，不切换账号，也不修改网页设置。
+额度区域按启用的云端 Provider 展示对应的 `claude.ai` 5 小时窗口和每周窗口剩余额度及重置时间：有几个启用的云端 Provider，就有几张额度卡。浏览器扩展仍负责读取网页上的额度。条目名称优先由插件服务端通过 AdsPower 官方本地 API（默认 `http://127.0.0.1:50325`，可通过配置或环境变量覆盖）查询当前浏览器环境在 AdsPower 中的名称：可在插件“额度设置”中填写 AdsPower API key（只保存在本机权限 0600 的插件状态文件中，不写日志，不返回给前端，前端仅显示“已配置/已配置（来自环境变量）/未配置”，支持清除与重新填写，并保留环境变量 `PASEO_ADSPOWER_API_KEY` / `ADSPOWER_API_KEY` 作为后备来源）；要准确显示环境名称需在扩展选项页填写一次环境序号，单环境自动识别只在本机单个活跃环境且单个扩展上报时生效；读不到名称时按顺序回退显示环境序号、`user_id` 或扩展上报的环境名称，查询失败时在额度详情中显示具体原因（连接失败、需要在额度设置填写 AdsPower API key、API key 无效，请在额度设置重新填写、被限流、未找到环境）。扩展在每个已配对浏览器环境中保持一个后台 `https://claude.ai/settings/usage`（跳转到 `/new#settings/usage`）用量页面标签页，每 10 分钟刷新该标签页并在页面加载完成后只读页面显示的额度比例与重置文字，每分钟通过本机 `/usage` 路由上报当前状态。用户把该用量标签页切走、改地址或关闭时，扩展不强行改回，下一轮读取时另开一个后台用量页面标签页。浏览器未打开、通道关闭、未登录或读取失败时，面板保留并展示上一次同步的额度、环境名称与相对同步时间，超过三天未连接的环境自动移除。扩展不构造 `claude.ai` 请求，不点击任何页面，不刷新业务会话标签页，不切换账号，也不修改网页设置。
 
 ## Claude 账号额度、升级通知和子会话免提醒（#1737 第二期）
 
@@ -111,12 +111,10 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 - 复制文件来源与版本：`server/modules/usage-provider-quotas/server/{usage,usage-display,token-switch,token-hub-quota,token-hub-browser}.ts` 与 `icons/{antigravity,codex,cursor,grok,qoder,zai}.svg` 复制自本机插件 `provider-quotas-usage-source` v0.1.0，之后做过以下修改（不再是原样复制）：删除了内置的 Antigravity OAuth 客户端密钥，改为读环境变量或 `agy-oauth.json`；网络与代理代码移到 `net.ts`；凭据写回改为原子写入；Codex 不再刷新令牌；子进程统一跟踪并在模块停止时结束。模块开关、旧插件冲突保护、内置来源隐藏及 RPC 位于单独文件 `index.ts` 和 `hide-builtin.ts`。
 - **`hideBuiltin` 目前只保存配置，还没有生效**：过滤内置额度来源的显示需要在客户端实现，尚未做；快照的 `hideBuiltinApplied` 为 `false`。
-- 各额度来源读取的本机文件与环境变量（不复制凭据）。**令牌刷新会写回原文件**：Antigravity 和 Cursor 刷新访问令牌后，以原子写入（临时文件再改名，权限 0600）写回原凭据文件，Cursor 同时保存新的刷新令牌；Codex 令牌过期时只提示，插件不刷新、不写回（刷新会让 Codex CLI 登出）：
+- 各额度来源读取的本机文件与环境变量（不复制凭据）。插件不再实现 Cursor、Grok 额度，这两张卡用官方内置来源。Codex 令牌过期时只提示，插件不刷新、不写回（刷新会让 Codex CLI 登出）：
   - 公共配置与代理：读取环境变量 `PASEO_HOME`（默认 `~/.paseo`）、`~/.paseo/config.json` 的 `plugins` 与 `agents.providers`；网络请求读取 Provider `env.HTTPS_PROXY` / `env.HTTP_PROXY`、进程环境变量 `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` / `http_proxy`，以及 macOS 系统代理（`scutil --proxy`，先读 HTTPS 再读 HTTP，遵守例外列表；调用带 2 秒超时，结果缓存 60 秒）。账号显式配置的代理连接失败时报错，不改直连；带刷新令牌的请求即使走系统代理，失败也不直连。
   - `antigravity-multi`（Antigravity 多账号额度）：Paseo 0.17 起内置插件 `antigravity-provider` 自带额度来源 `antigravity`，同名会让整个插件加载失败，所以本来源改名。`machine.json` 里的旧写法 `antigravity` 按新 ID 处理，不用改配置。读取会话或 Provider `env.HOME`（默认系统主目录 `~`）下的 `<HOME>/.gemini/antigravity-cli/antigravity-oauth-token`；OAuth 刷新读取环境变量 `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` 或 `~/.paseo/github-subscriptions/agy-oauth.json`。
   - `codex-multi`（Codex 多账号额度）：读取会话或 Provider `env.CODEX_HOME`（默认 `~/.codex`）下的 `<CODEX_HOME>/auth.json`。
-  - `cursor-cli`（Cursor 额度）：读取会话或 Provider `env.HOME`（默认 `~`）下的 `<HOME>/.cursor/auth.json` 或 `<HOME>/.config/cursor/auth.json`。
-  - `grok-multi`（Grok 多账号额度）：读取会话或 Provider `env.GROK_HOME`（默认 `~/.grok`）下的 `<GROK_HOME>/auth.json`，令牌失效时调用 Provider 配置的 `grok` 命令刷新。
   - `glm`（GLM Coding Plan 额度）：读取会话或 Provider `env.XDG_CONFIG_HOME`、进程环境变量 `XDG_CONFIG_HOME`（默认 `~/.config`）下的 `<XDG_CONFIG_HOME>/glm-acp-agent/credentials.json` 中的 `z_ai_api_key`。
   - `qoder`（Qoder 额度）：调用 Provider `command[0]` 或 `~/.local/bin/qodercli`（以 `--sdk` 协议运行，传入 Provider `env.HOME` 或系统主目录）。
   - `opencode-token-switch`（OpenCode TokenHub 额度）：只读打开 `<HOME>/.token-switch/token-switch.db`（SQLite）、读取 `env.OPENCODE_CONFIG` 或 `<XDG_CONFIG_HOME|~/.config>/opencode/opencode.json`、读取 `~/.paseo/token-hub-browser.json` 并通过 `~/.local/bin/ego-browser` 查询同账号共享额度，脱敏后的观测时间缓存在 `~/.paseo/cache/provider-quotas-usage-source/`。

@@ -229,13 +229,13 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
 
   const updated = await handlers.get('provider-quotas.configure')!({
     enabled: true,
-    enabledSources: ['antigravity', 'codex-multi', 'grok-multi'],
+    enabledSources: ['antigravity', 'codex-multi', 'qoder'],
     hideBuiltin: ['codex', 'grok'],
   });
 
   assert.deepEqual(updated, {
     enabled: true,
-    enabledSources: ['antigravity-multi', 'codex-multi', 'grok-multi'],
+    enabledSources: ['antigravity-multi', 'codex-multi', 'qoder'],
     hideBuiltin: ['codex', 'grok'],
     hideBuiltinApplied: false,
     skippedConflicts: [],
@@ -246,7 +246,7 @@ test('provider-quotas.* RPC：模块未开启时也能查看快照并修改配�
   const savedMachine = JSON.parse(readFileSync(machinePath, 'utf8'));
   assert.equal(savedMachine.modules['usage.providerQuotas'], true);
   assert.deepEqual(savedMachine.providerQuotas, {
-    sources: ['antigravity-multi', 'codex-multi', 'grok-multi'],
+    sources: ['antigravity-multi', 'codex-multi', 'qoder'],
     hideBuiltin: ['codex', 'grok'],
   });
 });

@@ -37,7 +37,7 @@ export interface ModuleDefinition<Config, Services> {
   readonly id: string;
   readonly label: string;
   readonly defaultEnabled: boolean;
-  /** 始终开启的内置功能（如云端会话），即使旧配置写 false 也按开启处理。 */
+  /** 始终开启的内置功能（如心跳），即使配置写 false 也按开启处理。 */
   readonly alwaysEnabled?: boolean;
   appliesTo(instance: ResolvedInstance): boolean;
   readonly config?: { readonly section: string; readonly spec: SectionSpec<Config> };

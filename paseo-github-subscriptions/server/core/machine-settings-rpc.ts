@@ -38,6 +38,7 @@ const MODULE_DEFS = [
   { id: 'usage.claudeAccounts', label: 'Claude 账号与额度', defaultEnabled: true },
   { id: 'usage.providerQuotas', label: '其他 Provider 额度', defaultEnabled: false },
   { id: 'providers.antigravity', label: 'Antigravity 多账号', defaultEnabled: false },
+  { id: 'providers.cloudSession', label: '云端会话', defaultEnabled: true },
   { id: 'github', label: 'GitHub 订阅', defaultEnabled: true },
   { id: 'todo.stalled', label: '停滞会话检查', defaultEnabled: true },
 ] as const;

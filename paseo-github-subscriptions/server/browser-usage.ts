@@ -14,7 +14,7 @@ import {
   type BrowserUsageWindow,
 } from '../shared/browser-usage.ts';
 import type { BrowserBridge } from './browser-bridge.ts';
-import { adsPowerLoginMethod, browserAccountKey, type BrowserLoginMethod } from './browser-usage-accounts.ts';
+import { adsPowerLoginMethod, assignCloudUsageRecords, browserAccountKey, type BrowserLoginMethod, type CloudProviderRef } from './browser-usage-accounts.ts';
 
 // 扩展每分钟上报一次；MV3 后台休眠会让闹钟推迟几分钟，所以 5 分钟没有上报才判为离线。
 const OFFLINE_AFTER_MS = 5 * 60_000;
@@ -28,7 +28,11 @@ const DEFAULT_ADSPOWER_TIMEOUT_MS = 3000;
 const DEFAULT_ADSPOWER_MIN_INTERVAL_MS = 1100;
 
 const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
-export const BrowserUsageInputSchema = z.strictObject({ instanceId: id });
+const providerId = z.string().min(1).max(128).regex(/^[A-Za-z0-9._-]+$/);
+export const BrowserUsageInputSchema = z.union([
+  z.strictObject({ instanceId: id }),
+  z.strictObject({ providerId, instanceId: id.optional() }),
+]);
 
 export const BrowserUsageLabelSourceSchema = z.enum(['adspower_name', 'serial_number', 'user_id', 'instance_name']);
 export type BrowserUsageLabelSource = z.infer<typeof BrowserUsageLabelSourceSchema>;
@@ -80,6 +84,8 @@ export interface BrowserUsageStoreOptions {
   fetchFn?: typeof fetch;
   sleepFn?: (ms: number) => Promise<void>;
   registeredClaudeAccounts?: () => ReadonlySet<string>;
+  /** 传入后，额度发现只为这些云端 Provider 各返回一张卡。 */
+  cloudProviders?: () => readonly CloudProviderRef[];
 }
 
 interface AdsPowerUserEntry {
@@ -831,6 +837,15 @@ export class BrowserUsageStore {
     await this.tail;
   }
 
+  /** 云端 Provider 对应的浏览器额度。Provider 不在当前启用列表里时返回 `closed`。 */
+  cloudUsageRecord(providerId: string, now = this.nowFn()): BrowserUsageRecord | null | 'closed' {
+    this.prune(now);
+    const providers = this.options.cloudProviders?.() ?? [];
+    if (!providers.some(provider => provider.id === providerId)) return 'closed';
+    const found = assignCloudUsageRecords(providers, [...this.records.values()]).get(providerId);
+    return found ? structuredClone(found) : null;
+  }
+
   async get(instanceId: string, now = this.nowFn()): Promise<BrowserUsageRecord | null> {
     if (this.allInflightPromises.size > 0) {
       await Promise.race([
@@ -853,6 +868,22 @@ export class BrowserUsageStore {
     }
     await this.tail;
     this.prune(now);
+    const providers = this.options.cloudProviders?.();
+    if (providers) {
+      const records = [...this.records.values()];
+      const assigned = assignCloudUsageRecords(providers, records);
+      const counts = new Map<string, number>();
+      for (const provider of providers) counts.set(provider.label, (counts.get(provider.label) ?? 0) + 1);
+      return providers.map(provider => {
+        const record = assigned.get(provider.id);
+        const duplicate = (counts.get(provider.label) ?? 0) > 1;
+        return {
+          key: hashAccountKey(provider.id),
+          label: duplicate ? `${provider.label} · ${provider.id}` : provider.label,
+          input: record ? { providerId: provider.id, instanceId: record.instanceId } : { providerId: provider.id },
+        };
+      });
+    }
     const registered = this.options.registeredClaudeAccounts?.();
     const list = [...this.records.values()].filter(item => {
       const account = browserAccountKey(item.adspowerName, item.adspowerLoginMethod);
@@ -998,9 +1029,16 @@ export function registerBrowserUsage(
     },
     async fetch(rawInput) {
       await attach();
-      const { instanceId } = BrowserUsageInputSchema.parse(rawInput);
-      const record = await store.get(instanceId);
-      return toUsageReport(record, nowFn(), channelEnabled, store.awaitingFirstPost(instanceId, nowFn()));
+      const input = BrowserUsageInputSchema.parse(rawInput);
+      if ('providerId' in input) {
+        await store.flushQueries();
+        const record = store.cloudUsageRecord(input.providerId);
+        if (record === 'closed') return unavailable({ kind: 'no_quota', detail: '云端 Provider 已关闭' });
+        if (!record) return unavailable({ kind: 'no_quota', detail: '这个云端 Provider 还没有同步到浏览器额度' });
+        return toUsageReport(record, nowFn(), channelEnabled, store.awaitingFirstPost(record.instanceId, nowFn()));
+      }
+      const record = await store.get(input.instanceId);
+      return toUsageReport(record, nowFn(), channelEnabled, store.awaitingFirstPost(input.instanceId, nowFn()));
     },
   });
   return store;

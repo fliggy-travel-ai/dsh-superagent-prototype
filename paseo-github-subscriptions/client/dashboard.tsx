@@ -5,7 +5,7 @@ import type { Question, QuestionAnswer, QuestionPrompt } from '../shared/presenc
 import type { TodoItem, TodoType } from '../shared/todo.ts';
 import { DrawerOverlay, type DrawerId } from './drawers.tsx';
 import { ago } from './format.ts';
-import { gateExcluded, toggleGateExclusion } from '../shared/quota-gate.ts';
+import { gateExceptionLabel, gateExcluded, toggleGateExclusion } from '../shared/quota-gate.ts';
 import { GitHubSubscriptionsViews } from './screen/index.tsx';
 import { computeHasAlert, computeTodoCount, setLastNonTodoPage } from './sidebar-state.ts';
 import { errorMessage } from './store.ts';
@@ -138,17 +138,24 @@ function ProvidersPage({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
   const gateProviders = quotaGate?.providers ?? null;
+  const enabledGateProviders = gateProviders?.filter(entry => entry.enabled) ?? null;
   const [gateProviderId, setGateProviderId] = useState<string | null>(null);
   useEffect(() => {
-    if (!gateProviders?.length) return;
-    if (!gateProviders.some(entry => entry.id === gateProviderId)) setGateProviderId(gateProviders[0]!.id);
-  }, [gateProviders, gateProviderId]);
-  const gateSelected = gateProviders?.find(entry => entry.id === gateProviderId) ?? null;
+    if (!enabledGateProviders?.length) return;
+    if (!enabledGateProviders.some(entry => entry.id === gateProviderId)) setGateProviderId(enabledGateProviders[0]!.id);
+  }, [enabledGateProviders, gateProviderId]);
+  const gateSelected = enabledGateProviders?.find(entry => entry.id === gateProviderId) ?? null;
   const gateExcludedNow = gateSelected ? gateExcluded(quotaGate?.excludeProviders ?? [], gateSelected.id) : false;
   const adjustQuotaGate = (excluded: boolean) => {
     if (!quotaGate || !gateProviders || !gateSelected) return;
     setActionError(null);
     const excludeProviders = toggleGateExclusion(quotaGate.excludeProviders, gateSelected.id, excluded, gateProviders.map(entry => entry.id));
+    void control.configureQuotaGate({ excludeProviders }).catch(e => setActionError(errorMessage(e)));
+  };
+  const removeGateException = (pattern: string) => {
+    if (!quotaGate) return;
+    setActionError(null);
+    const excludeProviders = quotaGate.excludeProviders.filter(item => item !== pattern);
     void control.configureQuotaGate({ excludeProviders }).catch(e => setActionError(errorMessage(e)));
   };
   const pausedAll = machineSettings?.pausedAll ?? false;
@@ -164,6 +171,7 @@ function ProvidersPage({
   const browserEnvCount =
     browser?.instances?.length ??
     new Set((browser?.sessions ?? []).map(sess => sess.instanceId)).size;
+  const cloudOff = isModuleOff('providers.cloudSession', machineSettings, modules);
   const instanceRunning = providerInstance
     ? providerInstance.instanceState === 'running' || providerInstance.instanceState === 'legacy'
     : false;
@@ -216,7 +224,7 @@ function ProvidersPage({
         </Notice>
       ) : null}
 
-      {providerInstance && !instanceRunning ? (
+      {providerInstance && !instanceRunning && !cloudOff ? (
         <Notice tone="danger">
           <Text style={s.text}>本机 Provider 实例没有运行，云端会话已断开。</Text>
         </Notice>
@@ -257,11 +265,15 @@ function ProvidersPage({
           }
         />
 
-        <FeatureCard
+        <ModuleFeatureCard
           title="云端会话"
-          description="把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。"
+          moduleId="providers.cloudSession"
+          label="启用云端会话"
+          description="把 claude.ai 网页中运行的云端 Claude Code 会话接入 Paseo。删除后不再注册这个 Provider，已有会话保留，可以再打开。"
           kv={
-            cloudSessionError && !resolvedCloud ? (
+            cloudOff ? (
+              <ModuleOffHint />
+            ) : cloudSessionError && !resolvedCloud ? (
               <>
                 <Chip label="读取失败" tone="danger" />
                 <Text style={s.small}>读取失败：{cloudSessionError}</Text>
@@ -280,7 +292,21 @@ function ProvidersPage({
               </>
             )
           }
-          actions={<Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />}
+          actions={
+            <>
+              <Btn small label="编辑" onPress={() => onOpenDrawer('cloud')} />
+              <Btn
+                small
+                danger
+                label="删除"
+                disabled={cloudOff || moduleReloading || !machineSettings || Boolean(machineSettingsError)}
+                onPress={() => {
+                  setActionError(null);
+                  void control.toggleModule('providers.cloudSession', false).catch(e => setActionError(errorMessage(e)));
+                }}
+              />
+            </>
+          }
         />
 
         <ModuleFeatureCard
@@ -288,9 +314,9 @@ function ProvidersPage({
           moduleId="providers.quotaGate"
           label="启用新建会话额度检查"
           belowTitle={
-            isModuleOff('providers.quotaGate', machineSettings, modules) || !gateProviders ? null : (
+            isModuleOff('providers.quotaGate', machineSettings, modules) || !enabledGateProviders ? null : (
               <View style={s.wrap}>
-                {gateProviders.map(entry => (
+                {enabledGateProviders.map(entry => (
                   <Btn
                     key={entry.id}
                     small
@@ -319,13 +345,25 @@ function ProvidersPage({
                 <Text style={s.small}>守护进程暂不可用，稍后自动重试</Text>
               </>
             ) : !gateSelected ? (
-              <Text style={s.small}>本机没有已配置的 Provider</Text>
+              <Text style={s.small}>本机没有已启用的 Provider</Text>
             ) : (
               <>
                 <Chip label={gateExcludedNow ? '已放行' : '拦截中'} tone={gateExcludedNow ? 'warning' : 'success'} />
                 <Text style={s.small}>低于 {quotaGate.minRemainingPct}% 只警告不拦截</Text>
                 {quotaGate.excludeProviders.length > 0 ? (
-                  <Text style={s.small}>例外：{quotaGate.excludeProviders.join('、')}</Text>
+                  <View style={s.wrap}>
+                    {quotaGate.excludeProviders.map(pattern => {
+                      const name = gateExceptionLabel(pattern, gateProviders ?? []);
+                      return (
+                        <Btn
+                          key={pattern}
+                          small
+                          label={`${name} ×`}
+                          onPress={() => removeGateException(pattern)}
+                        />
+                      );
+                    })}
+                  </View>
                 ) : null}
               </>
             )

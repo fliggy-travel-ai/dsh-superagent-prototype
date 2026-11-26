@@ -17,7 +17,7 @@ interface ProviderConfig {
 }
 
 const directSources = new Map([
-  ['codex-multi', 'codex'], ['cursor-cli', 'cursor'], ['grok-multi', 'grok'],
+  ['codex-multi', 'codex'],
   ['antigravity-multi', 'antigravity'], ['glm', 'glm'], ['qoder', 'qoder'], ['opencode-token-switch', 'opencode'],
 ]);
 const builtinSources = new Set(['codex', 'cursor', 'grok']);

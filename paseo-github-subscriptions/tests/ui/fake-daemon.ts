@@ -171,6 +171,7 @@ export class FakeDaemon {
       { id: 'usage.claudeAccounts', label: 'Claude 账号与额度', enabled: true, state: 'running', reloadRequired: true },
       { id: 'usage.providerQuotas', label: '其他 Provider 额度', enabled: false, state: 'off', reloadRequired: true },
       { id: 'providers.antigravity', label: 'Antigravity 多账号', enabled: false, state: 'off', reloadRequired: true },
+      { id: 'providers.cloudSession', label: '云端会话', enabled: true, state: 'running', reloadRequired: true },
       { id: 'github', label: 'GitHub 订阅', enabled: true, state: 'running', reloadRequired: true },
       { id: 'todo.stalled', label: '停滞会话检查', enabled: true, state: 'running', reloadRequired: true },
     ],

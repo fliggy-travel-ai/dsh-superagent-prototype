@@ -22,6 +22,10 @@ export const cloudGatewayModule: Module = {
   register(context) {
     const { server, services } = context;
     const main = mainOf(context);
+    if (context.machine.modules['providers.cloudSession'] === false) {
+      server.handle(cloudSessionStatus, async () => ({ enabled: false, onlineSessions: 0, unackedMessages: 0 }));
+      return;
+    }
     const forward = <Contract extends Parameters<PluginServerContext['handle']>[0]>(contract: Contract) => {
       server.handle(contract, (async (input: unknown) => (await services.daemon.ready()).client.invokePluginRpc(PROVIDER_PLUGIN_ID, contract.name, input)) as never);
     };
