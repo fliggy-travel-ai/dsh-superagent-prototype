@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BrowserBridge } from '../server/browser-bridge.ts';
 
+process.env.PASEO_GHSUB_EXTENSION_PATH = join(process.cwd(), 'browser-extension');
+
 async function port() { const server = createServer(); await new Promise<void>(r => server.listen(0, '127.0.0.1', r)); const address = server.address(); if (!address || typeof address === 'string') throw new Error('port'); const n = address.port; await new Promise<void>(r => server.close(() => r())); return n; }
 const origin = `chrome-extension://${'a'.repeat(32)}`;
 const session = (id: string, title = '同名') => ({ sessionId: id, title, url: `https://claude.ai/code/session_${id}`, tabCount: 1 });
