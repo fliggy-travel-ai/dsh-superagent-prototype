@@ -1,0 +1,45 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: paseo-github-subscriptions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: paseo-github-subscriptions/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+
+  cloud-session:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: paseo-cloud-session/cloud
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: paseo-cloud-session/cloud/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
