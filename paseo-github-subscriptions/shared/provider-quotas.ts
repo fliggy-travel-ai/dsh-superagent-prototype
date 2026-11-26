@@ -7,8 +7,6 @@ export const PROVIDER_QUOTA_SOURCE_IDS = [
   'codex-multi',
   'qoder',
   'glm',
-  'cursor-cli',
-  'grok-multi',
 ] as const;
 export type ProviderQuotaSourceId = (typeof PROVIDER_QUOTA_SOURCE_IDS)[number];
 
@@ -44,8 +42,6 @@ const BUILTIN_ID_SET = new Set<string>(BUILTIN_USAGE_SOURCE_IDS);
 const EFFECTIVE_WINDOW_SOURCES = new Set<string>([
   'antigravity-multi',
   'codex-multi',
-  'cursor-cli',
-  'grok-multi',
   'glm',
   'qoder',
 ]);

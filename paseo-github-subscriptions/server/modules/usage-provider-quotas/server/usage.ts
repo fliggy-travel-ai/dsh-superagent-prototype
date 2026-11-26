@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { execCommand } from "@getpaseo/plugin/server";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { writeJsonFile } from "../../../core/provider-config.ts";
 import { smartFetch } from "./net.ts";
 import { discoverTokenSwitchAccounts, fetchTokenHubUsage } from "./token-switch.ts";
 import {
@@ -42,49 +42,6 @@ const PASEO_CONFIG_PATH = path.join(PASEO_HOME, "config.json");
 
 const AGY_COMMAND = /(?:^|\/)agy(?:-paseo(?:-[^/]+)?)?$/u;
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const CURSOR_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
-
-const AGY_MODELS_URL =
-  "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
-const AGY_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const AGY_MODELS_UA = "antigravity/hub/2.25.0";
-const AGY_FAMILIES = [
-  {
-    id: "gemini_3_8_flash",
-    label: "Gemini 3.8 Flash",
-    shortLabel: "Flash",
-    pattern: /^gemini-3\.8-flash-(?:low|medium|high)$/u,
-  },
-  {
-    id: "gemini_4_argon",
-    label: "Gemini 4 Argon",
-    shortLabel: "Argon",
-    pattern: /^gemini-4-argon-(?:low|medium|high)$/u,
-  },
-];
-const HOUR_MS = 3_600_000;
-const AGY_5H_SKEW_MS = 30 * 60 * 1000;
-
-const GROK_USAGE_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
-const GROK_SUBSCRIPTION_URL =
-  "https://cli-chat-proxy.grok.com/v1/user?include=subscription";
-const ACP_HANDSHAKE =
-  [
-    {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: { protocolVersion: 1, clientCapabilities: {} },
-    },
-    {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "session/new",
-      params: { cwd: "/tmp", mcpServers: [] },
-    },
-  ]
-    .map((m) => JSON.stringify(m))
-    .join("\n") + "\n";
 
 const AccountInputSchema = z.object({
   providerId: z.string(),
@@ -224,12 +181,17 @@ function isoFromEpochMs(value: unknown): string | null {
 // 1. Antigravity Usage Source
 // ============================================================================
 
+// 官方额度来源已经覆盖这两个内置 Provider。多账号来源再报一次，用量列表会画出重复卡。
+function coveredByOfficialUsage(providerId: string): boolean {
+  return providerId === "codex" || providerId === "antigravity";
+}
+
 function discoverAntigravityAccounts(scope: UsageScope): UsageAccount[] {
   const providers = readProvidersConfig();
   const accounts: UsageAccount[] = [];
 
   for (const [providerId, cfg] of Object.entries(providers)) {
-    if (cfg?.enabled === false) continue;
+    if (cfg?.enabled === false || coveredByOfficialUsage(providerId)) continue;
     const cmdParts = commandArray(cfg?.command);
     const isAgy =
       providerId === "antigravity" ||
@@ -268,213 +230,138 @@ function discoverAntigravityAccounts(scope: UsageScope): UsageAccount[] {
   return accounts;
 }
 
-function readAntigravityTokenFile(authPath: string) {
-  if (!fs.existsSync(authPath)) return null;
-  const raw = readJson<Record<string, any>>(authPath);
-  if (!raw || typeof raw !== "object") return null;
-  const token =
-    raw.token !== null && typeof raw.token === "object" ? raw.token : raw;
-  if (
-    !token ||
-    typeof token !== "object" ||
-    typeof token.access_token !== "string" ||
-    !token.access_token
-  ) {
-    return null;
-  }
-  return { raw, token };
+const agyUsageResponse = z.object({
+  status: z.string(),
+  error: z.string().optional(),
+  response: z.string().optional(),
+  command: z
+    .object({
+      name: z.literal("usage"),
+      data: z.object({
+        groups: z.array(
+          z.object({
+            name: z.string(),
+            buckets: z.array(
+              z.object({
+                id: z.string().min(1),
+                name: z.string(),
+                window: z.string(),
+                remaining_fraction: z.number().min(0).max(1).nullish(),
+                reset_time: z.string().nullish(),
+                disabled: z.boolean().optional(),
+              }),
+            ),
+          }),
+        ),
+      }),
+    })
+    .optional(),
+});
+
+function agyWindowLabel(name: string, window: string): string {
+  if (window.trim().toLowerCase() === "5h") return "5h";
+  return name.trim().replace(/(?:\s+Limit)?\s+Remaining$/i, "");
 }
 
-function resolveAgyOAuthClient(stored: { raw: Record<string, any>; token: Record<string, any> }): {
-  clientId: string;
-  clientSecret: string;
-} | null {
-  const localCfg = readJson<{ clientId?: string; clientSecret?: string }>(
-    path.join(PASEO_HOME, "github-subscriptions", "agy-oauth.json"),
-  );
-  const clientId =
-    process.env.AGY_OAUTH_CLIENT_ID ||
-    stored.token.client_id ||
-    stored.raw.client_id ||
-    localCfg?.clientId ||
-    "";
-  const clientSecret =
-    process.env.AGY_OAUTH_CLIENT_SECRET ||
-    stored.token.client_secret ||
-    stored.raw.client_secret ||
-    localCfg?.clientSecret ||
-    "";
-  if (typeof clientId === "string" && clientId && typeof clientSecret === "string" && clientSecret) {
-    return { clientId, clientSecret };
-  }
-  return null;
+function agyShortWindow(window: string): string {
+  const trimmed = window.trim();
+  const normalized = trimmed.toLowerCase();
+  if (normalized === "weekly") return "wk";
+  if (normalized === "monthly") return "mo";
+  return trimmed;
 }
 
-async function refreshAntigravityAccessToken(
-  authPath: string,
-  stored: { raw: Record<string, any>; token: Record<string, any> },
-  proxyUrl?: string,
-): Promise<string | null> {
-  const refreshToken =
-    typeof stored.token.refresh_token === "string" ? stored.token.refresh_token : "";
-  if (!refreshToken) return null;
-  const oauthClient = resolveAgyOAuthClient(stored);
-  if (!oauthClient) return null;
-
-  const body = new URLSearchParams({
-    client_id: oauthClient.clientId,
-    client_secret: oauthClient.clientSecret,
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-  }).toString();
-
-  const res = await smartFetch(AGY_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-    proxyUrl,
-    sensitive: true,
-  });
-  if (!res.ok) return null;
-  const refreshed = await res.json();
-  if (typeof refreshed?.access_token !== "string" || !refreshed.access_token) return null;
-
-  const expiresIn = Number(refreshed.expires_in) || 3600;
-  const next: Record<string, any> = {
-    ...stored.raw,
-    token: {
-      ...stored.token,
-      access_token: refreshed.access_token,
-      token_type: refreshed.token_type ?? stored.token.token_type ?? "Bearer",
-      refresh_token:
-        typeof refreshed.refresh_token === "string" && refreshed.refresh_token
-          ? refreshed.refresh_token
-          : stored.token.refresh_token,
-      expiry: new Date(Date.now() + expiresIn * 1000).toISOString(),
-      expires_in: expiresIn,
-    },
-  };
-  if (typeof refreshed.id_token === "string") next.id_token = refreshed.id_token;
-  try {
-    writeJsonFile(authPath, next);
-  } catch {
-    // 写不回时本次仍可用新令牌；下一轮会再刷新。
+function agyWindowDuration(window: string): number | undefined {
+  switch (window.trim().toLowerCase()) {
+    case "5h":
+      return 5 * 3600;
+    case "weekly":
+      return 7 * 86400;
+    default:
+      return undefined;
   }
-  return refreshed.access_token;
+}
+
+function agyGroupLabel(name: string): string {
+  return name.trim().replace(/(?:^|\s+)models$/i, "").trim();
+}
+
+/** 裸 agy 会读登录钥匙串。额度查询固定走 agy-paseo，由包装脚本设置 SSH_CONNECTION。 */
+function agyPaseoBinary(command: readonly string[] | undefined): string {
+  const bin = command?.[0];
+  if (bin && /(?:^|\/)agy-paseo(?:-[^/]+)?$/u.test(bin)) return bin;
+  return path.join(REAL_HOME, ".local/bin/agy-paseo");
+}
+
+function agyUsageEnv(input: AccountInput): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (input.proxyUrl) {
+    env.HTTPS_PROXY = input.proxyUrl;
+    env.HTTP_PROXY = input.proxyUrl;
+    env.https_proxy = input.proxyUrl;
+    env.http_proxy = input.proxyUrl;
+  }
+  if (input.homeDir) env.HOME = input.homeDir;
+  return env;
 }
 
 async function fetchAntigravityUsage(input: AccountInput): Promise<UsageReport> {
-  if (!input.authPath) {
-    return { status: "error", error: "Missing antigravity-oauth-token path" };
-  }
-  const stored = readAntigravityTokenFile(input.authPath);
-  if (!stored) {
-    return { status: "error", error: "Missing or invalid antigravity-oauth-token" };
-  }
-
-  const nowMs = Date.now();
-  let accessToken = String(stored.token.access_token);
-  const expiryMs = Date.parse(stored.token.expiry ?? "");
-  if (!Number.isFinite(expiryMs) || expiryMs < nowMs + 60_000) {
-    const refreshed = await refreshAntigravityAccessToken(
-      input.authPath,
-      stored,
-      input.proxyUrl,
-    ).catch(() => null);
-    if (!refreshed) {
-      return unavailable({
-        kind: "expired",
-        expiresAt: Number.isFinite(expiryMs)
-          ? new Date(expiryMs).toISOString()
-          : new Date(nowMs).toISOString(),
-        refreshedBy: "agy login",
-      });
-    }
-    accessToken = refreshed;
-  }
-
-  const platform = process.platform === "win32" ? "windows" : process.platform;
-  const callModels = (token: string) =>
-    smartFetch(AGY_MODELS_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "User-Agent": `${AGY_MODELS_UA} ${platform}/${process.arch}`,
-      },
-      body: "{}",
-      proxyUrl: input.proxyUrl,
+  const command = agyPaseoBinary(input.command);
+  let stdout: string;
+  try {
+    const result = await execCommand(command, ["-p", "/usage", "--output-format", "json"], {
+      env: agyUsageEnv(input),
+      timeout: 20_000,
+      maxBuffer: 1024 * 1024,
     });
-
-  let res = await callModels(accessToken);
-  if (res.status === 401 || res.status === 403) {
-    const refreshed = await refreshAntigravityAccessToken(
-      input.authPath,
-      stored,
-      input.proxyUrl,
-    ).catch(() => null);
-    if (!refreshed) {
-      return unavailable({ kind: "rejected", status: res.status, refreshedBy: "agy login" });
-    }
-    res = await callModels(refreshed);
+    stdout = result.stdout;
+  } catch {
+    return {
+      status: "error",
+      error: "Antigravity usage command failed or timed out. Check that agy is signed in.",
+    };
   }
-
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
-      return unavailable({ kind: "rejected", status: res.status, refreshedBy: "agy login" });
-    }
-    return { status: "error", error: `Antigravity HTTP ${res.status}` };
+  let parsed: z.infer<typeof agyUsageResponse>;
+  try {
+    parsed = agyUsageResponse.parse(JSON.parse(stdout));
+  } catch {
+    return { status: "error", error: "agy did not return usage data" };
   }
-
-  const data = await res.json();
-  const models = (data?.models ?? {}) as Record<string, any>;
-  const windows: UsageWindow[] = [];
-
-  for (const family of AGY_FAMILIES) {
-    let selected: { fraction: number; resetTime: string } | null = null;
-    for (const [id, model] of Object.entries(models)) {
-      if (!family.pattern.test(id)) continue;
-      const fraction = Number(model?.quotaInfo?.remainingFraction);
-      const resetTime = model?.quotaInfo?.resetTime;
-      if (!Number.isFinite(fraction) || typeof resetTime !== "string" || !resetTime) continue;
-      if (selected === null || fraction < selected.fraction) {
-        selected = { fraction, resetTime };
-      }
-    }
-    if (!selected) continue;
-    const end = Date.parse(selected.resetTime);
-    const until = Number.isFinite(end) ? end - nowMs : 5 * HOUR_MS;
-    const is5h = until <= 5 * HOUR_MS + AGY_5H_SKEW_MS;
-    const periodLabel = is5h ? "5-hour" : "Weekly";
-    const shortPeriod = is5h ? "5h" : "7d";
-    const usedPct = (1 - Math.max(0, Math.min(1, selected.fraction))) * 100;
-
-    windows.push(
-      makeWindow({
-        id: `${family.id}_${is5h ? "5_hours" : "7_days"}`,
-        label: `${family.label} (${periodLabel})`,
-        shortLabel: `${family.shortLabel} ${shortPeriod}`,
-        summary: true,
-        usedPct,
-        resetsAt: selected.resetTime,
-      }),
-    );
+  if (parsed.status !== "SUCCESS") {
+    return {
+      status: "error",
+      error: parsed.error || parsed.response || `agy usage returned ${parsed.status}`,
+    };
   }
-
-  const details: UsageDetail[] = [
-    { id: "provider_id", label: "Provider ID", value: input.providerId },
-  ];
-  if (input.email) {
-    details.push({ id: "email", label: "Account Email", value: input.email });
-  }
-
-  return {
-    status: "available",
-    planLabel: "Google AI Pro",
-    windows: pinLowestRemainingWindow(windows),
-    balances: [],
-    details,
-  };
+  if (!parsed.command) return { status: "error", error: "agy did not return usage data" };
+  const groups = parsed.command.data.groups;
+  const includeGroup = groups.length > 1;
+  const windows = groups.flatMap((group) => {
+    const groupLabel = agyGroupLabel(group.name);
+    return group.buckets.flatMap((bucket) => {
+      if (!bucket.disabled && bucket.remaining_fraction == null) return [];
+      const used = bucket.disabled ? null : (1 - bucket.remaining_fraction!) * 100;
+      return [
+        windowFromUsedPct({
+          id: bucket.id,
+          label: [groupLabel, agyWindowLabel(bucket.name, bucket.window), bucket.disabled ? "Disabled" : null]
+            .filter(Boolean)
+            .join(" · "),
+          shortLabel:
+            includeGroup && groupLabel
+              ? `${groupLabel} ${agyShortWindow(bucket.window)}`
+              : agyShortWindow(bucket.window),
+          summary: !bucket.disabled && bucket.window === "weekly",
+          utilizationPct: used,
+          durationSeconds: agyWindowDuration(bucket.window),
+          resetsAt: bucket.disabled ? null : (bucket.reset_time ?? null),
+          tone: used === null ? "default" : toneFromUsedPct(used),
+        }),
+      ];
+    });
+  });
+  if (windows.length === 0) return unavailable({ kind: "no_quota", detail: "No usage quota reported by agy" });
+  return { status: "available", windows };
 }
 
 // ============================================================================
@@ -499,6 +386,7 @@ function discoverCodexAccounts(scope: UsageScope): UsageAccount[] {
   }
 
   for (const [providerId, cfg] of selected) {
+    if (coveredByOfficialUsage(providerId)) continue;
     const configuredHome = cfg?.env?.CODEX_HOME || path.join(cfg?.env?.HOME || REAL_HOME, ".codex");
     const codexHome = scope.kind === "session"
       ? scope.env.CODEX_HOME || (scope.env.HOME ? path.join(scope.env.HOME, ".codex") : configuredHome)
@@ -624,244 +512,6 @@ async function fetchCodexUsage(input: AccountInput): Promise<UsageReport> {
   };
 }
 
-// ============================================================================
-// 3. Cursor CLI Usage Source
-// ============================================================================
-
-function discoverCursorAccounts(scope: UsageScope): UsageAccount[] {
-  const providers = readProvidersConfig();
-  const accounts: UsageAccount[] = [];
-
-  for (const [providerId, cfg] of Object.entries(providers)) {
-    if (cfg?.enabled === false) continue;
-    const cmdParts = commandArray(cfg?.command);
-    const isCursor =
-      providerId === "cursor" ||
-      providerId.startsWith("cursor-") ||
-      cmdParts.some((part) => /(?:^|\/)cursor-agent/u.test(part));
-    if (!isCursor) continue;
-    if (scope.kind === "session" && scope.provider !== providerId) continue;
-
-    const rawHome =
-      (scope.kind === "session" ? scope.env?.HOME : undefined) ||
-      cfg?.env?.HOME ||
-      REAL_HOME;
-    const homeDir = rawHome.trim().replace(/^~(?=$|\/)/u, REAL_HOME);
-    const candidates = [
-      path.join(homeDir, ".cursor", "auth.json"),
-      path.join(homeDir, ".config", "cursor", "auth.json"),
-    ];
-    const authPath = candidates.find((p) => fs.existsSync(p));
-    if (!authPath) continue;
-
-    const labelEmail = cfg?.label?.match(/([\w.+-]+@[\w.-]+)/u)?.[1];
-    const displayLabel = labelEmail
-      ? `${labelEmail} (${providerId})`
-      : cfg?.label || providerId;
-
-    accounts.push({
-      key: providerId,
-      label: displayLabel,
-      harness: "Cursor CLI",
-      input: {
-        providerId,
-        label: displayLabel,
-        email: labelEmail,
-        authPath,
-        homeDir,
-        proxyUrl: cfg?.env?.HTTPS_PROXY || cfg?.env?.HTTP_PROXY,
-      } satisfies AccountInput as Record<string, any>,
-    });
-  }
-  return accounts;
-}
-
-async function fetchCursorUsage(input: AccountInput): Promise<UsageReport> {
-  if (!input.authPath || !fs.existsSync(input.authPath)) {
-    return { status: "error", error: "Missing Cursor auth.json" };
-  }
-  const auth = readJson<Record<string, any>>(input.authPath);
-  if (!auth?.accessToken) {
-    return { status: "error", error: "Missing Cursor accessToken" };
-  }
-
-  let accessToken = String(auth.accessToken);
-  const claims = decodeJwtPayload(accessToken);
-  if (claims?.exp && claims.exp * 1000 <= Date.now() + 300_000 && auth.refreshToken) {
-    const refreshRes = await smartFetch("https://api2.cursor.sh/oauth/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        client_id: CURSOR_CLIENT_ID,
-        refresh_token: auth.refreshToken,
-      }),
-      proxyUrl: input.proxyUrl,
-      sensitive: true,
-    });
-    if (refreshRes.ok) {
-      const refreshed = await refreshRes.json();
-      if (refreshed?.access_token) {
-        accessToken = String(refreshed.access_token);
-        try {
-          // 刷新响应带新的刷新令牌时必须一起保存，否则旧令牌下次失效。
-          const refreshToken = typeof refreshed.refresh_token === "string" && refreshed.refresh_token ? refreshed.refresh_token : auth.refreshToken;
-          writeJsonFile(input.authPath, { ...auth, accessToken, refreshToken });
-        } catch {
-          // 写不回时本次仍可用新令牌。
-        }
-      }
-    }
-  }
-
-  const callService = (method: string) =>
-    smartFetch(`https://api2.cursor.sh/aiserver.v1.DashboardService/${method}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        "Connect-Protocol-Version": "1",
-      },
-      body: "{}",
-      proxyUrl: input.proxyUrl,
-    });
-
-  const [usageRes, planRes] = await Promise.all([
-    callService("GetCurrentPeriodUsage"),
-    callService("GetPlanInfo"),
-  ]);
-
-  if (!usageRes.ok) {
-    if (usageRes.status === 401 || usageRes.status === 403) {
-      return unavailable({
-        kind: "rejected",
-        status: usageRes.status,
-        refreshedBy: "cursor-agent login",
-      });
-    }
-    return { status: "error", error: `Cursor HTTP ${usageRes.status}` };
-  }
-
-  const usage = await usageRes.json();
-  const plan = planRes.ok ? await planRes.json().catch(() => null) : null;
-  const planUsage = usage?.planUsage ?? {};
-  const resetsAt = isoFromEpochMs(usage?.billingCycleEnd);
-
-  const windows: UsageWindow[] = [];
-  if (typeof planUsage.autoPercentUsed === "number") {
-    windows.push(
-      makeWindow({
-        id: "auto_composer",
-        label: "Auto + Composer",
-        shortLabel: "Auto",
-        summary: true,
-        usedPct: planUsage.autoPercentUsed,
-        resetsAt,
-      }),
-    );
-  }
-  if (typeof planUsage.apiPercentUsed === "number") {
-    windows.push(
-      makeWindow({
-        id: "api",
-        label: "API",
-        shortLabel: "API",
-        summary: true,
-        usedPct: planUsage.apiPercentUsed,
-        resetsAt,
-      }),
-    );
-  }
-  if (typeof planUsage.totalPercentUsed === "number") {
-    windows.push(
-      makeWindow({
-        id: "included",
-        label: "Included total",
-        shortLabel: "Total",
-        summary: false,
-        usedPct: planUsage.totalPercentUsed,
-        resetsAt,
-      }),
-    );
-  }
-
-  return {
-    status: "available",
-    planLabel: plan?.planInfo?.planName || undefined,
-    windows: pinLowestRemainingWindow(windows),
-    balances: [],
-    details: [
-      { id: "provider_id", label: "Provider ID", value: input.providerId },
-      ...(input.email ? [{ id: "email", label: "Account Email", value: input.email }] : []),
-    ],
-  };
-}
-
-// ============================================================================
-// 4. Grok Multi-Account Usage Source
-// ============================================================================
-
-function extractGrokToken(auth: unknown): string | null {
-  if (!auth || typeof auth !== "object" || Array.isArray(auth)) return null;
-  const record = auth as Record<string, any>;
-  if (typeof record.access_token === "string" && record.access_token) {
-    return record.access_token;
-  }
-  const entries = Object.entries(record);
-  const preferred = entries.filter(([key]) => key.startsWith("https://auth.x.ai::"));
-  for (const [, value] of preferred.length > 0 ? preferred : entries) {
-    if (value && typeof value === "object" && typeof value.key === "string" && value.key) {
-      return value.key;
-    }
-  }
-  return null;
-}
-
-function discoverGrokAccounts(scope: UsageScope): UsageAccount[] {
-  const providers = readProvidersConfig();
-  const accounts: UsageAccount[] = [];
-
-  for (const [providerId, cfg] of Object.entries(providers)) {
-    if (cfg?.enabled === false) continue;
-    const cmdParts = commandArray(cfg?.command);
-    const isGrok =
-      providerId === "grok" ||
-      providerId.startsWith("grok-") ||
-      cfg?.extends === "grok" ||
-      cmdParts[0] === "grok";
-    if (!isGrok) continue;
-    if (scope.kind === "session" && scope.provider !== providerId) continue;
-
-    const grokHome =
-      (scope.kind === "session" ? scope.env?.GROK_HOME : undefined) ||
-      cfg?.env?.GROK_HOME ||
-      path.join(REAL_HOME, ".grok");
-    const authPath = path.join(grokHome, "auth.json");
-    if (!fs.existsSync(authPath)) continue;
-
-    const auth = readJson<Record<string, any>>(authPath);
-    const email =
-      auth?.user_email || cfg?.label?.match(/([\w.+-]+@[\w.-]+)/u)?.[1];
-    const displayLabel = email ? `${email} (${providerId})` : cfg?.label || providerId;
-
-    accounts.push({
-      key: providerId,
-      label: displayLabel,
-      harness: "Grok",
-      input: {
-        providerId,
-        label: displayLabel,
-        email,
-        authPath,
-        command: cmdParts.length > 0 ? cmdParts : ["grok", "agent", "stdio"],
-        env: cfg?.env,
-        proxyUrl: cfg?.env?.HTTPS_PROXY || cfg?.env?.HTTP_PROXY,
-      } satisfies AccountInput as Record<string, any>,
-    });
-  }
-  return accounts;
-}
-
 /** 进行中的子进程：模块停止时统一结束。stdin 写入已关闭的管道会触发 error，必须有监听，否则整个进程崩溃。 */
 const usageChildren = new Set<ChildProcess>();
 
@@ -880,136 +530,8 @@ export function stopUsageChildren(): void {
   for (const child of usageChildren) child.kill("SIGTERM");
 }
 
-function refreshGrokWithCli(command: string[], env: Record<string, string> = {}): Promise<void> {
-  const [file, ...args] = command;
-  if (!file) return Promise.resolve();
-  return new Promise((resolve) => {
-    const child = trackChild(spawn(file, args, {
-      cwd: "/tmp",
-      env: { ...process.env, ...env },
-      stdio: ["pipe", "ignore", "ignore"],
-      timeout: 30_000,
-    }));
-    child.on("error", () => resolve());
-    child.on("close", () => resolve());
-    child.stdin.end(ACP_HANDSHAKE);
-  });
-}
-
-async function fetchGrokUsage(input: AccountInput): Promise<UsageReport> {
-  if (!input.authPath || !fs.existsSync(input.authPath)) {
-    return { status: "error", error: "Missing Grok auth.json" };
-  }
-  let auth = readJson<Record<string, any>>(input.authPath);
-  let token = extractGrokToken(auth);
-  if (!token) {
-    return { status: "error", error: "Missing Grok token in auth.json" };
-  }
-
-  const callBilling = (bearer: string) =>
-    smartFetch(GROK_USAGE_URL, {
-      headers: {
-        Authorization: `Bearer ${bearer}`,
-        "X-XAI-Token-Auth": "xai-grok-cli",
-        Accept: "application/json",
-      },
-      proxyUrl: input.proxyUrl,
-    });
-
-  let res = await callBilling(token);
-  if ((res.status === 401 || res.status === 403) && input.command?.length) {
-    await refreshGrokWithCli(input.command, input.env);
-    auth = readJson<Record<string, any>>(input.authPath);
-    token = extractGrokToken(auth);
-    if (token) {
-      res = await callBilling(token);
-    }
-  }
-
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) {
-      return unavailable({ kind: "rejected", status: res.status, refreshedBy: "grok login" });
-    }
-    return { status: "error", error: `Grok HTTP ${res.status}` };
-  }
-
-  const billing = await res.json();
-  const subRes = await smartFetch(GROK_SUBSCRIPTION_URL, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "X-XAI-Token-Auth": "xai-grok-cli",
-      Accept: "application/json",
-    },
-    proxyUrl: input.proxyUrl,
-  }).catch(() => null);
-  const subData = subRes?.ok ? await subRes.json().catch(() => null) : null;
-
-  const config = billing?.config ?? {};
-  const windows: UsageWindow[] = [];
-  const balances: UsageBalance[] = [];
-
-  const usedPct =
-    typeof config.creditUsagePercent === "number"
-      ? config.creditUsagePercent
-      : config.currentPeriod
-        ? 0
-        : null;
-  const resetsAt =
-    typeof config.currentPeriod?.end === "string"
-      ? new Date(Date.parse(config.currentPeriod.end)).toISOString()
-      : null;
-
-  if (usedPct !== null) {
-    const isWeekly = String(config.currentPeriod?.type ?? "")
-      .toUpperCase()
-      .includes("WEEKLY");
-    windows.push(
-      makeWindow({
-        id: isWeekly ? "weekly" : "monthly",
-        label: isWeekly ? "Weekly credits" : "Monthly credits",
-        shortLabel: isWeekly ? "7d" : "30d",
-        summary: true,
-        usedPct,
-        resetsAt,
-      }),
-    );
-  }
-
-  const limit = config.monthlyLimit?.val;
-  const used = config.used?.val;
-  if (typeof limit === "number" && typeof used === "number") {
-    const remaining = Math.max(0, limit - used);
-    balances.push({
-      id: "monthly_credits",
-      label: "Monthly credits",
-      used,
-      remaining,
-      limit,
-      unit: "credits",
-      resetsAt,
-      tone: balanceToneFromRemaining(remaining),
-    });
-  }
-
-  const tier =
-    typeof subData?.subscriptionTier === "string" && subData.subscriptionTier
-      ? subData.subscriptionTier
-      : "Free";
-
-  return {
-    status: "available",
-    planLabel: tier,
-    windows: pinLowestRemainingWindow(windows),
-    balances,
-    details: [
-      { id: "provider_id", label: "Provider ID", value: input.providerId },
-      ...(input.email ? [{ id: "email", label: "Account Email", value: input.email }] : []),
-    ],
-  };
-}
-
 // ============================================================================
-// 5. GLM Coding Plan Usage Source
+// 3. GLM Coding Plan Usage Source
 // ============================================================================
 
 function discoverGlmAccounts(scope: UsageScope): UsageAccount[] {
@@ -1149,7 +671,7 @@ async function fetchGlmUsage(input: AccountInput): Promise<UsageReport> {
 }
 
 // ============================================================================
-// 6. Qoder Usage Source (via qodercli --sdk daemon protocol v2)
+// 4. Qoder Usage Source (via qodercli --sdk daemon protocol v2)
 // ============================================================================
 
 function discoverQoderAccounts(scope: UsageScope): UsageAccount[] {
@@ -1454,22 +976,6 @@ export function createUsageSources(): UsageSourceRegistration[] {
       input: AccountInputSchema,
       discover: async (scope) => discoverGlmAccounts(scope),
       fetch: async (raw) => fetchGlmUsage(AccountInputSchema.parse(raw)),
-    },
-    {
-      id: "cursor-cli",
-      label: "Cursor",
-      icon: "icons/cursor.svg",
-      input: AccountInputSchema,
-      discover: async (scope) => discoverCursorAccounts(scope),
-      fetch: async (raw) => fetchCursorUsage(AccountInputSchema.parse(raw)),
-    },
-    {
-      id: "grok-multi",
-      label: "Grok",
-      icon: "icons/grok.svg",
-      input: AccountInputSchema,
-      discover: async (scope) => discoverGrokAccounts(scope),
-      fetch: async (raw) => fetchGrokUsage(AccountInputSchema.parse(raw)),
     },
   ];
 }

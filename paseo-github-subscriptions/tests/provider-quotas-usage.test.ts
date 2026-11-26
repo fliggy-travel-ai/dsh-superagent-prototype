@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import https from 'node:https';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -47,6 +47,28 @@ test('Codex 会话使用实际登录目录匹配账号，不误标为默认 Prov
   assert.deepEqual(apiAccounts, []);
   const otherProvider = await source('codex-multi').discover({ kind: 'session', provider: 'claude', env: { HOME: root } });
   assert.deepEqual(otherProvider, []);
+
+  const globalCodex = await source('codex-multi').discover({ kind: 'global' });
+  assert.deepEqual(globalCodex.map(account => account.key), ['codex-5']);
+
+  const agyHome = join(root, 'agy-cy');
+  const agyAuth = join(agyHome, '.gemini', 'antigravity-cli');
+  mkdirSync(agyAuth, { recursive: true });
+  writeFileSync(join(agyAuth, 'antigravity-oauth-token'), JSON.stringify({ token: { access_token: 'x' } }));
+  mkdirSync(join(root, '.gemini', 'antigravity-cli'), { recursive: true });
+  writeFileSync(join(root, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'), JSON.stringify({ token: { access_token: 'y' } }));
+  writeFileSync(join(process.env.PASEO_HOME!, 'config.json'), JSON.stringify({ agents: { providers: {
+    codex: {},
+    'codex-5': { extends: 'codex', env: { CODEX_HOME: accountHome } },
+    antigravity: { env: { HOME: root } },
+    'antigravity-cy517': { env: { HOME: agyHome }, label: 'Antigravity · cy@example.com' },
+    'antigravity-off': { enabled: false, env: { HOME: agyHome } },
+  } } }));
+  const globalAgy = await source('antigravity-multi').discover({ kind: 'global' });
+  assert.deepEqual(globalAgy.map(account => account.key), ['antigravity-cy517']);
+  assert.equal(globalAgy[0]!.label, 'cy@example.com (antigravity-cy517)');
+  const officialAgySession = await source('antigravity-multi').discover({ kind: 'session', provider: 'antigravity', env: { HOME: root } });
+  assert.deepEqual(officialAgySession, []);
 });
 
 /** 替换 http(s).request：记录调用，按处理函数返回响应。 */
@@ -170,39 +192,26 @@ test('Codex 返回 401：不刷新令牌，auth.json 不变', async () => {
   } finally { transport.restore(); }
 });
 
-test('Cursor 刷新令牌：保存新的访问令牌和新的刷新令牌，原子写入、权限 0600、不留临时文件', async () => {
-  const dir = mkdtempSync(join(root, 'cursor-'));
-  const authPath = join(dir, 'auth.json');
-  writeFileSync(authPath, JSON.stringify({ accessToken: expired(), refreshToken: 'rt-old', other: 'keep' }));
-  const transport = fakeTransport(url => url.pathname === '/oauth/token'
-    ? { status: 200, body: JSON.stringify({ access_token: 'at-new', refresh_token: 'rt-new' }) }
-    : { status: 500, body: '{}' });
-  try {
-    await source('cursor-cli').fetch({ providerId: 'cursor', authPath } as never);
-    const saved = JSON.parse(readFileSync(authPath, 'utf8'));
-    assert.equal(saved.accessToken, 'at-new');
-    assert.equal(saved.refreshToken, 'rt-new');
-    assert.equal(saved.other, 'keep');
-    assert.equal(statSync(authPath).mode & 0o777, 0o600);
-    assert.deepEqual(readdirSync(dir), ['auth.json']);
-  } finally { transport.restore(); }
-});
-
-test('Antigravity 刷新令牌：原子写入、权限 0600、不留临时文件', async () => {
+test('Antigravity 额外账号经 agy-paseo 使用官方窗口，裸 agy 会被换成包装脚本', async () => {
   const dir = mkdtempSync(join(root, 'agy-'));
-  const authPath = join(dir, 'antigravity-oauth-token');
-  writeFileSync(authPath, JSON.stringify({ client_id: 'cid', client_secret: 'csecret', token: { access_token: 'at-old', refresh_token: 'rt-old', expiry: new Date(Date.now() - 1000).toISOString() } }));
-  const transport = fakeTransport(url => url.pathname === '/token'
-    ? { status: 200, body: JSON.stringify({ access_token: 'at-new', expires_in: 3600 }) }
-    : { status: 500, body: '{}' });
-  try {
-    await source('antigravity-multi').fetch({ providerId: 'antigravity-x', authPath } as never);
-    const saved = JSON.parse(readFileSync(authPath, 'utf8'));
-    assert.equal(saved.token.access_token, 'at-new');
-    assert.equal(saved.token.refresh_token, 'rt-old');
-    assert.equal(statSync(authPath).mode & 0o777, 0o600);
-    assert.deepEqual(readdirSync(dir), ['antigravity-oauth-token']);
-  } finally { transport.restore(); }
+  const bin = join(dir, 'agy-paseo');
+  writeFileSync(bin, `#!/bin/sh
+printf '%s\\n' '{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.06,"reset_time":"2026-12-03T07:15:00Z"},{"id":"gemini-5h","name":"5h","window":"5h","remaining_fraction":0.98,"reset_time":"2026-11-27T05:15:00Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"gpt-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":1,"reset_time":"2026-12-03T07:15:00Z"}]}]}}}'
+`);
+  chmodSync(bin, 0o755);
+  const report = await source('antigravity-multi').fetch({
+    providerId: 'antigravity-cy517',
+    command: [bin],
+    homeDir: dir,
+  } as never) as any;
+  assert.equal(report.status, 'available');
+  assert.equal(report.planLabel, undefined);
+  assert.equal(report.details, undefined);
+  assert.deepEqual(report.windows.map((window: { label: string }) => window.label), [
+    'Gemini · Weekly',
+    'Gemini · 5h',
+    'Claude and GPT · Weekly',
+  ]);
 });
 
 test('Qoder 子进程立即退出：返回错误，写入已关闭的 stdin 不会抛未捕获异常', async () => {

@@ -417,14 +417,27 @@ function AddBrowserDrawer() {
 }
 
 
+function moduleIsOff(
+  id: string,
+  machineSettings: { modules: ReadonlyArray<{ id: string; enabled: boolean; state: string }> } | null,
+  modules: { modules: ReadonlyArray<{ id: string; state: string }> } | null,
+): boolean {
+  const saved = machineSettings?.modules.find(item => item.id === id);
+  if (saved) return !saved.enabled || saved.state === 'off';
+  const live = modules?.modules.find(item => item.id === id);
+  if (live) return live.state === 'off';
+  return false;
+}
+
 function CloudSessionDrawer() {
   const { s } = useUi();
-  const { cloudSession, cloudSessionError, providerInstance } = useControlState();
-  const status = cloudSession ?? providerInstance?.cloudSession;
+  const { cloudSession, cloudSessionError, providerInstance, machineSettings, modules } = useControlState();
+  const cloudOff = moduleIsOff('providers.cloudSession', machineSettings, modules);
+  const status = cloudOff ? null : cloudSession ?? providerInstance?.cloudSession;
 
   return (
     <View style={{ gap: 12 }}>
-      {cloudSessionError && !status ? (
+      {!cloudOff && cloudSessionError && !status ? (
         <Notice tone="danger">
           <Text style={s.text}>读取失败：{cloudSessionError}</Text>
         </Notice>
@@ -434,12 +447,14 @@ function CloudSessionDrawer() {
         first
         cells={[
           '状态',
-          cloudSessionError && !status ? (
+          cloudOff ? (
+            <Chip key="st" label="已关闭" tone="neutral" />
+          ) : cloudSessionError && !status ? (
             <Chip key="st" label="读取失败" tone="danger" />
           ) : !status ? (
             <Chip key="st" label="正在读取" tone="neutral" />
           ) : (
-            <Chip key="st" label="始终开启" tone="success" />
+            <Chip key="st" label="已开启" tone="success" />
           ),
         ]}
       />

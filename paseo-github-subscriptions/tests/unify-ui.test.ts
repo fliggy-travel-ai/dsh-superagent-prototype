@@ -290,6 +290,7 @@ test('设置页并入主页面：无独立设置页引导、凭据在对应编�
       { id: 'usage.claudeAccounts', enabled: true },
       { id: 'usage.providerQuotas', enabled: false },
       { id: 'providers.antigravity', enabled: false },
+      { id: 'providers.cloudSession', enabled: true },
       { id: 'github', enabled: true },
       { id: 'todo.stalled', enabled: true },
     ],
@@ -661,8 +662,10 @@ test('审阅项 1/8/11/12/B/C/D：默认设置空规则不注入高危示例、C
   assert.equal(text.includes('bypassPermissions'), false, '空规则时不应渲染高危示例规则');
   assert.match(text, /把 claude\.ai 网页中运行的云端 Claude Code 会话接入 Paseo/);
   assert.equal(text.includes('飞猪云端开发环境'), false);
-  const cloudSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '云端会话');
-  assert.equal(cloudSwitch.length, 0, '云端会话卡片不应有开关');
+  const cloudSwitch = findNodes(tree, n => n.type === 'Switch' && n.props.accessibilityLabel === '启用云端会话');
+  assert.equal(cloudSwitch.length, 1, '云端会话卡片应能关闭');
+  const cloudDelete = findNodes(tree, n => n.type === 'Pressable' && n.props.accessibilityLabel === '删除');
+  assert.equal(cloudDelete.length, 1, '云端会话卡片应能删除');
   // 账号列表和名称带额度由 Paseo 提供：不再有“Claude 账号”“Claude 名称带额度”两张卡片
   assert.equal(text.includes('查看本机 Claude 账号的登录状态并改名'), false, '不应有 Claude 账号卡片');
   assert.equal(text.includes('Claude 名称带额度'), false, '不应有 Claude 名称带额度卡片');

@@ -21,7 +21,6 @@ export const cloudSessionModule: Module<CloudSessionConfig> = {
   id: 'providers.cloudSession',
   label: '云端会话',
   defaultEnabled: true,
-  alwaysEnabled: true,
   config: { section: 'cloudSession', spec: { schema: CloudSessionConfigSchema, fallback: CloudSessionConfigSchema.parse({}) } },
   appliesTo: instance => instance.hostsProviders,
   redact: error => redactError(error).replace(/[\r\n]+/g, ' '),

@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import * as browserRpc from '../../../shared/browser-contracts.ts';
 import { webRequestAudit } from '../../../shared/web-request.ts';
 import { registerBrowserUsage } from '../../browser-usage.ts';
-import { registeredClaudeAccounts } from '../../browser-usage-accounts.ts';
+import { enabledCloudProviders, registeredClaudeAccounts } from '../../browser-usage-accounts.ts';
 import { isMainInstance, mainOf, type Module } from '../types.ts';
 
 /** 网页版 claude.ai：浏览器扩展桥接、网页提问、`claude-browser` 额度来源。 */
@@ -18,6 +18,7 @@ export const browserModule: Module = {
     void ready().catch(() => {});
     const usageStore = registerBrowserUsage(server, ready, context.stateDirectory, Date.now, {
       registeredClaudeAccounts: () => registeredClaudeAccounts(context.services.home, join(context.baseDirectory, 'labels.json')),
+      cloudProviders: () => enabledCloudProviders(context.services.home, context.machine.modules['providers.cloudSession'] !== false),
     });
     server.handle(browserRpc.browserSnapshot, async () => (await ready()).snapshot());
     server.handle(browserRpc.browserConfigure, async input => (await ready()).configure(input));

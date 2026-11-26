@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { adsPowerLoginMethod, browserAccountKey, registeredClaudeAccounts } from '../server/browser-usage-accounts.ts';
+import { adsPowerLoginMethod, assignCloudUsageRecords, browserAccountKey, enabledCloudProviders, registeredClaudeAccounts } from '../server/browser-usage-accounts.ts';
 import { BrowserUsageStore } from '../server/browser-usage.ts';
 
 test('AdsPower 登录标签区分 Apple 和直接登录，缺失或冲突标签不用于去重', () => {
@@ -173,6 +173,59 @@ test('同账号浏览器项自动去重，Provider 变化后恢复，记录与 A
     await store.stop();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('云端额度卡数量等于启用的云端 Provider，并和浏览器记录对应', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'browser-cloud-providers-'));
+  const now = Date.parse('2026-11-18T12:00:00Z');
+  const record = (instanceId: string, name: string) => ({ instanceId, instanceName: name, displayName: name, lastPostAt: now, status: 'ok' as const, fiveHour: { usedPct: 10, resetsAt: null, observedAt: new Date(now).toISOString() }, weekly: null });
+  try {
+    await writeFile(join(directory, 'config.json'), JSON.stringify({ agents: { providers: { 'cloud-session': { enabled: false, label: '云端会话' } } } }));
+    assert.deepEqual(enabledCloudProviders(directory, true), []);
+    assert.deepEqual(enabledCloudProviders(directory, false), []);
+    await writeFile(join(directory, 'config.json'), JSON.stringify({ agents: { providers: { claude: { enabled: true } } } }));
+    assert.deepEqual(enabledCloudProviders(directory), [{ id: 'cloud-session', label: '云端会话' }]);
+    await writeFile(join(directory, 'config.json'), JSON.stringify({ agents: { providers: {
+      'cloud-session': { enabled: false },
+      'cloud-mail': { extends: 'cloud-session', enabled: true, label: '云端 · mail@example.com' },
+      'cloud-other': { extends: 'cloud-session', label: '云端 · other@example.com' },
+      'cloud-off': { extends: 'cloud-session', enabled: false, label: '云端 · off@example.com' },
+    } } }));
+    assert.deepEqual(enabledCloudProviders(directory).map(provider => provider.id), ['cloud-mail', 'cloud-other']);
+
+    const providers = enabledCloudProviders(directory);
+    const records = [record('mail', 'mail@example.com'), record('extra', '未命名浏览器环境'), record('other', 'other@example.com')];
+    const assigned = assignCloudUsageRecords(providers, records);
+    assert.equal(assigned.get('cloud-mail')?.instanceId, 'mail');
+    assert.equal(assigned.get('cloud-other')?.instanceId, 'other');
+    assert.equal([...assigned.keys()].includes('extra'), false);
+
+    const store = new BrowserUsageStore(directory, () => now, { cloudProviders: () => enabledCloudProviders(directory) });
+    await writeFile(join(directory, 'browser-usage.json'), JSON.stringify({ records }));
+    await store.load();
+    const discovered = await store.discover();
+    assert.deepEqual(discovered.map(account => account.label), ['云端 · mail@example.com', '云端 · other@example.com']);
+    assert.equal(discovered.length, 2);
+    await writeFile(join(directory, 'config.json'), JSON.stringify({ agents: { providers: { 'cloud-session': { enabled: false } } } }));
+    assert.deepEqual(await store.discover(), []);
+    const sourceInput = { providerId: 'cloud-session' };
+    assert.equal(store.cloudUsageRecord(sourceInput.providerId), 'closed');
+    await store.stop();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('只剩一个云端 Provider 和一条浏览器记录时配成一对', () => {
+  const assigned = assignCloudUsageRecords(
+    [{ id: 'cloud-session', label: '云端会话' }],
+    [{ instanceId: 'only', instanceName: '未命名浏览器环境' }],
+  );
+  assert.equal(assigned.get('cloud-session')?.instanceId, 'only');
+  assert.equal(assignCloudUsageRecords(
+    [{ id: 'one', label: '云端甲' }, { id: 'two', label: '云端乙' }],
+    [{ instanceId: 'only', instanceName: '未命名浏览器环境' }],
+  ).size, 0);
 });
 
 test('旧记录热更新后补取登录标签，自动识别环境有名称时仍核对完整账号资料', async () => {

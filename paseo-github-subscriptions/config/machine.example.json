@@ -125,10 +125,8 @@
     "sources": [
       "antigravity-multi",
       "codex-multi",
-      "grok-multi",
       "qoder",
       "glm",
-      "cursor-cli",
       "opencode-token-switch"
     ],
     "hideBuiltin": [

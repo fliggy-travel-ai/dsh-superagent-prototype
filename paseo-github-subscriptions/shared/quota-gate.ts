@@ -2,6 +2,15 @@ import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 
 /** 门控例外：pattern 以 `*` 结尾时按前缀匹配（如 `codex*` 命中 `codex-2`），其余精确匹配 provider ID。 */
+/** 例外项在页面上用 Provider 显示名；对不上单个 Provider 时保留原来的模式。 */
+export function gateExceptionLabel(
+  pattern: string,
+  providers: readonly { id: string; label: string | null }[],
+): string {
+  const exact = providers.find(provider => provider.id === pattern);
+  return exact?.label || exact?.id || pattern;
+}
+
 export function gateExcluded(patterns: readonly string[], provider: string): boolean {
   return patterns.some(pattern => pattern.endsWith('*') ? provider.startsWith(pattern.slice(0, -1)) : pattern === provider);
 }

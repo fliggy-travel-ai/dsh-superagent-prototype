@@ -11,7 +11,7 @@ import { proxyAccount, proxyQuotaUrl, readProxyQuotas } from '../server/modules/
 import { quotaFromReports } from '../server/modules/providers-quota-gate/reports.ts';
 import { localQuotaReader } from '../server/modules/providers-quota-gate/reports.ts';
 import { quotaProblems, quotaUsable, quotaWarnings } from '../server/modules/providers-quota-gate/rules.ts';
-import { gateExcluded, toggleGateExclusion, quotaGateSnapshot, quotaGateConfigure } from '../shared/quota-gate.ts';
+import { gateExcluded, gateExceptionLabel, toggleGateExclusion, quotaGateSnapshot, quotaGateConfigure } from '../shared/quota-gate.ts';
 
 type UsageEntry = Parameters<typeof quotaFromReports>[0][number];
 const window = (remainingPct: number) => ({ id: 'weekly', label: 'Weekly', remainingPct });
@@ -52,9 +52,9 @@ test('本机用户的 Claude 账号凭据缺失时拒绝，独立系统用户的
 });
 
 test('Cursor 有其他可用池即放行，Antigravity 跳过阈值但拒绝 avoid', () => {
-  const quotas = [usage('cursor-cli', 'cursor-isolated', available(window(0), window(2))),
+  const quotas = [usage('cursor', 'cursor', available(window(0), window(2))),
     usage('antigravity-multi', 'agy-isolated', available(window(2))), usage('antigravity-multi', 'agy-exhausted', available(window(0)))];
-  assert.equal(quotaUsable(quotaFromReports(quotas, 'cursor-isolated', 'cursor', undefined, 0), 10), true);
+  assert.equal(quotaUsable(quotaFromReports(quotas, 'cursor', 'cursor', undefined, 0), 10), true);
   assert.equal(quotaUsable(quotaFromReports(quotas, 'agy-isolated', 'antigravity', undefined, 0), 10), true);
   assert.deepEqual(quotaProblems(quotaFromReports(quotas, 'agy-exhausted', 'antigravity', undefined, 0)), [
     '额度已耗尽（allocationHint avoid）', 'Weekly 窗口剩余 0%',
@@ -227,6 +227,9 @@ test('toggleGateExclusion：精确添加、精确移除、通配按本机 Provid
   assert.deepEqual(toggleGateExclusion(['codex*'], 'codex-2', false, ['codex', 'codex-2', 'codex-3', 'grok']), ['codex', 'codex-3']);
   assert.deepEqual(toggleGateExclusion(['codex*', 'grok'], 'grok', false, ['codex', 'codex-2', 'grok']), ['codex*']);
   assert.equal(gateExcluded(['codex', 'codex-*'], 'codex-3'), true);
+  assert.equal(gateExceptionLabel('codex', [{ id: 'codex', label: 'Codex · a@example.com' }]), 'Codex · a@example.com');
+  assert.equal(gateExceptionLabel('codex*', [{ id: 'codex', label: 'Codex · a@example.com' }]), 'codex*');
+  assert.equal(gateExceptionLabel('missing', []), 'missing');
 });
 
 test('snapshot 列出本机 Provider，configure 写回 machine.json 并让钩子立即生效', async context => {
