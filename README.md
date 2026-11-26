@@ -2,6 +2,8 @@
 
 这个仓库现在只保留正在使用的 Paseo 插件。
 
+开发、部署和评审约定见 [AGENTS.md](AGENTS.md)。
+
 - [paseo-github-subscriptions](paseo-github-subscriptions/)：安装到 Paseo 的插件，侧边栏名称是「开发自动化」。说明见该目录的 [OVERVIEW.md](paseo-github-subscriptions/OVERVIEW.md)。
 - [paseo-cloud-session](paseo-cloud-session/)：云端会话里运行的转发程序，对应插件里的云端会话 Provider。
 - [plans](plans/)：插件方案记录。

@@ -4,7 +4,7 @@ const permitted = new Set([
   'capacity.snapshot', 'capacity.clear-review', 'dispatch.finalize',
   'machine.settings.snapshot', 'escalation.snapshot', 'presence.snapshot', 'provider-quotas.snapshot',
   'browser.snapshot', 'browser.usage.snapshot', 'antigravity.snapshot', 'claude-accounts.snapshot',
-  'subscriptions.snapshot', 'quiet.snapshot', 'defaults.snapshot',
+  'subscriptions.snapshot', 'quiet.snapshot', 'defaults.snapshot', 'modules.status',
 ]);
 export function parseRpcArgs(args: string[]) {
   if (args.length !== 2 || !permitted.has(args[0]!)) throw Error('只允许指定的 RPC 或只读 snapshot');
