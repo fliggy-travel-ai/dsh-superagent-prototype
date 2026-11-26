@@ -190,6 +190,28 @@ test('不支持steer的忙会话按提供方设置跳过，默认仍立即发送
   assert.equal(sent, true);
 }));
 
+test('忙碌的 Claude 会话默认本轮结束后送达，避免插话落到下一次提问上；空闲时直接送达', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.subscriptions = [subscription()]; });
+  await acceptBatch(storage, [event('busy')], {}, at);
+  const sent: unknown[] = [];
+  await new Dispatcher(storage, daemon({ provider: 'claude-3', send: (_text, input) => sent.push(input) }), String).flush();
+  await acceptBatch(storage, [event('idle')], {}, at);
+  await new Dispatcher(storage, daemon({ provider: 'claude-3', status: 'idle', send: (_text, input) => sent.push(input) }), String).flush();
+  assert.deepEqual(sent.map(input => (input as { activeTurnBehavior?: string }).activeTurnBehavior), [undefined, 'steer']);
+  assert.ok(storage.state.deliveries.every(delivery => delivery.status === 'delivered'));
+}));
+
+test('账号家族的设置覆盖 Claude 默认，账号名的设置优先于家族', () => fixture(async storage => {
+  await storage.mutate(state => { state.preferences.shadow = false; state.preferences.providerPolicies.claude = 'interrupt'; state.subscriptions = [subscription()]; });
+  const sent: unknown[] = [];
+  await acceptBatch(storage, [event('family')], {}, at);
+  await new Dispatcher(storage, daemon({ provider: 'claude-3', send: (_text, input) => sent.push(input) }), String).flush();
+  await storage.mutate(state => { state.preferences.providerPolicies['claude-3'] = 'queue'; });
+  await acceptBatch(storage, [event('account')], {}, at);
+  await new Dispatcher(storage, daemon({ provider: 'claude-3', send: (_text, input) => sent.push(input) }), String).flush();
+  assert.deepEqual(sent.map(input => (input as { activeTurnBehavior?: string }).activeTurnBehavior), ['steer', undefined]);
+}));
+
 test('重启保留游标、事件和稳定发送编号，重复批次不生成新送达记录', () => fixture(async storage => {
   await storage.mutate(state => { state.subscriptions = [subscription()]; });
   await acceptBatch(storage, [event()], { cursor: 'saved' }, at);
