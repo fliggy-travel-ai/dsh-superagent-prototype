@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   plugin:
-    runs-on: ubuntu-latest
+    # 插件只在 macOS 的 Paseo 中运行，测试按 macOS 行为编写。
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: paseo-github-subscriptions
