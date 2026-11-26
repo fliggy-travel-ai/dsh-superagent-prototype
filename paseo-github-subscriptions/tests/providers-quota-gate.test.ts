@@ -103,7 +103,7 @@ test('代理只查本机、不跟随重定向，按代理账户池评估且不�
   assert.match(quotaProblems(proxyAccount(failed, 'grok', 'grok'))[0]!, /upstream\.error/);
 });
 
-test('创建钩子拒绝耗尽账号，只列本机启用且额度通过的账号，低额度和未知记录警告后放行', async context => {
+test('创建钩子拒绝耗尽账号和有达标备选时的低额度账号，只列本机启用且额度通过的账号，未知额度警告后放行', async context => {
   const home = mkdtempSync(join(tmpdir(), 'quota-gate-'));
   context.after(() => rmSync(home, { recursive: true, force: true }));
   writeFileSync(join(home, 'config.json'), '{}');
@@ -138,13 +138,46 @@ test('创建钩子拒绝耗尽账号，只列本机启用且额度通过的账�
   await assert.rejects(hook({ request }), /codex-empty.*0%.*本机额度可用账号：codex-spare$/);
   const passing = { config: { cwd: home, provider: 'codex-spare' } };
   assert.equal(await hook({ request: passing }), passing);
+  // #2298：低于阈值的 codex-5、codex-4 被放行后约 20、30 分钟用尽，3 个会话改派。
+  const low = { config: { cwd: home, provider: 'codex-low' } };
+  await assert.rejects(hook({ request: low }), /codex-low.*低于 10%.*Weekly 窗口剩余 8%.*本机额度可用账号：codex-spare$/);
+  const warn = context.mock.method(console, 'warn', () => {});
+  const unknown = { config: { cwd: home, provider: 'codex-unknown' } };
+  assert.equal(await hook({ request: unknown }), unknown);
+  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-unknown.*额度未知/);
+});
+
+test('低额度账号在本机没有达标备选时警告后放行', async context => {
+  const home = mkdtempSync(join(tmpdir(), 'quota-gate-'));
+  context.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, 'config.json'), '{}');
+  let hook: ((input: { request: { config: { cwd: string; provider: string } } }) => Promise<unknown>) | undefined;
+  const client = {
+    listUsageReports: async () => ({ reports: [
+      usage('codex-multi', 'codex-low', available(window(8))),
+      usage('codex-multi', 'codex-empty', available(window(0))),
+    ] }),
+    getProvidersSnapshot: async () => ({ entries: ['codex-low', 'codex-empty'].map(provider => ({ provider, enabled: true, status: 'loading' })) }),
+  };
+  quotaGateModule.register({
+    id: 'providers.quotaGate',
+    server: {
+      addHook: (_name: string, handler: typeof hook) => { hook = handler; return () => {}; },
+      handle: () => () => {},
+    } as never,
+    instance: resolveInstance('main'),
+    machine: loadMachineConfig(join(home, 'machine.json'), {}),
+    services: { home, daemon: { ready: async () => ({ client }) } } as never,
+    config: quotaGateModule.config!.spec.fallback,
+    stateDirectory: home,
+    baseDirectory: home,
+    fail: () => {},
+  });
+  assert.ok(hook);
   const warn = context.mock.method(console, 'warn', () => {});
   const low = { config: { cwd: home, provider: 'codex-low' } };
   assert.equal(await hook({ request: low }), low);
-  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-low.*低于 10%.*Weekly 窗口剩余 8%/);
-  const unknown = { config: { cwd: home, provider: 'codex-unknown' } };
-  assert.equal(await hook({ request: unknown }), unknown);
-  assert.match(String(warn.mock.calls[1]?.arguments[0]), /codex-unknown.*额度未知/);
+  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-low.*低于 10%.*没有达标账号，允许创建会话/);
 });
 
 test('机器配置默认阈值、显式覆盖和非法值校验', () => {
