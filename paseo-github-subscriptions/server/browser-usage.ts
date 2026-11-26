@@ -874,7 +874,7 @@ export class BrowserUsageStore {
       const assigned = assignCloudUsageRecords(providers, records);
       const counts = new Map<string, number>();
       for (const provider of providers) counts.set(provider.label, (counts.get(provider.label) ?? 0) + 1);
-      return providers.map(provider => {
+      return providers.map((provider): UsageAccount => {
         const record = assigned.get(provider.id);
         const duplicate = (counts.get(provider.label) ?? 0) > 1;
         return {
