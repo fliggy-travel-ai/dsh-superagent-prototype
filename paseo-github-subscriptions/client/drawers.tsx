@@ -5,6 +5,7 @@ import type { BluetoothSnapshot } from '../shared/bluetooth.ts';
 import type { BrowserUsageSettings } from '../shared/browser-usage.ts';
 import type { EscalationSnapshot } from '../shared/escalation.ts';
 import type { Preferences } from '../shared/model.ts';
+import { providerPolicy } from '../shared/provider-policy.ts';
 import { ago, until } from './format.ts';
 import { errorMessage } from './store.ts';
 import { Btn, Card, Chip, Notice, RuleNote, Segmented, useControlState, useStoreState, useUi } from './ui.tsx';
@@ -1353,13 +1354,14 @@ function GithubConfigDrawer() {
 
       <SectionTitle>会话忙时策略</SectionTitle>
       {(['claude', 'codex', 'opencode'] as const).map(provider => {
-        const current = draft.providerPolicies[provider] ?? 'interrupt';
+        const current = providerPolicy(draft.providerPolicies, provider);
         return (
           <View key={provider} style={[s.row, { justifyContent: 'space-between' }]}>
             <Text style={s.mono}>{provider}</Text>
             <Segmented
               options={[
                 { value: 'interrupt', label: '立即发送' },
+                { value: 'queue', label: '本轮结束后' },
                 { value: 'skip', label: '跳过本轮' },
               ]}
               value={current}

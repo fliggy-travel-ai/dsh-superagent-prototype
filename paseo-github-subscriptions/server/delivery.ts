@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PaseoApi } from '@getpaseo/client';
 import type { GithubEvent, Subscription } from '../shared/model.ts';
+import { providerPolicy } from '../shared/provider-policy.ts';
 import { questionRequest } from './notify/routing.ts';
 import { Storage, type PendingDelivery } from './storage.ts';
 
@@ -117,7 +118,7 @@ export class Dispatcher {
           await this.hold(candidate);
           continue;
         }
-        const policy = this.storage.state.preferences.providerPolicies[agent.provider];
+        const policy = providerPolicy(this.storage.state.preferences.providerPolicies, agent.provider);
         const canSteer = agent.capabilities.supportsSteer === true || /^(claude|codex)(?:-|$)/.test(agent.provider);
         if (agent.status === 'running' && policy === 'skip' && !canSteer) {
           await this.finish(candidate, 'skipped', '提供方未确认支持 steer，按设置跳过当前事件');
@@ -128,7 +129,7 @@ export class Dispatcher {
         await this.storage.mutate(state => { const record = state.deliveries.find(delivery => delivery.id === candidate.id); if (record) record.attempts++; });
         if (this.storage.state.preferences.shadow || !this.storage.state.preferences.enabled) return;
         if (this.storage.state.deliveries.find(delivery => delivery.id === candidate.id)?.status !== 'pending') continue;
-        await handle.send(candidate.text, { activeTurnBehavior: 'steer', messageId: candidate.id });
+        await handle.send(candidate.text, agent.status === 'running' && policy === 'queue' ? { messageId: candidate.id } : { activeTurnBehavior: 'steer', messageId: candidate.id });
         await this.finish(candidate, 'delivered', null);
       } catch (error) {
         blocked.add(candidate.agentId);

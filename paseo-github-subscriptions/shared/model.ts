@@ -9,9 +9,10 @@ export const PreferencesSchema = z.object({
   organization: z.string().regex(/^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i).default('fliggy-travel-ai'),
   excludedRepos: z.array(z.string().min(1)).default(['rea', 'dsh-superagent-prototype', 'hypit', 'content-wx', 'harness2']),
   extraRepos: z.array(z.string().regex(/^[\w.-]+\/[\w.-]+$/)).default([]),
-  providerPolicies: z.record(z.string(), z.enum(['interrupt', 'skip'])).default({}),
+  providerPolicies: z.record(z.string(), z.enum(['interrupt', 'queue', 'skip'])).default({}),
 });
 export type Preferences = z.infer<typeof PreferencesSchema>;
+export type ProviderPolicy = Preferences['providerPolicies'][string];
 export const SubscriptionSchema = z.object({
   id: z.string(), agentId: z.string(), workspaceId: z.string().nullable(),
   agentTitle: z.string().nullable(), parentAgentId: z.string().nullable(),
