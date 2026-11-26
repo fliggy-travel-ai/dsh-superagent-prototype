@@ -1,6 +1,6 @@
 # GitHub 订阅 Paseo 插件
 
-插件独立位于本目录。用户操作说明见 [OVERVIEW.md](OVERVIEW.md)，完整方案及确认记录见 [技术方案](../plans/paseo-github-subscriptions.md)。开发和验证不修改原型已有源代码，也不修改 Paseo 上游。
+插件独立位于本目录。用户操作说明见 [OVERVIEW.md](OVERVIEW.md)，完整方案及确认记录见 [技术方案](../plans/paseo-github-subscriptions.md)。不修改 Paseo 上游。
 
 ## 在线、离线与人工待办
 
@@ -83,7 +83,7 @@ npm run vendor:check
 npm run test:daemon
 ```
 
-`check` 包含类型检查与单元测试，不改变仓库根目录的 `pnpm check`。隔离联调用临时 PASEO_HOME、独立端口、固定提供方与网络夹具；没有真实模型调用，没有真实 GitHub 请求。测试结束只停止自建守护进程，并删除临时目录。
+`check` 包含类型检查与单元测试。隔离联调用临时 PASEO_HOME、独立端口、固定提供方与网络夹具；没有真实模型调用，没有真实 GitHub 请求。测试结束只停止自建守护进程，并删除临时目录。
 
 提交保留检查汇总、复现脚本和必要实测记录。下表中的 daemon 原始报告、日志及界面 `out/` 均为本地输出，不随源码提交；可按复现说明重新生成。
 
@@ -104,9 +104,9 @@ npm run test:daemon
 
 ## 原型复用边界
 
-`server/vendor/dsh-superagent` 由 `scripts/vendor-sync.ts` 生成三个纯逻辑副本，只调整导入并记录原文件 SHA-256。`shim.ts` 是本插件适配层。漂移检查会在原型变更时失败，更新时运行 `node --experimental-strip-types scripts/vendor-sync.ts` 后检查差异。
+`server/vendor/dsh-superagent` 由 `scripts/vendor-sync.ts` 从仓库根目录留下的三份源文件生成，只调整导入并记录 SHA-256。`shim.ts` 是本插件适配层。这三份源文件变更后，运行 `node --experimental-strip-types scripts/vendor-sync.ts` 再检查差异。
 
-事件格式、CI 摘要与 `readGithub` 复用原型纯函数；GitHub 请求通过本插件的 fetch 适配器执行。未复制原型的命令执行器、Web、Eval、Ticket 或 Executor。安装包只包含客户端、服务端、共享定义和用户说明，不包含夹具、截图及开发依赖目录。
+事件格式、CI 摘要与 `readGithub` 复用这三份纯函数；GitHub 请求通过本插件的 fetch 适配器执行。安装包只包含客户端、服务端、共享定义和用户说明，不包含夹具、截图及开发依赖目录。
 
 ## 云端会话 Provider
 
