@@ -333,31 +333,38 @@ test('mergeFleetQuotas & collectFleetQuotas：按账号跨主机去重、低于 
     ],
   };
 
-  const fleet = await collectFleetQuotas(
-    {
-      hosts: async () => [
-        { id: 'srv-mini', name: 'Mac mini', online: true },
-        { id: 'srv-mb', name: 'MacBook', online: true },
-        { id: 'srv-off', name: '备用机', online: false },
-        { id: 'srv-old', name: '旧插件机', online: true },
-      ],
-      selfId: () => 'srv-mini',
-      local: async () => miniData,
-      remote: async host => {
-        if (host.id === 'srv-mb') return macbookData;
-        throw new Error('RPC method not found: providers.quotas.local');
-      },
+  const port = {
+    hosts: async () => [
+      { id: 'srv-mini', name: 'Mac mini', online: true },
+      { id: 'srv-mb', name: 'MacBook', online: true },
+      { id: 'srv-off', name: '备用机', online: false },
+      { id: 'srv-old', name: '旧插件机', online: true },
+    ],
+    selfId: () => 'srv-mini',
+    local: async () => miniData,
+    remote: async (host: { id: string }) => {
+      if (host.id === 'srv-mb') return macbookData;
+      throw new Error('RPC method not found: providers.quotas.local');
     },
-    { concurrencyTarget: 3, now: () => NOW },
-  );
+  };
 
-  // 4 台主机状态全部显式返回，且返回裁剪掉 minRemainingPct / accountKey / hostName 重复字段
-  assert.equal(fleet.hosts.length, 4);
-  assert.equal(fleet.hosts.find(h => h.serverId === 'srv-off')?.error, '主机离线');
-  assert.match(fleet.hosts.find(h => h.serverId === 'srv-old')?.error ?? '', /升级并重载/);
-  assert.equal('minRemainingPct' in fleet, false);
+  // 默认 includeUnavailable=false：隐藏 blocked 账号与同账号下不可用主机，但仍保留总运行会话数与 hiddenUnavailableCount
+  const defaultFleet = await collectFleetQuotas(port, { concurrencyTarget: 3, now: () => NOW });
+  assert.equal(defaultFleet.hosts.length, 4);
+  assert.equal(defaultFleet.hosts.find(h => h.serverId === 'srv-off')?.error, '主机离线');
+  assert.match(defaultFleet.hosts.find(h => h.serverId === 'srv-old')?.error ?? '', /升级并重载/);
+  assert.equal('minRemainingPct' in defaultFleet, false);
+  assert.equal(defaultFleet.accounts.length, 3);
+  assert.equal(defaultFleet.hiddenUnavailableCount, 1);
 
-  // 6 条主机条目按真实账号去重为 4 个账号
+  const defaultGlm = defaultFleet.accounts[1]!;
+  assert.equal(defaultGlm.kind, 'glm');
+  assert.equal(defaultGlm.runningSessions, 3); // 仍汇总两机总会话数
+  assert.deepEqual(defaultGlm.supportedHosts.map(h => h.serverId), ['srv-mini']); // 不可用的 MacBook 主机被隐藏
+
+  // includeUnavailable=true：返回全部 4 个账号（含低于 1% 的 blocked 账号与不可用主机错误）
+  const fleet = await collectFleetQuotas(port, { concurrencyTarget: 3, includeUnavailable: true, now: () => NOW });
+  assert.equal(fleet.hiddenUnavailableCount, undefined);
   assert.equal(fleet.accounts.length, 4);
 
   // 第 1 条：prefer 的共享 Antigravity 账号，支持 MacBook（antigravity，0 running）和 Mac mini（antigravity-2，1 running）
@@ -456,21 +463,19 @@ test('quotaToolModule：注册本地/跨主机 RPC，并通过 agent.open.before
 
   const toolResult = await liveReq.tools[0]!.execute({}) as { text: string; structuredContent?: unknown };
   assert.equal(toolResult.structuredContent, undefined);
-  assert.ok(toolResult.text.includes('### 主机'));
-  assert.ok(toolResult.text.includes('| srv-self | 本机 (本机) | ok |'));
+  assert.ok(toolResult.text.includes('主机: H1=srv-self(本机,本机,ok)'));
   assert.ok(toolResult.text.includes('无匹配账号。'));
 
   await cleanup?.();
   assert.equal(removed, true);
 });
 
-test('formatFleetQuotasMarkdown：渲染主机表与去重账号表、省略默认 hint 与重复重置时间、转义管道符与换行并支持代理上游', () => {
-  const fleet: FleetQuotas = {
+test('formatFleetQuotasMarkdown：高压缩表格、主机别名、同日省略日期、无额外备注时省略备注列及隐藏计数提示', () => {
+  const compactFleet: FleetQuotas = {
     collectedAt: '2026-11-27T08:42:39.891Z',
     hosts: [
-      { serverId: 'srv-mini', hostName: 'Host | A', isSelf: true, ok: true },
-      { serverId: 'srv-mb', hostName: 'Host B', ok: true, sessionsError: 'list\ntimeout' },
-      { serverId: 'srv-off', hostName: 'Host C', ok: false, error: '主机离线' },
+      { serverId: 'srv-mini', hostName: 'Mac Mini', isSelf: true, ok: true },
+      { serverId: 'srv-mb', hostName: 'MacBook', ok: true },
     ],
     accounts: [
       {
@@ -484,6 +489,53 @@ test('formatFleetQuotasMarkdown：渲染主机表与去重账号表、省略默�
         load: 'idle',
         supportedHosts: [{ serverId: 'srv-mb', providerId: 'opencode', runningSessions: 0, usable: true }],
       },
+      {
+        kind: 'antigravity',
+        verdict: 'ok',
+        allocationHint: 'prefer',
+        windows: [{ label: 'Gemini 5h', remainingPct: 92, resetsAt: '2026-11-27T09:17:00Z', hint: 'prefer' }],
+        runningSessions: 3,
+        load: 'high',
+        warnings: ['并发负载高（3 个运行中会话）'],
+        supportedHosts: [
+          { serverId: 'srv-mini', providerId: 'antigravity-2', runningSessions: 0, usable: true },
+          { serverId: 'srv-mb', providerId: 'antigravity', runningSessions: 3, usable: true },
+        ],
+      },
+    ],
+    hiddenUnavailableCount: 5,
+  };
+
+  const compactMd = formatFleetQuotasMarkdown(compactFleet);
+  assert.ok(compactMd.startsWith('时间: 2026-11-27 08:42Z | 按推荐度排序，默认隐藏不可用(<1%，传 includeUnavailable=true 查看全部)\n'));
+  assert.ok(compactMd.includes('主机: H1=srv-mini(Mac Mini,本机,ok), H2=srv-mb(MacBook,ok)'));
+  // 无额外备注时不输出备注列
+  assert.ok(compactMd.includes('| 类型 | 建议 | 窗口与余额 | 并发 | 主机/providerId |'));
+  assert.equal(compactMd.includes('| 备注 |'), false);
+  // 100% 省略 [prefer]、同重置时刻余额不重复时间、空闲主机省略 (0)
+  assert.ok(compactMd.includes('| opencode (TokenHub · 共享积分) | prefer | 月 100% (12-22 16:00Z); 49000 credits | 0 | H2/opencode |'));
+  // 当日时间只写 HH:mmZ、高负载标为 3(高)
+  assert.ok(compactMd.includes('| antigravity | prefer | Gemini 5h 92% (09:17Z) [prefer] | 3(高) | H1/antigravity-2, H2/antigravity(3) |'));
+  assert.ok(compactMd.endsWith('\n\n已隐藏 5 个不可用账号'));
+
+  // 全被隐藏时明确给出隐藏数量提示
+  const allHiddenMd = formatFleetQuotasMarkdown({
+    collectedAt: '2026-11-27T08:42:39.891Z',
+    hosts: compactFleet.hosts,
+    accounts: [],
+    hiddenUnavailableCount: 2,
+  });
+  assert.ok(allHiddenMd.includes('无可用账号（已隐藏 2 个不可用账号，传 includeUnavailable=true 查看）。'));
+
+  // includeUnavailable=true：展示不可用账号、跨年时间、管道符转义、代理上游与备注列
+  const fullFleet: FleetQuotas = {
+    collectedAt: '2026-11-27T08:42:39.891Z',
+    hosts: [
+      { serverId: 'srv-mini', hostName: 'Host A', isSelf: true, ok: true },
+      { serverId: 'srv-mb', hostName: 'Host B', ok: true, sessionsError: 'list\ntimeout' },
+      { serverId: 'srv-off', hostName: 'Host C', ok: false, error: '主机离线' },
+    ],
+    accounts: [
       {
         kind: 'codex',
         verdict: 'ok',
@@ -515,32 +567,14 @@ test('formatFleetQuotasMarkdown：渲染主机表与去重账号表、省略默�
         error: '额度已耗尽',
         supportedHosts: [{ serverId: 'srv-mini', providerId: 'claude-1', runningSessions: 0, usable: false }],
       },
-      {
-        kind: 'antigravity',
-        verdict: 'unknown',
-        allocationHint: 'unknown',
-        runningSessions: 0,
-        load: 'idle',
-        supportedHosts: [{ serverId: 'srv-mb', providerId: 'antigravity-x', runningSessions: 0, usable: false, hostError: 'Provider 状态为 unavailable' }],
-      },
     ],
   };
 
-  const md = formatFleetQuotasMarkdown(fleet);
-  assert.ok(md.startsWith('采集时间: 2026-11-27T08:42:39Z\n'));
-  // 管道符与换行已转义
-  assert.ok(md.includes('| srv-mini | Host \\| A (本机) | ok |'));
-  assert.ok(md.includes('| srv-mb | Host B | ok (会话失败: list timeout) |'));
-  assert.ok(md.includes('| srv-off | Host C | 失败: 主机离线 |'));
-  // opencode 余额与窗口同一重置时刻，不重复输出重置时间
-  assert.ok(md.includes('| opencode (TokenHub · 共享积分) | ok/prefer | 月 100% (12-22 16:00Z) [prefer]; 49000 credits | 0 idle | srv-mb/opencode(0) |  |'));
-  // 跨年显示完整年份、normal 省略方括号、代理上游与付费余额与 ? unknown 负载正确展示
-  assert.ok(md.includes('wk 85% (2027-01-02 05:00Z); unlimited; 付费余额可用; 代理上游: pool-a(5h 75% [prefer], $12)'));
-  assert.ok(md.includes('| ? unknown | srv-mini/codex(1), srv-mb/codex-2(?, 不可用: HTTP 401 \\| bad) |'));
-  // 备注去重（error 与 blockReasons 相同只写一次）
-  assert.ok(md.includes('| claude (max) | blocked/avoid | wk 0% (11-27 10:00Z) [avoid] | 0 idle | srv-mini/claude-1(0, 不可用) | 额度已耗尽; wk 剩余 0% |'));
-  // unknown/unknown 合并为 unknown，无窗口显示 -
-  assert.ok(md.includes('| antigravity | unknown | - | 0 idle | srv-mb/antigravity-x(0, 不可用: Provider 状态为 unavailable) |  |'));
-  // 不含 JSON 键壳
-  assert.equal(md.includes('"supportedHosts"'), false);
+  const fullMd = formatFleetQuotasMarkdown(fullFleet, { includeUnavailable: true });
+  assert.ok(fullMd.includes('主机: H1=srv-mini(Host A,本机,ok), H2=srv-mb(Host B,ok,会话失败:list timeout), H3=srv-off(Host C,失败:主机离线)'));
+  assert.ok(fullMd.includes('| 类型 | 建议 | 窗口与余额 | 并发 | 主机/providerId | 备注 |'));
+  assert.ok(fullMd.includes('wk 85% (2027-01-02 05:00Z); unlimited; 付费余额可用; 代理上游: pool-a(5h 75% [prefer], $12)'));
+  assert.ok(fullMd.includes('| ? | H1/codex(1), H2/codex-2(?,不可用: HTTP 401 \\| bad) |  |'));
+  assert.ok(fullMd.includes('| claude (max) | blocked | wk 0% (10:00Z) [avoid] | 0 | H1/claude-1(不可用) | 额度已耗尽; wk 剩余 0% |'));
+  assert.equal(fullMd.includes('"supportedHosts"'), false);
 });

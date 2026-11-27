@@ -123,7 +123,7 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 「开发自动化 → Provider 与账号」中的「新建会话额度检查」卡片按本机 Provider 清单逐个调整拦截：选择一个 Provider 后「停止拦截」或「恢复拦截」，保存写回本机 `machine.json` 的 `quotaGate.excludeProviders` 并立即生效，不需要重载插件。恢复被 `codex*` 之类通配模式放行的 Provider 时，通配按本机现有 Provider 展开成精确项，只影响这台机器。卡片右上开关整体启停模块（需重载插件）；阈值 `minRemainingPct` 与手写配置见插件 README。守护进程暂不可用时 Provider 清单读取失败，按钮停用并自动重试。
 
-会话同时内置只读 MCP 工具 `provider_quotas`（由 `providers.quotaTool` 模块提供，默认启用）。调用方无需指定主机即可一次查询本机及所有已配对在线主机的 Provider 额度与并发会话负载：结果按真实底层账号跨主机去重（不输出邮箱与凭据），共享窗口低于 1% 判为不可用（1% 及以上仍可用），直接以精简的 Markdown 表格返回主机状态表与按推荐度排序的账号表（减少上下文占用）；账号表中的支持主机列直接给出每台主机的 `serverId/providerId(运行中会话数)` 及不可用原因，可直接用于 `create_agent` 派发；离线或查询失败的主机在主机表中显式给出原因。
+会话同时内置只读 MCP 工具 `provider_quotas`（由 `providers.quotaTool` 模块提供，默认启用）。调用方无需指定主机即可一次查询本机及所有已配对在线主机的 Provider 额度与并发会话负载：结果按真实底层账号跨主机去重（不输出邮箱与凭据），共享窗口低于 1% 判为不可用（1% 及以上仍可用），默认隐藏不可用账号与不可用主机（传 `includeUnavailable: true` 可查看全部）；输出为高压缩 Markdown 表格（顶部一行列出 `H1`/`H2` 对应的 `serverId` 与主机状态，表格按推荐度列出可用账号及 `H#/providerId`），离线或查询失败的主机在主机行显式给出原因。
 
 ## 主会话收尾与容量
 

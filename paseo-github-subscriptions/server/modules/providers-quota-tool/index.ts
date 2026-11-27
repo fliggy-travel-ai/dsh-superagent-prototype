@@ -71,16 +71,17 @@ export const quotaToolModule: Module = {
 
     const tool = defineAgentTool({
       name: 'provider_quotas',
-      description: '查询当前 Paseo 守护进程本机及所有已配对在线主机的 Provider 剩余额度、并发会话负载与派发建议。调用无需指定主机；返回精简的 Markdown 表格（主机状态表与按实际底层账号跨主机去重并排序的账号表），共享窗口低于 1% 判为 blocked，支持主机列直接给出 serverId/providerId(运行中会话数) 与不可用原因，可直接用于 create_agent 选型。离线或查询失败的主机会在主机表中明确报错。',
+      description: '查询当前 Paseo 守护进程本机及所有已配对在线主机的 Provider 剩余额度、并发会话负载与派发建议。调用无需指定主机；返回高压缩 Markdown 表格（顶部列出主机别名 H1/H2→serverId 与状态，下表为按实际底层账号跨主机去重并按推荐度排序的账号），默认隐藏不可用/共享窗口低于 1% 的账号与不可用主机（传 includeUnavailable=true 可查看全部），可直接用于 create_agent 选型。离线或查询失败的主机在顶部主机行明确报错。',
       input: z.object({
         kind: FleetQuotasInputSchema.shape.kind.describe('可选，按 Provider 类型过滤，例如 claude、codex、antigravity、glm、grok、cursor、qoder、opencode'),
         concurrencyTarget: FleetQuotasInputSchema.shape.concurrencyTarget.describe('可选，并发负载高阈值（运行中会话数），默认 3'),
         refresh: FleetQuotasInputSchema.shape.refresh.describe('可选，是否强制刷新额度缓存，默认 false'),
+        includeUnavailable: FleetQuotasInputSchema.shape.includeUnavailable.describe('可选，是否展示不可用/已耗尽账号与不可用主机，默认 false（隐藏不可用项）'),
       }),
       execute: async input => {
         try {
           const result = await runFleet(input);
-          return { text: formatFleetQuotasMarkdown(result) };
+          return { text: formatFleetQuotasMarkdown(result, { includeUnavailable: input.includeUnavailable === true }) };
         } catch (error) {
           return { text: `查询 Provider 额度失败：${summarizeError(error)}`, isError: true };
         }

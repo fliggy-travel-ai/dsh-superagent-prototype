@@ -107,5 +107,6 @@ export async function collectFleetQuotas(
     collectedAt: new Date(now()).toISOString(),
     concurrencyTarget,
     kind: input.kind,
+    includeUnavailable: input.includeUnavailable === true,
   });
 }
