@@ -12,3 +12,10 @@ test('RPC 使用主实例并隐藏返回值中的连接信息与凭据', async (
   const result = await invokeRpc({ invokePluginRpc: async (...args) => { actual = args; return { count: 1, hostname: 'example.invalid', email: 'private-value', serverId: 'local-id', privateKey: 'sample', token: 'sample', nested: [{ url: 'https://example.invalid', value: 'ok' }], info: 'token=sample-value example.invalid' }; } }, 'capacity.snapshot', {});
   assert.deepEqual(actual, ['github-subscriptions', 'capacity.snapshot', {}]); assert.deepEqual(result, { count: 1, nested: [{ value: 'ok' }], info: 'token=[已隐藏] [已隐藏地址]' });
 });
+test('模块状态原样输出模块 ID，原因仍脱敏', async () => {
+  const snapshot = { instance: { role: 'main', legacy: true }, config: { path: '/tmp/machine.json', source: 'file', errors: [] }, modules: [{ id: 'answer.browser', label: '网页版 claude.ai', state: 'error', reason: '连接 example.invalid 失败' }] };
+  const result = await invokeRpc({ invokePluginRpc: async () => snapshot }, 'modules.status', {}) as { modules: { id: string; state: string; reason: string }[] };
+  assert.equal(result.modules[0]!.id, 'answer.browser');
+  assert.equal(result.modules[0]!.state, 'error');
+  assert.equal(result.modules[0]!.reason, '连接 [已隐藏地址] 失败');
+});
