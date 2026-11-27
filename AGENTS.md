@@ -53,7 +53,7 @@ npm run vendor:check     # Paseo 升级后比较复制的内置插件文件
 
 - **Paseo 上游**：只用公开插件接口 `@getpaseo/plugin`、`@getpaseo/client`、`@getpaseo/protocol`，不修改 Paseo 本体。三个包固定为同一精确版本；`paseo-plugin.json` 的 `requirements.paseo` 写最低可用版本。Paseo 升级按 [插件开发技能](.agents/skills/plugin-development/SKILL.md#paseo-升级) 处理。
 - **打包边界**：源码只放在 `client/`、`server/`、`shared/` 和两个入口文件。`shared/` 不依赖 Node 内置模块、`server/`、`client/` 和只给单侧用的 SDK。Paseo 用 `eval` 执行服务端包，打包源码中没有 `import.meta`、`__dirname`、`__filename`。`npm run boundaries` 静态检查这些规则；`npm run check:paseo` 做真实加载。
-- **模块**：新功能写成模块，不改 `server/core/plugin.ts` 的组装顺序来实现功能。模块用 `context.services.daemon.ready()` 取共享连接，不另开本机连接。`register` 返回的清理函数停止计时器、订阅和子进程。一个模块失败只停这个模块。
+- **模块**：新功能写成模块，不改 `server/core/plugin.ts` 的组装顺序来实现功能。模块用 `context.services.daemon.ready()` 取共享连接，不另开本机连接。`register` 返回的清理函数停止计时器、订阅和子进程，并等已开始的写盘和通知处理结束；停止后不再写状态目录。连接守护进程的等待不能拖住插件停止。一个模块失败只停这个模块。
 - **机器配置**：主机之间不同的值放在 `machine.json` 的模块区块中，用 zod 校验并给出默认值，同时更新 `config/machine.example.json`。默认值等于改动前的行为。新模块默认关闭，用户决定默认启用时才设为 `defaultEnabled: true`。区块不合法时只停用依赖它的模块。
 - **两个实例**：仓库中的 `shared/instance.ts` 保持 `null`，部署脚本写入实际角色。注册 Provider 的模块用 `instance.hostsProviders` 判断，注册界面和其他功能的模块用主实例判断。
 - **状态文件**：放在 `$PASEO_HOME/github-subscriptions` 下，目录 0700、文件 0600，用原子替换写入。文件损坏时报错并保留原内容。读不到配置、置顶状态或状态文件时，报出原因并停止有副作用的动作，不按默认值继续。迁移旧插件状态只复制，不删除原文件。

@@ -75,6 +75,7 @@ export class EscalationRuntime {
   private rolesError: string | null = null;
   private webhookCache: { at: number; value: EscalationSnapshot['webhook'] } | null = null;
   private stopped = false;
+  private readonly inflight = new Set<Promise<unknown>>();
 
   constructor(options: EscalationOptions) {
     this.options = options;
@@ -110,7 +111,8 @@ export class EscalationRuntime {
     const state = await loadState(this.statePath);
     attempt.check();
     const auditPath = join(directory, 'events.jsonl');
-    const audit = createAuditWriter(auditPath);
+    const write = createAuditWriter(auditPath);
+    const audit = (entry: Record<string, unknown>) => this.track(write(entry));
     const reconciler = new EscalationReconciler({
       records: this.records,
       audit,
@@ -219,7 +221,7 @@ export class EscalationRuntime {
     const refreshClassification = () => { for (const agent of Object.values(engine.state.agents!)) updateAgent(agent); };
     const tick = async () => { if (this.settings().enabled) await engine.tick(); };
     const run = (fn: () => Promise<unknown>) => {
-      void engine.serial(async () => { await refreshRoles(); refreshClassification(); return fn(); }).catch(error => this.log(`通知处理失败，保留待处理状态：${summarizeError(error)}`));
+      void this.track(engine.serial(async () => { await refreshRoles(); refreshClassification(); return fn(); })).catch(error => this.log(`通知处理失败，保留待处理状态：${summarizeError(error)}`));
     };
     const asked = async (agent: { id: string }, request: { id: string; kind?: string; name?: string }) => {
       if (config.mains.includes(agent.id) && questionRequest(request)) await engine.asked(agent.id, request.id, request);
@@ -321,7 +323,7 @@ export class EscalationRuntime {
         enabled: () => this.settings().enabled,
       });
       const alerts = this.quotaAlerts;
-      attempt.add(() => { alerts.stop(); if (this.quotaAlerts === alerts) this.quotaAlerts = null; });
+      attempt.add(() => { void this.track(alerts.stop()); if (this.quotaAlerts === alerts) this.quotaAlerts = null; });
       await alerts.start();
       attempt.check();
     }
@@ -436,10 +438,10 @@ export class EscalationRuntime {
     if (existing && existing.fingerprint === snapshot.fingerprint) return;
     const engine = this.engine;
     if (!engine) return;
-    void engine.serial(async () => {
+    void this.track(engine.serial(async () => {
       await this.enqueueExternalInEngine(snapshot);
       if (this.settings().enabled) await engine.tick();
-    }).catch(error => this.log(`网页提问升级入队失败：${summarizeError(error)}`));
+    })).catch(error => this.log(`网页提问升级入队失败：${summarizeError(error)}`));
   }
 
   /** 网页提问结束或被关联到云端原生提问时，结束对应的升级记录（仅在未结束状态转为结束时落盘）。 */
@@ -448,7 +450,7 @@ export class EscalationRuntime {
     const hasRecordOpen = this.records.pending().some(r => r.agentId === '' && r.requests?.some(req => req.requestId === questionId && !req.done));
     if (hasRecordOpen) {
       if (this.reconciler) {
-        void this.reconciler.closeRequest('', questionId).catch(() => {});
+        void this.track(this.reconciler.closeRequest('', questionId)).catch(() => {});
       } else {
         this.records.closeRequest('', questionId, 'resolved');
       }
@@ -461,7 +463,7 @@ export class EscalationRuntime {
       engine.state.outbox.some(x => x.notice.agentId === '' && x.notice.requestId === questionId && x.notice.event === 'asked'),
     );
     if (!hadOpen && !hasEngineState) return;
-    void engine.serial(async () => {
+    void this.track(engine.serial(async () => {
       if (
         !engine.state.pending[pendingKey] &&
         !engine.state.outbox.some(x => x.notice.agentId === '' && x.notice.requestId === questionId && x.notice.event === 'asked')
@@ -469,7 +471,7 @@ export class EscalationRuntime {
         return;
       }
       await engine.resolved('', questionId, undefined, false);
-    }).catch(() => {});
+    })).catch(() => {});
   }
 
   private quotaCredentials() {
@@ -495,10 +497,18 @@ export class EscalationRuntime {
     return { timezone, immediate, delayMinutes };
   }
 
+  /** 停止后不再改动状态目录：等已开始的通知处理、写盘和额度扫描结束才返回。 */
   async stop() {
     this.stopped = true;
     this.lifetime.abort();
     this.attempt?.cancel();
+    while (this.inflight.size) await Promise.allSettled([...this.inflight]);
+  }
+
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.inflight.add(work);
+    work.then(() => this.inflight.delete(work), () => this.inflight.delete(work));
+    return work;
   }
 
   markFailed(error: unknown) {
