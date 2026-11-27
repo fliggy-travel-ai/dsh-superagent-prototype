@@ -52,6 +52,7 @@ macOS 应用内置 CLI 可能不在 PATH，其位置为 `/Applications/Paseo.app
 | --- | --- |
 | `github-token` | 独立令牌文件；不从守护进程的 GH_TOKEN 读取 |
 | `state.json` | 版本、偏好、订阅、来源游标、去重、事件、送达和评论登记 |
+| `quota/membership-renewals.json` | 本机 Claude 会员续费日和时间，按额度模块识别的账号邮箱索引。原子替换。无法读取或格式无效时，设置页报错并保留文件。 |
 | `web-requests.json` | 云端网页作答审计记录（最多保留最近 300 条，仅保存自由文本长度与 SHA-256，不存原文） |
 | `browser-usage.json` | 浏览器环境 `claude.ai` 额度记录、AdsPower 名称解析缓存与可选 AdsPower API key（权限 0600，key 不写日志、不返回前端，前端只显示“已配置/未配置”，支持清除与重新填写，环境变量作为后备；要准确显示环境名称需在扩展选项页填写一次环境序号，单环境自动识别只在单个活跃环境且单个扩展上报时生效） |
 

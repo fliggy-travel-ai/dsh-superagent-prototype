@@ -26,6 +26,11 @@ for (const level of ['log', 'info', 'warn', 'error']) {
 }
 
 const { App, handle } = createPreview(options);
+if (params.get('membership') === 'off') {
+  const quotaModule = handle.daemon.machineSettings.modules.find(module => module.id === 'usage.claudeAccounts');
+  quotaModule.enabled = false;
+  quotaModule.state = 'off';
+}
 handle.consoleLog = consoleLog;
 window.__ghsub = {
   options,

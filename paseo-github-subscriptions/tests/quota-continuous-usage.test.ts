@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CombinedUsageInput, ContinuityInput } from "../shared/continuity-input.ts";
+import { MembershipStore } from "../server/modules/usage-claude-accounts/membership.ts";
 import { routeKey } from "../server/modules/usage-claude-accounts/continuity.ts";
 
 // Production uses Paseo's bundler. For Node's type stripping, resolve the copied upstream .js imports to .ts.
@@ -41,7 +42,8 @@ test("独立用户从缓存读取额度时仍统计本账号未关闭会话，�
   writeFileSync(join(stateDir, "cross-user-providers.json"), JSON.stringify({
     [configDir]: { command: "/does-not-exist/no-account-request", args: [] },
   }));
-  const reply = { version: 1, account: { key: input.accountKey, label: "isolated@example.invalid" }, plan: "Pro",
+  const email = "isolated@example.invalid"; // scan-allow
+  const reply = { version: 1, account: { key: input.accountKey, label: email }, plan: "Pro",
     windows: [{ id: "five_hour", label: "Session", shortLabel: "5h", summary: true, utilization: 12, resetsAt: null }] };
   const saveCache = (error?: string) => writeFileSync(cachePath, JSON.stringify({
     [configDir]: { until: Date.now() + 300_000, reply: { ...reply, ...(error ? { error, windows: [] } : {}) } },
@@ -55,12 +57,21 @@ test("独立用户从缓存读取额度时仍统计本账号未关闭会话，�
   }
   try {
     saveCache();
-    const service = new ContinuousUsage();
+    const membership = new MembershipStore(stateDir);
+    const service = new ContinuousUsage({ membership });
+    assert.equal(service.membershipEmail({ CLAUDE_CONFIG_DIR: configDir }), email);
     const report = await service.fetch(input);
     assert.equal(report.status, "available");
     if (report.status !== "available") assert.fail("cached quota must remain available");
     assert.deepEqual(report.details, [{ id: "active_sessions", label: "未关闭会话（不含空闲子会话）", value: "1" }]);
     assert.equal(report.windows[0].remainingPct, 88);
+    membership.set(email, { day: 31, time: "20:15" });
+    const configured = await service.fetch(input);
+    assert.equal(configured.status, "available");
+    if (configured.status === "available") assert.equal(configured.details?.[1].id, "membership_renewal");
+    membership.set(email, null);
+    const cleared = await service.fetch(input);
+    assert.deepEqual(cleared, report);
     assert.equal((await service.fetch({ ...input, accountKey: "different.account" })).status, "error");
     writeFileSync(join(agentsDir, "open.json"), JSON.stringify({ ...session, lastStatus: "closed", requiresAttention: true }));
     const closed = await new ContinuousUsage().fetch(input);
@@ -103,11 +114,16 @@ test("真实适配层：过期保留身份，错误不变成功，旧会话不�
     return new Response(JSON.stringify({ five_hour: { utilization: account === "a" ? 10 : 80, resets_at: new Date(Date.now() + 3600_000).toISOString() } }));
   };
   try {
-    const service = new ContinuousUsage(); login("a");
+    const membership = new MembershipStore(join(root, "github-subscriptions", "quota"));
+    const service = new ContinuousUsage({ membership }); login("a");
     const [first] = await service.discover(scope);
     assert.equal(first.key, "account-a.org-test");
     const input = first.input as ContinuityInput;
-    assert.equal((await service.fetch(input)).status, "available");
+    assert.equal(service.membershipEmail(scope.env), first.label);
+    membership.set(first.label!, { day: 9, time: "20:15" });
+    const configured = await service.fetch(input);
+    assert.equal(configured.status, "available");
+    if (configured.status === "available") assert.equal(configured.details?.[1].id, "membership_renewal");
     assert.equal((await service.fetch({ ...input, accountKey: routeKey(input) })).status, "error");
     const saved = readFileSync(join(root, "github-subscriptions", "quota", "usage-history.json"), "utf8");
     assert.equal(saved.includes("@example.invalid"), false); assert.equal(saved.includes("fake-"), false);
@@ -131,7 +147,9 @@ test("真实适配层：过期保留身份，错误不变成功，旧会话不�
     assert.equal((await service.fetch(input)).status, "error");
     const [second] = await service.discover(scope);
     assert.equal(second.key, "account-b.org-test");
-    assert.equal((await service.fetch(second.input as ContinuityInput)).status, "available");
+    const other = await service.fetch(second.input as ContinuityInput);
+    assert.equal(other.status, "available");
+    if (other.status === "available") assert.equal(other.details?.some(detail => detail.id === "membership_renewal"), false);
     assert.equal((await service.fetch(input)).status, "error");
     offline = true;
     assert.equal((await service.fetch(second.input as ContinuityInput)).status, "available");

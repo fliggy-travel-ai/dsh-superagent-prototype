@@ -59,6 +59,7 @@ export class CrossUserUsage {
     this.initialize = options.initialize ?? initializeIsolatedLogin;
   }
   handles(configDir: string | undefined): boolean { return !!configDir && !!this.load()[configDir]; }
+  knownAccount(configDir: string): Reply['account'] { return this.identities.get(configDir); }
   private async execute(mapping: Mappings[string]): Promise<Reply> {
     const deadline = this.now() + QUERY_TIMEOUT;
     const remaining = () => Math.max(1, deadline - this.now());

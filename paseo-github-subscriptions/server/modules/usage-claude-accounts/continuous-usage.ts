@@ -11,6 +11,7 @@ import { discover, fetchUsage, resolveClaudeCredentials, claudeKeychainAccount }
 import { paseoHome } from "./providers.ts";
 import { QuotaRequests, quotaRequestMessage } from "./quota-requests.ts";
 import { hasAuthOverride, initializeLogin, RenewalService, type RenewalTarget } from "./renewal.ts";
+import type { MembershipStore } from "./membership.ts";
 
 /** Keep vendor requests comfortably below the host's 20-second usage deadline. */
 const boundedFetch: typeof fetch = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(8000) });
@@ -38,6 +39,7 @@ export interface ContinuousUsageOptions {
   directory?: string;
   /** Start the background login renewal. Default true. */
   renewal?: boolean;
+  membership?: MembershipStore;
 }
 
 export class ContinuousUsage {
@@ -49,10 +51,12 @@ export class ContinuousUsage {
   private renewal: RenewalService;
   private readonly home: string;
   private readonly renewalEnabled: boolean;
+  private readonly membership?: MembershipStore;
   constructor(options: ContinuousUsageOptions = {}) {
     this.home = options.home ?? paseoHome(process.env);
     const directory = options.directory ?? join(this.home, "github-subscriptions", "quota");
     this.renewalEnabled = options.renewal ?? true;
+    this.membership = options.membership;
     this.activeSessions = new ActiveSessions(this.home);
     ({ crossUser: this.crossUser, requests: this.requests } = sharedQueries(directory, this.home));
     this.history = new UsageContinuity(join(directory, "usage-history.json"));
@@ -98,7 +102,21 @@ export class ContinuousUsage {
   }
   /** The account identity (email as Anthropic reports it) kept in the provider's .claude.json, if any. */
   identityEmail(env: NodeJS.ProcessEnv): string | null {
-    return readIdentity(env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, ".claude.json") : join(env.HOME || homedir(), ".claude.json"))?.label ?? null;
+    return this.localIdentity(env)?.label ?? null;
+  }
+  private localIdentity(env: NodeJS.ProcessEnv) {
+    return readIdentity(env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, ".claude.json") : join(env.HOME || homedir(), ".claude.json"));
+  }
+  /** 复用已确认的身份和本地账号资料。打开设置页时不查询额度。 */
+  membershipEmail(env: NodeJS.ProcessEnv): string | undefined {
+    const dir = env.CLAUDE_CONFIG_DIR;
+    if (dir && this.crossUser.handles(dir)) return this.crossUser.knownAccount(dir)?.label;
+    const local = this.localIdentity(env);
+    for (const input of this.inputs(env)) {
+      const known = this.history.verifiedIdentity(input);
+      if (known?.label && (!local || known.key === local.key)) return known.label;
+    }
+    return local?.label;
   }
   private targets(): RenewalTarget[] {
     const config = JSON.parse(readFileSync(join(this.home, "config.json"), "utf8"));
@@ -145,7 +163,8 @@ export class ContinuousUsage {
   fetch = async (input: CombinedUsageInput): Promise<UsageReport> => {
     if (!isLocalUsageInput(input)) {
       const report = await this.crossUser.fetch(input.route.configDir, input.accountKey);
-      return this.withSessionCount(report, { CLAUDE_CONFIG_DIR: input.route.configDir });
+      const account = this.crossUser.knownAccount(input.route.configDir);
+      return this.withAccountDetails(report, { CLAUDE_CONFIG_DIR: input.route.configDir }, account?.key === input.accountKey ? account.label : undefined);
     }
     if (input.route.store !== "claude" && input.route.store !== "keychain") return fetchUsage(input, boundedFetch);
     const env = this.routes.get(JSON.stringify(input.route));
@@ -194,12 +213,16 @@ export class ContinuousUsage {
     }
     this.history.record(input, before.state, after.state, report);
     // Keep normal structured problems; after reload, display disk history as unavailable text.
-    return this.withSessionCount(this.history.restoreMessage(input.accountKey, report), env);
+    const account = this.history.matches(input, input.accountKey, after.state) ? this.history.verifiedIdentity(input) : undefined;
+    const email = account?.label ?? (account?.key === after.state.identity?.key ? after.state.identity?.label : undefined);
+    return this.withAccountDetails(this.history.restoreMessage(input.accountKey, report), env, email);
   };
-  private async withSessionCount(report: UsageReport, env: NodeJS.ProcessEnv): Promise<UsageReport> {
+  private async withAccountDetails(report: UsageReport, env: NodeJS.ProcessEnv, email?: string): Promise<UsageReport> {
     if (report.status !== 'available') return report;
     let value: string;
     try { value = String(await this.activeSessions.count(env)); } catch { value = '暂不可用'; }
-    return { ...report, details: [{ id: 'active_sessions', label: '未关闭会话（不含空闲子会话）', value }, ...(report.details || [])] };
+    const renewal = email ? this.membership?.detail(email) : undefined;
+    return { ...report, details: [{ id: 'active_sessions', label: '未关闭会话（不含空闲子会话）', value },
+      ...(renewal ? [renewal] : []), ...(report.details || [])] };
   }
 }
