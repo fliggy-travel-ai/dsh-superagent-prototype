@@ -23,12 +23,12 @@ type Reply = z.infer<typeof replySchema>;
 const cacheSchema = z.record(z.string(), z.object({ until: z.number().finite(), reply: replySchema, rateLimits: z.number().int().min(0).max(3).optional() }));
 const QUERY_INTERVAL = 5 * 60_000;
 const RATE_LIMIT_WAIT = 15 * 60_000;
-const QUERY_TIMEOUT = 30_000;
+const QUERY_TIMEOUT = 45_000;
 const MIN_QUERY_BUDGET = 3000;
-/** The isolated launcher's own IP request stops at 5s. The rest of this window covers sudo and sandbox, and 15s still leaves init plus the usage call inside the 30s budget. */
+/** The isolated launcher's own IP request stops at 5s. The rest of this window covers sudo and sandbox, and 15s still leaves init plus the usage call (with a single transport retry) inside the 45s budget. */
 const PROBE_TIMEOUT = 15_000;
-/** A slow probe is not a bad IP. Retry in a minute instead of pinning the card for five. */
-const PROBE_TIMEOUT_WAIT = 60_000;
+/** A slow probe or transient proxy/network hiccup is not a bad IP or revoked login. Retry in a minute instead of pinning the card red for five. */
+const TRANSIENT_ERROR_WAIT = 60_000;
 type Mappings = z.infer<typeof mappingsSchema>;
 function mappings(file: string): Mappings {
   try { return mappingsSchema.parse(JSON.parse(readFileSync(file, 'utf8'))); }
@@ -95,7 +95,8 @@ export class CrossUserUsage {
       if (reply.account) this.identities.set(configDir, reply.account);
       else if (this.identities.has(configDir)) reply = { ...reply, account: this.identities.get(configDir) };
       const rateLimits = reply.error === 'http-429' ? Math.min(3, (cached?.rateLimits ?? 0) + 1) : 0;
-      const until = this.now() + (rateLimits ? RATE_LIMIT_WAIT * 2 ** (rateLimits - 1) : reply.error === 'egress-timeout' ? PROBE_TIMEOUT_WAIT : QUERY_INTERVAL);
+      const transient = reply.error === 'egress-timeout' || reply.error === 'network';
+      const until = this.now() + (rateLimits ? RATE_LIMIT_WAIT * 2 ** (rateLimits - 1) : transient ? TRANSIENT_ERROR_WAIT : QUERY_INTERVAL);
       this.cache.set(configDir, { until, reply, rateLimits });
       if (this.cacheFile) {
         try {
