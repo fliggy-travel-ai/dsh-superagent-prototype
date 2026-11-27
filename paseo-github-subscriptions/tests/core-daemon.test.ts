@@ -43,3 +43,27 @@ test('关闭时正在连接：连接完成后立即关闭，不交给调用方',
   await closing;
   assert.equal(pending.closed, true);
 });
+
+test('停止连接：正在重试的连接立即结束，不再新建连接', async () => {
+  let calls = 0;
+  const daemon = new SharedDaemon<Fake>('/home', (_home, signal) => new Promise((_resolve, reject) => {
+    calls++;
+    signal.addEventListener('abort', () => reject(new Error('插件已停止')), { once: true });
+  }));
+  const waiting = daemon.ready();
+  daemon.stopConnecting();
+  await assert.rejects(waiting, /插件已停止/);
+  await assert.rejects(daemon.ready(), /插件已停止/);
+  assert.equal(calls, 1);
+});
+
+test('停止连接：已建立的连接保留到关闭', async () => {
+  const daemon = new SharedDaemon<Fake>('/home', async () => fake(1));
+  const connection = await daemon.ready();
+  daemon.stopConnecting();
+  assert.equal(await daemon.ready(), connection);
+  assert.equal(connection.closed, false);
+  await daemon.close();
+  assert.equal(connection.closed, true);
+  await assert.rejects(daemon.ready(), /插件已停止/);
+});

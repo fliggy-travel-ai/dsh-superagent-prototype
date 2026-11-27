@@ -292,3 +292,31 @@ test("HTTP 回调携带鉴权、幂等键与约定字段", async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test("停止额度报警时等已开始的扫描结束", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const audits: Record<string, unknown>[] = [];
+  const alerts = new QuotaAlerts({
+    listReports: async () => ({ reports: [] }),
+    listAgentReports: async () => { await gate; return { reports: [report()] }; },
+    credentials: async () => ({ url: "http://x", auth: "Authorization: Bearer t" }),
+    post: async () => {},
+    audit: async (entry) => { audits.push(entry); },
+    mains: () => [{ agentId: "主会话", workspaceId: "wks", title: "1566", provider: "claude-5" }],
+    machine: "macmini",
+    hostId: "macmini",
+    statePath: join(tmpdir(), `quota-alerts-stop-${process.pid}-${Math.random().toString(36).slice(2)}.json`),
+    now: () => now,
+    enabled: () => true,
+  });
+  const scanning = alerts.onSessionQuotaError("主会话", "usage limit");
+  let stopped = false;
+  const stopping = alerts.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(stopped, false, "扫描还在进行时停止不应返回");
+  release();
+  await scanning;
+  await stopping;
+  assert.equal(stopped, true);
+});

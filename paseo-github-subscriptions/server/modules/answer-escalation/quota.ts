@@ -252,9 +252,11 @@ export class QuotaAlerts {
     this.schedule(FIRST_DELAY_MS);
   }
 
-  stop() {
+  /** 停止定时扫描；返回的承诺在已开始的扫描结束后完成。 */
+  stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    return this.serial(async () => {});
   }
 
   private schedule(delay: number) {

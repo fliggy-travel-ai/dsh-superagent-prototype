@@ -43,6 +43,7 @@ export function startPlugin(server: PluginServerContext, instance: ResolvedInsta
   }
 
   return async () => {
+    daemon.stopConnecting();
     await host.dispose();
     await main?.stop();
     await daemon.close();
