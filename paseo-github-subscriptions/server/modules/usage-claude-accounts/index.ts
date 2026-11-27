@@ -130,6 +130,7 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       const displayLabels = readLabels(labelsFile);
       const accounts = new Map<string, string>();
       for (const [id, env] of providerEnvs(home)) {
+        if (id === 'claude' && !includeDefault) continue;
         const email = MembershipEmailSchema.safeParse(usage.membershipEmail(env));
         if (!email.success || accounts.has(email.data)) continue;
         const label = providers[id]?.label;
@@ -139,12 +140,16 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     };
     server.handle(claudeMembershipList, async (): Promise<MembershipAccount[]> => {
       const entries = membership.read();
-      return Array.from(membershipAccounts(), ([email, label]) => ({ email, label, renewal: entries[email] ?? null }));
+      const accounts = membershipAccounts();
+      return [
+        ...Array.from(accounts, ([email, label]) => ({ email, label, renewal: entries[email] ?? null })),
+        ...Object.entries(entries).filter(([email]) => !accounts.has(email)).map(([email, renewal]) => ({ email, label: null, renewal })),
+      ];
     });
     let stopped = false;
     server.handle(claudeMembershipSet, async ({ email, renewal }) => {
       if (stopped) throw new Error('Claude 账号额度模块已停止');
-      if (!membershipAccounts().has(email)) throw new Error('本机未发现此 Claude 账号，请刷新列表');
+      if (renewal !== null && !membershipAccounts().has(email)) throw new Error('本机未发现此 Claude 账号，请刷新列表');
       membership.set(email, renewal);
       return renewal;
     });

@@ -27,6 +27,7 @@ export class FakeDaemon {
   membershipAccounts: MembershipAccount[] = [
     { label: 'Claude 本机账号', email: 'local@example.invalid', renewal: { day: 9, time: '20:15' } }, // scan-allow
     { label: 'Claude 独立用户账号', email: 'isolated@example.invalid', renewal: null }, // scan-allow
+    { label: null, email: 'removed@example.invalid', renewal: { day: 15, time: '19:00' } }, // scan-allow
   ];
   browser = {
     ...makeBrowser(),
@@ -316,6 +317,11 @@ export class FakeDaemon {
       case 'claude-membership.set': {
         const account = this.membershipAccounts.find(item => item.email === input.email);
         if (!account) throw new Error('本机未发现此 Claude 账号，请刷新列表');
+        if (account.label === null) {
+          if (input.renewal !== null) throw new Error('本机未发现此 Claude 账号，请刷新列表');
+          this.membershipAccounts = this.membershipAccounts.filter(item => item !== account);
+          return null;
+        }
         account.renewal = input.renewal as MembershipRenewal | null;
         return account.renewal;
       }

@@ -8,11 +8,15 @@
 | 续费日填 32 时显示校验提示 | 通过 |
 | 独立用户账号保存 31 日 20:15 后显示「已保存」 | 通过 |
 | 清除独立用户账号后显示「已清除」，本机账号仍为 9 日 20:15 | 通过 |
-| 窄屏深色布局展示两个账号及各自的操作 | 通过 |
+| 「账号已不在本机」显示原续费时间，仅提供「清除」 | 通过 |
+| 清除旧条目后，条目消失，当前账号的设置保留 | 通过 |
+| 窄屏深色布局展示当前账号和旧条目 | 通过 |
+| 额度模块停用时显示中文提示，页面跳过会员列表 RPC | 通过 |
 
 - [宽屏浅色，保存独立用户账号后](2472-membership-wide.png)
-- [窄屏深色，独立用户账号尚未填写](2472-membership-compact.png)
+- [窄屏深色，含仅可清除的旧条目](2472-membership-compact.png)
+- [额度模块停用时的提示](2472-membership-disabled.png)
 
-按 [预览说明](README.md#复现) 启动夹具。宽屏入口使用 `?route=settings:claude-membership`。窄屏深色入口再加 `&layout=compact&theme=dark`。
+按 [预览说明](README.md#复现) 启动夹具。宽屏入口使用 `?route=settings:claude-membership`。窄屏深色入口再加 `&layout=compact&theme=dark`。停用场景使用 `&membership=off`。
 
 Mac mini 和 MacBook 的原生 Paseo 设置页及真实额度卡片等待部署后验收。

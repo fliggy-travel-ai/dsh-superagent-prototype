@@ -10,7 +10,7 @@ export type MembershipRenewal = z.infer<typeof MembershipRenewalSchema>;
 
 const MembershipAccountSchema = z.strictObject({
   email: MembershipEmailSchema,
-  label: z.string(),
+  label: z.string().nullable(),
   renewal: MembershipRenewalSchema.nullable(),
 });
 export type MembershipAccount = z.infer<typeof MembershipAccountSchema>;

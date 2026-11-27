@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, existsSync, mkdirSync, readdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as nodeModule from 'node:module';
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMachineConfig } from '../server/core/machine-config.ts';
 import { startModules } from '../server/core/modules.ts';
 import { claudeAccountsConfigure } from '../shared/claude-accounts.ts';
+import { claudeMembershipList, claudeMembershipSet } from '../shared/claude-membership.ts';
 import { resolveInstance } from '../shared/instances.ts';
 
 // 复制来的上游文件用 .js 导入；Node 直接跑测试时把它们解析到 .ts（生产环境由 Paseo 打包）。
@@ -25,6 +26,54 @@ const { claudeAccountsModule } = await import('../server/modules/usage-claude-ac
 hooks.deregister();
 
 const RELAY = 'private' + 'relay.appleid.example';
+
+test('会员到期设置只列出由插件提供额度卡片的账号', async t => {
+  const realExists = fs.existsSync;
+  let builtin = true;
+  const mock = t.mock.method(fs, 'existsSync', (path: Parameters<typeof realExists>[0]) =>
+    typeof path === 'string' && path.endsWith('/builtin-plugins/claude-usage-source') ? builtin : realExists(path));
+  nodeModule.syncBuiltinESMExports();
+  const defaultEmail = 'default@example.invalid'; // scan-allow
+  try {
+    for (const installed of [true, false]) {
+      builtin = installed;
+      const run = setup();
+      try {
+        writeFileSync(join(run.root, '.claude.json'), JSON.stringify({
+          oauthAccount: { accountUuid: 'default', organizationUuid: 'org1', emailAddress: defaultEmail },
+        }));
+        const accounts = claudeMembershipList.output.parse(await run.handlers.get(claudeMembershipList.name)!({}));
+        const extraEmail = `x@${RELAY}`; // scan-allow
+        assert.deepEqual(accounts.map(account => account.email), installed ? [extraEmail] : [defaultEmail, extraEmail]);
+        if (installed) {
+          await assert.rejects(run.handlers.get(claudeMembershipSet.name)!({ email: defaultEmail, renewal: { day: 9, time: '20:15' } }), /本机未发现/);
+        }
+      } finally { await run.done(); }
+    }
+  } finally {
+    mock.mock.restore();
+    nodeModule.syncBuiltinESMExports();
+  }
+});
+
+test('账号移出本机额度列表后保留续费记录，拒绝改写并允许清除', async () => {
+  const run = setup();
+  try {
+    const email = `x@${RELAY}`; // scan-allow
+    const renewal = { day: 31, time: '20:15' };
+    const list = async () => claudeMembershipList.output.parse(await run.handlers.get(claudeMembershipList.name)!({}));
+    const set = (value: typeof renewal | null) => run.handlers.get(claudeMembershipSet.name)!({ email, renewal: value });
+    assert.deepEqual(await set(renewal), renewal);
+    assert.deepEqual(await list(), [{ email, label: 'Claude · 旧名称', renewal }]);
+    writeFileSync(join(run.home, 'config.json'), JSON.stringify({ agents: { providers: { claude: { enabled: false } } } }));
+    assert.deepEqual(await list(), [{ email, label: null, renewal }]);
+    await assert.rejects(set({ day: 1, time: '01:00' }), /本机未发现/);
+    assert.deepEqual(await list(), [{ email, label: null, renewal }]);
+    assert.equal(await set(null), null);
+    assert.deepEqual(await list(), []);
+    assert.deepEqual(JSON.parse(readFileSync(join(run.state, 'quota', 'membership-renewals.json'), 'utf8')), {});
+  } finally { await run.done(); }
+});
 
 function setup(options: { plugins?: Record<string, unknown>; json?: unknown; legacy?: Record<string, string>; rawConfig?: string; settingsJson?: string } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'quota-module-'));

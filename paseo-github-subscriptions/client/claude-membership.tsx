@@ -5,6 +5,7 @@ import {
   claudeMembershipList, claudeMembershipSet, MembershipRenewalSchema,
   type MembershipAccount, type MembershipRenewal,
 } from '../shared/claude-membership.ts';
+import { modulesStatus } from '../shared/modules.ts';
 import { Btn, Card, Notice, useUi } from './ui.tsx';
 
 type MembershipRpc = Pick<PluginClientContext, 'rpc'>;
@@ -20,6 +21,7 @@ function AccountRow({ account, save }: {
   const [time, setTime] = useState(renewal?.time ?? '');
   const [pending, setPending] = useState<'save' | 'clear' | null>(null);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const editable = account.label !== null;
 
   async function update(action: 'save' | 'clear') {
     const parsed = MembershipRenewalSchema.safeParse({ day: /^[0-9]{1,2}$/.test(day) ? Number(day) : NaN, time });
@@ -45,10 +47,10 @@ function AccountRow({ account, save }: {
   return (
     <Card>
       <View style={s.stack}>
-        <Text style={s.strong}>{account.label}</Text>
+        <Text style={s.strong}>{account.label ?? '账号已不在本机'}</Text>
         <Text style={s.muted} selectable>{account.email}</Text>
       </View>
-      <View style={s.wrap}>
+      {editable ? <View style={s.wrap}>
         <View style={[s.stack, { width: 92 }]}>
           <Text style={s.small}>续费日</Text>
           <TextInput accessibilityLabel="续费日" value={day} onChangeText={value => { setDay(value); setMessage(null); }}
@@ -61,9 +63,9 @@ function AccountRow({ account, save }: {
             placeholder="HH:MM" placeholderTextColor={theme.colors.foregroundMuted}
             style={[s.input, { minWidth: 0 }]} editable={!pending} />
         </View>
-      </View>
+      </View> : <Text style={s.small}>每月 {day} 日 {time}（北京时间）</Text>}
       <View style={s.wrap}>
-        <Btn label="保存" primary busy={pending === 'save'} disabled={!!pending || (!day && !time)} onPress={() => void update('save')} />
+        {editable ? <Btn label="保存" primary busy={pending === 'save'} disabled={!!pending || (!day && !time)} onPress={() => void update('save')} /> : null}
         <Btn label="清除" busy={pending === 'clear'} disabled={!!pending || !renewal} onPress={() => void update('clear')} />
       </View>
       {message ? (
@@ -82,7 +84,12 @@ export function createMembershipScreen(client: MembershipRpc) {
     const [error, setError] = useState<string | null>(null);
     useEffect(() => {
       let active = true;
-      void client.rpc(claudeMembershipList, {}).then(
+      void client.rpc(modulesStatus, {}).then(({ instance, modules }) => {
+        if (instance.role !== 'main' || !modules.some(module => module.id === 'usage.claudeAccounts' && module.state === 'running')) {
+          throw new Error('额度模块未在本主机运行，无法设置会员到期');
+        }
+        return client.rpc(claudeMembershipList, {});
+      }).then(
         result => { if (active) setAccounts(result); },
         cause => { if (active) setError(errorText(cause)); },
       );
@@ -99,7 +106,13 @@ export function createMembershipScreen(client: MembershipRpc) {
           <View style={s.wrap}><Btn label="重新读取" onPress={() => { setAccounts(null); setError(null); setReload(value => value + 1); }} /></View>
         ) : null}
         {accounts?.map(account => (
-          <AccountRow key={account.email} account={account} save={renewal => client.rpc(claudeMembershipSet, { email: account.email, renewal })} />
+          <AccountRow key={account.email} account={account} save={async renewal => {
+            const saved = await client.rpc(claudeMembershipSet, { email: account.email, renewal });
+            if (saved === null && account.label === null) {
+              setAccounts(current => current?.filter(item => item.email !== account.email) ?? null);
+            }
+            return saved;
+          }} />
         ))}
       </ScrollView>
     );
