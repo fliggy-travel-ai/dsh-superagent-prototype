@@ -6,7 +6,7 @@ import { localQuotaReader } from './reports.ts';
 import { quotaProblems, quotaWarnings } from './rules.ts';
 
 const quotaGateSchema = z.strictObject({
-  minRemainingPct: z.number().min(0).max(100).default(10),
+  minRemainingPct: z.number().min(0).max(100).default(1),
   excludeProviders: z.array(z.string().min(1)).default([]),
 });
 type QuotaGateConfig = z.infer<typeof quotaGateSchema>;

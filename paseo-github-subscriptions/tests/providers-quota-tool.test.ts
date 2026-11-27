@@ -189,7 +189,6 @@ test('collectLocalQuotas：过滤未安装内置项与 cloud-session、保留 19
     serverId: 'srv-mini',
     hostName: 'Mac mini',
     excludeProviders: ['codex*'],
-    minRemainingPct: 10,
     now: () => NOW,
     readProxy: async () => ({
       data: [{ provider: 'codex', windows: [{ name: '5h', remaining: 75 }], balance: null }],
@@ -252,12 +251,11 @@ function hostProvider(overrides: Partial<HostProviderQuota> & { providerId: stri
     upstream: null,
     runningSessions: 0,
     quotaGateExcluded: false,
-    minRemainingPct: 10,
     ...overrides,
   };
 }
 
-test('mergeFleetQuotas & collectFleetQuotas：按账号跨主机去重、汇总 supportedHosts（含不同 providerId）、显式报告离线或旧版主机', async () => {
+test('mergeFleetQuotas & collectFleetQuotas：按账号跨主机去重、低于 1% 才拦截（6% 保持 ok）、裁剪冗余字段并显式报告离线或旧版主机', async () => {
   const miniData: LocalHostQuotas = {
     serverId: 'srv-mini',
     hostName: 'Mac mini',
@@ -283,11 +281,19 @@ test('mergeFleetQuotas & collectFleetQuotas：按账号跨主机去重、汇总 
         windows: [{ id: 'effective', label: '5h', remainingPct: 58, usedPct: 42, resetsAt: '2026-11-27T11:00:00Z', hint: 'normal' }],
       }),
       hostProvider({
-        providerId: 'claude-low',
+        providerId: 'claude-mid',
         kind: 'claude',
-        accountKey: 'claude:acc-low.org1',
+        accountKey: 'claude:acc-mid.org1',
         runningSessions: 0,
         windows: [{ id: 'five_hour', label: '5h', remainingPct: 6, usedPct: 94, resetsAt: '2026-11-27T08:30:00Z', hint: 'throttle' }],
+        allocationHint: 'throttle',
+      }),
+      hostProvider({
+        providerId: 'claude-tiny',
+        kind: 'claude',
+        accountKey: 'claude:acc-tiny.org1',
+        runningSessions: 0,
+        windows: [{ id: 'five_hour', label: '5h', remainingPct: 0.5, usedPct: 99.5, resetsAt: '2026-11-27T08:30:00Z', hint: 'throttle' }],
         allocationHint: 'throttle',
       }),
     ],
@@ -340,22 +346,24 @@ test('mergeFleetQuotas & collectFleetQuotas：按账号跨主机去重、汇总 
         throw new Error('RPC method not found: providers.quotas.local');
       },
     },
-    { minRemainingPct: 10, concurrencyTarget: 3, now: () => NOW },
+    { concurrencyTarget: 3, now: () => NOW },
   );
 
-  // 4 台主机状态全部显式返回
+  // 4 台主机状态全部显式返回，且返回裁剪掉 minRemainingPct / accountKey / hostName 重复字段
   assert.equal(fleet.hosts.length, 4);
   assert.equal(fleet.hosts.find(h => h.serverId === 'srv-off')?.error, '主机离线');
   assert.match(fleet.hosts.find(h => h.serverId === 'srv-old')?.error ?? '', /升级并重载/);
+  assert.equal('minRemainingPct' in fleet, false);
 
-  // 5 条主机条目按真实账号去重为 3 个账号
-  assert.equal(fleet.accounts.length, 3);
+  // 6 条主机条目按真实账号去重为 4 个账号
+  assert.equal(fleet.accounts.length, 4);
 
   // 第 1 条：prefer 的共享 Antigravity 账号，支持 MacBook（antigravity，0 running）和 Mac mini（antigravity-2，1 running）
   const agy = fleet.accounts[0]!;
-  assert.equal(agy.accountKey, 'antigravity:b74db7ad00000001');
+  assert.equal(agy.kind, 'antigravity');
   assert.equal(agy.verdict, 'ok');
-  assert.equal(agy.totalRunningSessions, 1);
+  assert.equal(agy.runningSessions, 1);
+  assert.equal('accountKey' in agy, false);
   assert.deepEqual(
     agy.supportedHosts.map(h => ({ serverId: h.serverId, providerId: h.providerId, usable: h.usable })),
     [
@@ -366,25 +374,33 @@ test('mergeFleetQuotas & collectFleetQuotas：按账号跨主机去重、汇总 
 
   // 第 2 条：共享 GLM 账号，总运行数 3（high），Mac mini 可用，MacBook 标为不可用并保留本机错误
   const glm = fleet.accounts[1]!;
-  assert.equal(glm.accountKey, 'glm:1111222233334444');
+  assert.equal(glm.kind, 'glm');
   assert.equal(glm.verdict, 'ok');
-  assert.equal(glm.totalRunningSessions, 3);
-  assert.equal(glm.concurrencyLoad, 'high');
+  assert.equal(glm.runningSessions, 3);
+  assert.equal(glm.load, 'high');
   assert.equal(glm.supportedHosts.find(h => h.serverId === 'srv-mini')?.usable, true);
   assert.equal(glm.supportedHosts.find(h => h.serverId === 'srv-mb')?.usable, false);
   assert.match(glm.supportedHosts.find(h => h.serverId === 'srv-mb')?.hostError ?? '', /HTTP 401/);
 
-  // 第 3 条：剩 6% 的 Claude 低于 10% 阈值，判为 blocked 且主机均标为不可用
-  const low = fleet.accounts[2]!;
-  assert.equal(low.accountKey, 'claude:acc-low.org1');
-  assert.equal(low.verdict, 'blocked');
-  assert.equal(low.supportedHosts[0]?.usable, false);
-  assert.ok(low.blockReasons.some(reason => reason.includes('低于 10%')));
+  // 第 3 条：剩 6% 的 Claude 高于 1% 阈值，保持 ok（带 throttle 提示），允许派发
+  const mid = fleet.accounts[2]!;
+  assert.equal(mid.kind, 'claude');
+  assert.equal(mid.verdict, 'ok');
+  assert.equal(mid.supportedHosts[0]?.providerId, 'claude-mid');
+  assert.equal(mid.supportedHosts[0]?.usable, true);
+
+  // 第 4 条：剩 0.5% 的 Claude 低于 1% 阈值，判为 blocked 且主机标为不可用
+  const tiny = fleet.accounts[3]!;
+  assert.equal(tiny.kind, 'claude');
+  assert.equal(tiny.verdict, 'blocked');
+  assert.equal(tiny.supportedHosts[0]?.providerId, 'claude-tiny');
+  assert.equal(tiny.supportedHosts[0]?.usable, false);
+  assert.ok(tiny.blockReasons?.some(reason => reason.includes('低于 1%')));
 
   // kind 过滤
   const onlyGlm = mergeFleetQuotas(
     [{ serverId: 'srv-mini', hostName: 'Mac mini', isSelf: true, online: true, data: miniData, error: null }],
-    { collectedAt: '2026-11-27T08:00:00.000Z', minRemainingPct: 10, concurrencyTarget: 3, kind: 'glm' },
+    { collectedAt: '2026-11-27T08:00:00.000Z', concurrencyTarget: 3, kind: 'glm' },
   );
   assert.deepEqual(onlyGlm.accounts.map(a => a.kind), ['glm']);
 });

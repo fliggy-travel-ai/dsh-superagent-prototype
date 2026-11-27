@@ -15,7 +15,7 @@
     "capacity.mainSessions": false
   },
   "quotaGate": {
-    "minRemainingPct": 10,
+    "minRemainingPct": 1,
     "excludeProviders": [
       "codex*"
     ]

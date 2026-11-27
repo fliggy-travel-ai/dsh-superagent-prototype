@@ -32,11 +32,10 @@ export interface FleetQuotasPort {
  */
 export async function collectFleetQuotas(
   port: FleetQuotasPort,
-  input: FleetQuotasInput & { defaultMinRemainingPct?: number; now?: () => number } = {},
+  input: FleetQuotasInput & { now?: () => number } = {},
 ): Promise<FleetQuotas> {
   const now = input.now ?? Date.now;
   const refresh = input.refresh === true;
-  const minRemainingPct = input.minRemainingPct ?? input.defaultMinRemainingPct ?? 10;
   const concurrencyTarget = input.concurrencyTarget ?? 3;
 
   const listed = await port.hosts();
@@ -106,7 +105,6 @@ export async function collectFleetQuotas(
 
   return mergeFleetQuotas(settled, {
     collectedAt: new Date(now()).toISOString(),
-    minRemainingPct,
     concurrencyTarget,
     kind: input.kind,
   });

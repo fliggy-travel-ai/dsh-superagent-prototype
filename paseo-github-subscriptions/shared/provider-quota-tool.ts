@@ -1,6 +1,8 @@
 import { defineRpc } from '@getpaseo/plugin';
 import { z } from 'zod';
 
+export const MIN_REMAINING_PCT = 1;
+
 export const QuotaPaceHintSchema = z.enum(['prefer', 'normal', 'throttle', 'avoid', 'unknown']);
 export type QuotaPaceHint = z.infer<typeof QuotaPaceHintSchema>;
 
@@ -13,6 +15,7 @@ export type QuotaVerdict = z.infer<typeof QuotaVerdictSchema>;
 export const QuotaStatusSchema = z.enum(['available', 'proxied', 'unknown', 'error']);
 export type QuotaStatus = z.infer<typeof QuotaStatusSchema>;
 
+/** 单机内部采集的窗口结构（保留原始 id 用于周期推断和去重计算）。 */
 export const QuotaWindowReportSchema = z.strictObject({
   id: z.string(),
   label: z.string(),
@@ -50,7 +53,7 @@ export const UpstreamQuotaSchema = z.strictObject({
 });
 export type UpstreamQuota = z.infer<typeof UpstreamQuotaSchema>;
 
-export const HostProviderQuotaSchema = z.strictObject({
+export const HostProviderQuotaSchema = z.object({
   providerId: z.string(),
   kind: z.string(),
   accountKey: z.string(),
@@ -67,7 +70,6 @@ export const HostProviderQuotaSchema = z.strictObject({
   upstream: UpstreamQuotaSchema.nullable(),
   runningSessions: z.number().int().nonnegative().nullable(),
   quotaGateExcluded: z.boolean(),
-  minRemainingPct: z.number().min(0).max(100),
 });
 export type HostProviderQuota = z.infer<typeof HostProviderQuotaSchema>;
 
@@ -80,38 +82,60 @@ export const LocalHostQuotasSchema = z.strictObject({
 });
 export type LocalHostQuotas = z.infer<typeof LocalHostQuotasSchema>;
 
+/** MCP 返回给会话的精简窗口结构：只保留决策需要的字段，省略空值减少上下文占用。 */
+export const CompactWindowSchema = z.strictObject({
+  label: z.string(),
+  remainingPct: z.number(),
+  resetsAt: z.string().optional(),
+  hint: QuotaPaceHintSchema,
+});
+export type CompactWindow = z.infer<typeof CompactWindowSchema>;
+
+export const CompactBalanceSchema = z.strictObject({
+  remaining: z.number().nullable().optional(),
+  unit: z.string().optional(),
+  resetsAt: z.string().optional(),
+  unlimited: z.literal(true).optional(),
+});
+export type CompactBalance = z.infer<typeof CompactBalanceSchema>;
+
+export const CompactUpstreamAccountSchema = z.strictObject({
+  provider: z.string(),
+  windows: z.array(CompactWindowSchema).optional(),
+  balance: z.string().optional(),
+  allocationHint: QuotaPaceHintSchema,
+});
+export type CompactUpstreamAccount = z.infer<typeof CompactUpstreamAccountSchema>;
+
+export const CompactUpstreamSchema = z.strictObject({
+  error: z.string().optional(),
+  accounts: z.array(CompactUpstreamAccountSchema).optional(),
+});
+export type CompactUpstream = z.infer<typeof CompactUpstreamSchema>;
+
 export const SupportedHostSchema = z.strictObject({
   serverId: z.string(),
-  hostName: z.string(),
-  isSelf: z.boolean(),
   providerId: z.string(),
-  status: z.string(),
   runningSessions: z.number().int().nonnegative().nullable(),
-  quotaGateExcluded: z.boolean(),
   usable: z.boolean(),
-  hostError: z.string().nullable(),
+  hostError: z.string().optional(),
 });
 export type SupportedHost = z.infer<typeof SupportedHostSchema>;
 
 export const DeduplicatedAccountSchema = z.strictObject({
-  accountKey: z.string(),
   kind: z.string(),
-  planLabel: z.string().nullable(),
-  quotaStatus: QuotaStatusSchema,
-  sourceId: z.string().nullable(),
-  fetchedAt: z.string().nullable(),
-  windows: z.array(QuotaWindowReportSchema),
-  lowestRemainingPct: z.number().nullable(),
-  balances: z.array(QuotaBalanceReportSchema),
-  payableCredit: z.boolean(),
-  allocationHint: QuotaPaceHintSchema,
+  planLabel: z.string().optional(),
   verdict: QuotaVerdictSchema,
-  blockReasons: z.array(z.string()),
-  warnings: z.array(z.string()),
-  error: z.string().nullable(),
-  upstream: UpstreamQuotaSchema.nullable(),
-  totalRunningSessions: z.number().int().nonnegative().nullable(),
-  concurrencyLoad: ConcurrencyLoadSchema,
+  allocationHint: QuotaPaceHintSchema,
+  windows: z.array(CompactWindowSchema).optional(),
+  balances: z.array(CompactBalanceSchema).optional(),
+  payableCredit: z.literal(true).optional(),
+  runningSessions: z.number().int().nonnegative().nullable(),
+  load: ConcurrencyLoadSchema,
+  blockReasons: z.array(z.string()).optional(),
+  warnings: z.array(z.string()).optional(),
+  error: z.string().optional(),
+  upstream: CompactUpstreamSchema.optional(),
   supportedHosts: z.array(SupportedHostSchema),
 });
 export type DeduplicatedAccount = z.infer<typeof DeduplicatedAccountSchema>;
@@ -119,20 +143,15 @@ export type DeduplicatedAccount = z.infer<typeof DeduplicatedAccountSchema>;
 export const FleetHostStatusSchema = z.strictObject({
   serverId: z.string(),
   hostName: z.string(),
-  isSelf: z.boolean(),
-  online: z.boolean(),
+  isSelf: z.literal(true).optional(),
   ok: z.boolean(),
-  collectedAt: z.string().nullable(),
-  providerCount: z.number().int().nonnegative(),
-  error: z.string().nullable(),
-  sessionsError: z.string().nullable(),
+  error: z.string().optional(),
+  sessionsError: z.string().optional(),
 });
 export type FleetHostStatus = z.infer<typeof FleetHostStatusSchema>;
 
 export const FleetQuotasSchema = z.strictObject({
   collectedAt: z.string(),
-  minRemainingPct: z.number().min(0).max(100),
-  concurrencyTarget: z.number().int().min(1),
   hosts: z.array(FleetHostStatusSchema),
   accounts: z.array(DeduplicatedAccountSchema),
 });
@@ -145,7 +164,6 @@ export type LocalQuotasInput = z.infer<typeof LocalQuotasInputSchema>;
 
 export const FleetQuotasInputSchema = z.object({
   kind: z.string().min(1).optional(),
-  minRemainingPct: z.number().min(0).max(100).optional(),
   concurrencyTarget: z.number().int().min(1).max(100).optional(),
   refresh: z.boolean().optional(),
 });
@@ -265,34 +283,34 @@ export function evaluateAccountVerdict(
     allocationHint: QuotaPaceHint;
     windows: readonly QuotaWindowReport[];
     payableCredit: boolean;
-    totalRunningSessions: number | null;
-    concurrencyLoad: ConcurrencyLoad;
+    runningSessions: number | null;
+    load: ConcurrencyLoad;
   },
-  minRemainingPct: number,
+  floor = MIN_REMAINING_PCT,
 ): { verdict: QuotaVerdict; blockReasons: string[]; warnings: string[] } {
   const blockReasons: string[] = [];
   if (input.error) blockReasons.push(input.error);
   if (input.upstream?.error) blockReasons.push(input.upstream.error);
   const pooled = POOLED_KINDS.has(input.kind);
   if (input.allocationHint === 'avoid') {
-    blockReasons.push('额度已耗尽（allocationHint avoid）');
+    blockReasons.push('额度已耗尽');
     for (const window of input.windows) {
       if (window.remainingPct <= 0) {
-        blockReasons.push(`${formatWindowName(window)} 窗口剩余 ${window.remainingPct}%`);
+        blockReasons.push(`${formatWindowName(window)} 剩余 0%`);
       }
     }
   } else if (!pooled && !input.payableCredit) {
     for (const window of input.windows) {
-      if (window.remainingPct < minRemainingPct) {
-        blockReasons.push(`${formatWindowName(window)} 窗口剩余 ${window.remainingPct}%（低于 ${minRemainingPct}%）`);
+      if (window.remainingPct < floor) {
+        blockReasons.push(`${formatWindowName(window)} 剩余 ${window.remainingPct}%（低于 ${floor}%）`);
       }
     }
   }
 
   const warnings: string[] = [];
   if (input.allocationHint === 'throttle') warnings.push('消耗偏快（throttle）');
-  if (input.concurrencyLoad === 'high') {
-    warnings.push(`并发负载高（${input.totalRunningSessions} 个运行中会话）`);
+  if (input.load === 'high') {
+    warnings.push(`并发负载高（${input.runningSessions} 个运行中会话）`);
   }
 
   const verdict: QuotaVerdict = blockReasons.length > 0
@@ -335,14 +353,46 @@ function compareSourceQuality(
 
 const VERDICT_ORDER: Record<QuotaVerdict, number> = { ok: 0, unknown: 1, blocked: 2 };
 
+function compactWindow(window: QuotaWindowReport): CompactWindow {
+  return {
+    label: window.label,
+    remainingPct: window.remainingPct,
+    ...(window.resetsAt ? { resetsAt: window.resetsAt } : {}),
+    hint: window.hint,
+  };
+}
+
+function compactBalance(balance: QuotaBalanceReport): CompactBalance {
+  return {
+    ...(balance.remaining !== null ? { remaining: balance.remaining } : {}),
+    ...(balance.unit ? { unit: balance.unit } : {}),
+    ...(balance.resetsAt ? { resetsAt: balance.resetsAt } : {}),
+    ...(balance.unlimited ? { unlimited: true as const } : {}),
+  };
+}
+
+function compactUpstream(upstream: UpstreamQuota | null): CompactUpstream | undefined {
+  if (!upstream) return undefined;
+  const accounts: CompactUpstreamAccount[] = upstream.accounts.map(account => ({
+    provider: account.provider,
+    ...(account.windows.length > 0 ? { windows: account.windows.map(compactWindow) } : {}),
+    ...(account.balance ? { balance: account.balance } : {}),
+    allocationHint: account.allocationHint,
+  }));
+  return {
+    ...(upstream.error ? { error: upstream.error } : {}),
+    ...(accounts.length > 0 ? { accounts } : {}),
+  };
+}
+
 /**
- * 合并多台主机的 Provider 额度，按底层账号键 `accountKey` 去重，并在 `supportedHosts` 列出每台支持主机的精确 `providerId`。
+ * 合并多台主机的 Provider 额度，按底层账号键去重，并在 `supportedHosts` 列出每台支持主机的精确 `providerId`。
+ * 返回结构裁剪为 DSH 选型所需字段并省略空值，控制上下文体积。
  */
 export function mergeFleetQuotas(
   collected: readonly HostCollectionInput[],
   options: {
     collectedAt: string;
-    minRemainingPct: number;
     concurrencyTarget: number;
     kind?: string;
   },
@@ -350,18 +400,14 @@ export function mergeFleetQuotas(
   const hosts: FleetHostStatus[] = collected.map(host => ({
     serverId: host.serverId,
     hostName: host.hostName,
-    isSelf: host.isSelf,
-    online: host.online,
+    ...(host.isSelf ? { isSelf: true as const } : {}),
     ok: host.error === null && host.data !== null,
-    collectedAt: host.data?.collectedAt ?? null,
-    providerCount: host.data?.providers.length ?? 0,
-    error: host.error,
-    sessionsError: host.data?.sessionsError ?? null,
+    ...(host.error ? { error: host.error } : {}),
+    ...(host.data?.sessionsError ? { sessionsError: host.data.sessionsError } : {}),
   }));
 
   type Member = {
     serverId: string;
-    hostName: string;
     isSelf: boolean;
     provider: HostProviderQuota;
   };
@@ -375,7 +421,6 @@ export function mergeFleetQuotas(
       const bucket = groups.get(provider.accountKey) ?? [];
       bucket.push({
         serverId: host.serverId,
-        hostName: host.hostName,
         isSelf: host.isSelf,
         provider,
       });
@@ -383,21 +428,21 @@ export function mergeFleetQuotas(
     }
   }
 
-  const accounts: DeduplicatedAccount[] = [];
+  const ranked: Array<{ account: DeduplicatedAccount; lowestRemainingPct: number; sortKey: string }> = [];
   for (const [accountKey, members] of groups) {
     const sortedMembers = [...members].sort(compareSourceQuality);
     const primary = sortedMembers[0]!.provider;
     const planLabel = sortedMembers.map(member => member.provider.planLabel).find(Boolean) ?? null;
 
     const sessionCounts = members.map(member => member.provider.runningSessions);
-    const totalRunningSessions = sessionCounts.every((value): value is number => value !== null)
+    const runningSessions = sessionCounts.every((value): value is number => value !== null)
       ? sessionCounts.reduce((sum, value) => sum + value, 0)
       : null;
-    const concurrencyLoad = concurrencyLoadFor(totalRunningSessions, options.concurrencyTarget);
+    const load = concurrencyLoadFor(runningSessions, options.concurrencyTarget);
 
     const lowestRemainingPct = primary.windows.length > 0
       ? Math.min(...primary.windows.map(window => window.remainingPct))
-      : null;
+      : -1;
 
     const evaluated = evaluateAccountVerdict(
       {
@@ -407,10 +452,10 @@ export function mergeFleetQuotas(
         allocationHint: primary.allocationHint,
         windows: primary.windows,
         payableCredit: primary.payableCredit,
-        totalRunningSessions,
-        concurrencyLoad,
+        runningSessions,
+        load,
       },
-      options.minRemainingPct,
+      MIN_REMAINING_PCT,
     );
 
     const supportedHosts: SupportedHost[] = members
@@ -423,73 +468,72 @@ export function mergeFleetQuotas(
           : hostQuotaError;
         const usable = !statusBad && hostQuotaError === null && evaluated.verdict !== 'blocked';
         return {
-          serverId: member.serverId,
-          hostName: member.hostName,
           isSelf: member.isSelf,
-          providerId: provider.providerId,
-          status: provider.status,
-          runningSessions: provider.runningSessions,
-          quotaGateExcluded: provider.quotaGateExcluded,
-          usable,
-          hostError,
+          host: {
+            serverId: member.serverId,
+            providerId: provider.providerId,
+            runningSessions: provider.runningSessions,
+            usable,
+            ...(hostError ? { hostError } : {}),
+          } satisfies SupportedHost,
         };
       })
       .sort((a, b) => {
-        if (a.usable !== b.usable) return a.usable ? -1 : 1;
-        const aLoad = a.runningSessions ?? Number.MAX_SAFE_INTEGER;
-        const bLoad = b.runningSessions ?? Number.MAX_SAFE_INTEGER;
+        if (a.host.usable !== b.host.usable) return a.host.usable ? -1 : 1;
+        const aLoad = a.host.runningSessions ?? Number.MAX_SAFE_INTEGER;
+        const bLoad = b.host.runningSessions ?? Number.MAX_SAFE_INTEGER;
         if (aLoad !== bLoad) return aLoad - bLoad;
         if (a.isSelf !== b.isSelf) return a.isSelf ? -1 : 1;
-        return a.serverId.localeCompare(b.serverId) || a.providerId.localeCompare(b.providerId);
-      });
+        return a.host.serverId.localeCompare(b.host.serverId) || a.host.providerId.localeCompare(b.host.providerId);
+      })
+      .map(item => item.host);
 
-    accounts.push({
-      accountKey,
-      kind: primary.kind,
-      planLabel,
-      quotaStatus: primary.quotaStatus,
-      sourceId: primary.sourceId,
-      fetchedAt: primary.fetchedAt,
-      windows: primary.windows,
+    const windows = primary.windows.map(compactWindow);
+    const balances = primary.balances.map(compactBalance);
+    const upstream = compactUpstream(primary.upstream);
+
+    ranked.push({
       lowestRemainingPct,
-      balances: primary.balances,
-      payableCredit: primary.payableCredit,
-      allocationHint: primary.allocationHint,
-      verdict: evaluated.verdict,
-      blockReasons: evaluated.blockReasons,
-      warnings: evaluated.warnings,
-      error: primary.error,
-      upstream: primary.upstream,
-      totalRunningSessions,
-      concurrencyLoad,
-      supportedHosts,
+      sortKey: `${primary.kind}:${accountKey}`,
+      account: {
+        kind: primary.kind,
+        ...(planLabel ? { planLabel } : {}),
+        verdict: evaluated.verdict,
+        allocationHint: primary.allocationHint,
+        ...(windows.length > 0 ? { windows } : {}),
+        ...(balances.length > 0 ? { balances } : {}),
+        ...(primary.payableCredit ? { payableCredit: true as const } : {}),
+        runningSessions,
+        load,
+        ...(evaluated.blockReasons.length > 0 ? { blockReasons: evaluated.blockReasons } : {}),
+        ...(evaluated.warnings.length > 0 ? { warnings: evaluated.warnings } : {}),
+        ...(primary.error ? { error: primary.error } : {}),
+        ...(upstream ? { upstream } : {}),
+        supportedHosts,
+      },
     });
   }
 
-  accounts.sort((a, b) => {
-    if (VERDICT_ORDER[a.verdict] !== VERDICT_ORDER[b.verdict]) {
-      return VERDICT_ORDER[a.verdict] - VERDICT_ORDER[b.verdict];
+  ranked.sort((a, b) => {
+    if (VERDICT_ORDER[a.account.verdict] !== VERDICT_ORDER[b.account.verdict]) {
+      return VERDICT_ORDER[a.account.verdict] - VERDICT_ORDER[b.account.verdict];
     }
-    const aHasUsable = a.supportedHosts.some(host => host.usable);
-    const bHasUsable = b.supportedHosts.some(host => host.usable);
+    const aHasUsable = a.account.supportedHosts.some(host => host.usable);
+    const bHasUsable = b.account.supportedHosts.some(host => host.usable);
     if (aHasUsable !== bHasUsable) return aHasUsable ? -1 : 1;
-    if (HINT_BEST_RANK[a.allocationHint] !== HINT_BEST_RANK[b.allocationHint]) {
-      return HINT_BEST_RANK[a.allocationHint] - HINT_BEST_RANK[b.allocationHint];
+    if (HINT_BEST_RANK[a.account.allocationHint] !== HINT_BEST_RANK[b.account.allocationHint]) {
+      return HINT_BEST_RANK[a.account.allocationHint] - HINT_BEST_RANK[b.account.allocationHint];
     }
-    const aLow = a.lowestRemainingPct ?? -1;
-    const bLow = b.lowestRemainingPct ?? -1;
-    if (aLow !== bLow) return bLow - aLow;
-    const aLoad = a.totalRunningSessions ?? Number.MAX_SAFE_INTEGER;
-    const bLoad = b.totalRunningSessions ?? Number.MAX_SAFE_INTEGER;
+    if (a.lowestRemainingPct !== b.lowestRemainingPct) return b.lowestRemainingPct - a.lowestRemainingPct;
+    const aLoad = a.account.runningSessions ?? Number.MAX_SAFE_INTEGER;
+    const bLoad = b.account.runningSessions ?? Number.MAX_SAFE_INTEGER;
     if (aLoad !== bLoad) return aLoad - bLoad;
-    return a.kind.localeCompare(b.kind) || a.accountKey.localeCompare(b.accountKey);
+    return a.sortKey.localeCompare(b.sortKey);
   });
 
   return {
     collectedAt: options.collectedAt,
-    minRemainingPct: options.minRemainingPct,
-    concurrencyTarget: options.concurrencyTarget,
     hosts,
-    accounts,
+    accounts: ranked.map(item => item.account),
   };
 }
