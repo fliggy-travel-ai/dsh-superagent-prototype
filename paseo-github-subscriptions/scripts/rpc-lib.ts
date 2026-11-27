@@ -1,4 +1,5 @@
 import { MAIN_PLUGIN_ID } from '../shared/instances.ts';
+import { ModulesSnapshotSchema } from '../shared/modules.ts';
 
 const permitted = new Set([
   'capacity.snapshot', 'capacity.clear-review', 'dispatch.finalize',
@@ -27,5 +28,9 @@ export function safeOutput(value: unknown): unknown {
   return value;
 }
 export async function invokeRpc(client: { invokePluginRpc(id: string, method: string, input: unknown): Promise<unknown> }, method: string, input: unknown) {
-  return safeOutput(await client.invokePluginRpc(MAIN_PLUGIN_ID, method, input));
+  const output = await client.invokePluginRpc(MAIN_PLUGIN_ID, method, input);
+  if (method !== 'modules.status') return safeOutput(output);
+  // 模块 ID（如 answer.browser）形似域名，按脱敏规则会被隐藏；ID 来自模块登记表，原样输出。
+  const snapshot = ModulesSnapshotSchema.parse(output);
+  return { ...(safeOutput(snapshot) as object), modules: snapshot.modules.map(module => ({ ...(safeOutput(module) as object), id: module.id })) };
 }
