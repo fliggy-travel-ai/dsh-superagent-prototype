@@ -47,7 +47,6 @@ export interface CollectLocalQuotasInput {
   serverId: string;
   hostName: string;
   excludeProviders?: readonly string[];
-  minRemainingPct?: number;
   refresh?: boolean;
   now?: () => number;
   signal?: AbortSignal;
@@ -166,7 +165,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
   const collectedAt = new Date(nowMs).toISOString();
   const signal = input.signal ?? AbortSignal.timeout(15_000);
   const excludeProviders = input.excludeProviders ?? [];
-  const minRemainingPct = input.minRemainingPct ?? 10;
   const home = basename(input.paseoHome) === '.paseo' ? dirname(input.paseoHome) : homedir();
   const configuredProviders: Record<string, ProviderConfig> =
     readJsonStrict(join(input.paseoHome, 'config.json'))?.agents?.providers ?? {};
@@ -250,7 +248,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
           upstream: { error: parsed.error, accounts: parsed.accounts },
           runningSessions,
           quotaGateExcluded: excluded,
-          minRemainingPct,
         };
       }
     }
@@ -290,7 +287,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
           upstream: null,
           runningSessions,
           quotaGateExcluded: excluded,
-          minRemainingPct,
         };
       }
       if (usageResult.reports.some(report => report.sourceId === 'claude-accounts' || report.sourceId === 'claude')) {
@@ -329,7 +325,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
         upstream: null,
         runningSessions,
         quotaGateExcluded: excluded,
-        minRemainingPct,
       };
     }
 
@@ -352,7 +347,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
         upstream: null,
         runningSessions,
         quotaGateExcluded: excluded,
-        minRemainingPct,
       };
     }
 
@@ -379,7 +373,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
         upstream: null,
         runningSessions,
         quotaGateExcluded: excluded,
-        minRemainingPct,
       };
     }
 
@@ -405,7 +398,6 @@ export async function collectLocalQuotas(input: CollectLocalQuotasInput): Promis
       upstream: null,
       runningSessions,
       quotaGateExcluded: excluded,
-      minRemainingPct,
     };
   }));
 

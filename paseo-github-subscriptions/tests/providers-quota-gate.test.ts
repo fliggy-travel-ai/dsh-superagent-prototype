@@ -120,7 +120,7 @@ test('创建钩子拒绝耗尽账号和有达标备选时的低额度账号，�
     listUsageReports: async () => ({ reports: [
       usage('codex-multi', 'codex-empty', available(window(0))),
       usage('codex-multi', 'codex-spare', available(window(12))),
-      usage('codex-multi', 'codex-low', available(window(8))),
+      usage('codex-multi', 'codex-low', available(window(0.5))),
       usage('codex-multi', 'codex-disabled', available(window(50))),
     ] }),
     getProvidersSnapshot: async () => ({ entries: ['codex-empty', 'codex-spare', 'codex-low', 'codex-disabled', 'codex-unknown'].map(provider => ({
@@ -146,9 +146,8 @@ test('创建钩子拒绝耗尽账号和有达标备选时的低额度账号，�
   await assert.rejects(hook({ request }), /codex-empty.*0%.*本机额度可用账号：codex-spare；本机额度未知账号（允许创建）：codex-unknown$/);
   const passing = { config: { cwd: home, provider: 'codex-spare' } };
   assert.equal(await hook({ request: passing }), passing);
-  // #2298：低于阈值的 codex-5、codex-4 被放行后约 20、30 分钟用尽，3 个会话改派。
   const low = { config: { cwd: home, provider: 'codex-low' } };
-  await assert.rejects(hook({ request: low }), /codex-low.*低于 10%.*Weekly 窗口剩余 8%.*本机额度可用账号：codex-spare；本机额度未知账号（允许创建）：codex-unknown$/);
+  await assert.rejects(hook({ request: low }), /codex-low.*低于 1%.*Weekly 窗口剩余 0\.5%.*本机额度可用账号：codex-spare；本机额度未知账号（允许创建）：codex-unknown$/);
   const warn = context.mock.method(console, 'warn', () => {});
   const unknown = { config: { cwd: home, provider: 'codex-unknown' } };
   assert.equal(await hook({ request: unknown }), unknown);
@@ -162,7 +161,7 @@ test('低额度账号在本机没有达标备选时（即使存在额度未知�
   let hook: ((input: { request: { config: { cwd: string; provider: string } } }) => Promise<unknown>) | undefined;
   const client = {
     listUsageReports: async () => ({ reports: [
-      usage('codex-multi', 'codex-low', available(window(8))),
+      usage('codex-multi', 'codex-low', available(window(0.5))),
       usage('codex-multi', 'codex-empty', available(window(0))),
     ] }),
     getProvidersSnapshot: async () => ({ entries: ['codex-low', 'codex-empty', 'antigravity'].map(provider => ({ provider, enabled: true, status: 'loading' })) }),
@@ -185,14 +184,14 @@ test('低额度账号在本机没有达标备选时（即使存在额度未知�
   const warn = context.mock.method(console, 'warn', () => {});
   const low = { config: { cwd: home, provider: 'codex-low' } };
   assert.equal(await hook({ request: low }), low);
-  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-low.*低于 10%.*没有达标账号，允许创建会话/);
+  assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-low.*低于 1%.*没有达标账号，允许创建会话/);
 });
 
 test('机器配置默认阈值、显式覆盖和非法值校验', () => {
   const sections = { quotaGate: quotaGateModule.config!.spec };
-  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1}').section('quotaGate'), { ok: true, value: { minRemainingPct: 10, excludeProviders: [] } });
+  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1}').section('quotaGate'), { ok: true, value: { minRemainingPct: 1, excludeProviders: [] } });
   assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"minRemainingPct":0}}').section('quotaGate'), { ok: true, value: { minRemainingPct: 0, excludeProviders: [] } });
-  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"excludeProviders":["codex","codex-*"]}}').section('quotaGate'), { ok: true, value: { minRemainingPct: 10, excludeProviders: ['codex', 'codex-*'] } });
+  assert.deepEqual(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"excludeProviders":["codex","codex-*"]}}').section('quotaGate'), { ok: true, value: { minRemainingPct: 1, excludeProviders: ['codex', 'codex-*'] } });
   assert.equal(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"minRemainingPct":101}}').section('quotaGate').ok, false);
   assert.equal(loadMachineConfig('unused', sections, () => '{"version":1,"quotaGate":{"excludeProviders":[""]}}').section('quotaGate').ok, false);
 });
@@ -280,7 +279,7 @@ test('snapshot 列出本机 Provider，configure 写回 machine.json 并让钩�
   });
   assert.ok(hook);
   assert.deepEqual(await handlers.get(quotaGateSnapshot.name)!({}), {
-    minRemainingPct: 10,
+    minRemainingPct: 1,
     excludeProviders: ['grok'],
     providers: [
       { id: 'codex', label: 'Codex', enabled: true },
@@ -296,7 +295,7 @@ test('snapshot 列出本机 Provider，configure 写回 machine.json 并让钩�
   // 保存后 codex* 立即生效，不需要重载插件，也不再读本机额度。
   await handlers.get(quotaGateConfigure.name)!({ excludeProviders: ['grok', 'codex*'] });
   const saved = JSON.parse(readFileSync(configPath, 'utf8'));
-  assert.deepEqual(saved.quotaGate, { minRemainingPct: 10, excludeProviders: ['grok', 'codex*'] });
+  assert.deepEqual(saved.quotaGate, { minRemainingPct: 1, excludeProviders: ['grok', 'codex*'] });
   for (const provider of ['codex', 'codex-2']) {
     const request = { config: { cwd: home, provider } };
     assert.equal(await hook({ request }), request);
