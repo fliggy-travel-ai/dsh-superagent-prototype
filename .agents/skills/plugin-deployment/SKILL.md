@@ -5,13 +5,15 @@ description: 部署、读回或回滚 Mac mini 与 MacBook 上运行的「开发
 
 # 部署与排查开发自动化插件
 
-两台主机各运行一个插件实例，安装 ID `github-subscriptions`，安装目录是该主机 Paseo 用户的 `~/.paseo/local-plugins/github-subscriptions`，状态目录是 `~/.paseo/github-subscriptions`。每台主机只能由运行该主机 Paseo 守护进程的 macOS 用户部署：Mac mini 在它的 Paseo 终端或会话中操作；MacBook 在 MacBook 上的 Paseo 会话中操作。从另一台主机只能用 `paseo ... --host` 读回，不能替换文件。
+两台主机各运行一个插件实例，安装 ID `github-subscriptions`，安装目录是该主机 Paseo 用户的 `~/.paseo/local-plugins/github-subscriptions`，状态目录是 `~/.paseo/github-subscriptions`。每台主机只能由运行该主机 Paseo 守护进程的 macOS 用户部署。在该主机上开一个 Paseo 终端，它以守护进程的用户运行：Mac mini 用本机 Paseo MCP 的 `create_terminal`；MacBook 在 Mac mini 的 Paseo 终端里运行 `paseo terminal create --host "$MACBOOK_PASEO_HOST" --cwd <家目录> --json`，再用 `paseo terminal send-keys` 和 `paseo terminal capture` 操作。隔离的 macOS 用户会话不能代替这个终端：它不能写安装目录，也可能不能监听端口或解析中转服务器地址。MacBook 离线（`list_hosts` 显示 `connecting` 或 `offline`）时，请用户唤醒 MacBook 并确认 Paseo 在运行。
+
+部署用一份干净的检出：在该主机上把本仓库克隆或 `git worktree add --detach` 到临时目录，在其中的 `paseo-github-subscriptions/` 运行 `npm ci --ignore-scripts`。不要使用主机上已有的开发检出，它可能停在旧分支或有未提交的改动。部署结束后删除临时检出和终端。
 
 ## 部署
 
 每台主机依次完成以下步骤，再换下一台。
 
-1. **确认提交**：在该主机本仓库的检出中运行 `git fetch origin`，再运行 `git merge-base --is-ancestor <提交> origin/main`。退出码不为 0 时停止：只部署 `main` 上的提交。
+1. **确认提交**：在临时检出中运行 `git fetch origin`，再运行 `git merge-base --is-ancestor <提交> origin/main`。退出码不为 0 时停止：只部署 `main` 上的提交。
 2. **读现有角色**：读安装目录的 `.deployment.json`，取 `role` 和 `commit`。`role` 为 `null` 时用 `compat`。没有该文件时，读安装目录的 `shared/instance.ts`。记下旧提交，回滚要用。
 3. **试运行**：在仓库的 `paseo-github-subscriptions/` 中运行 `node --experimental-strip-types scripts/deploy.ts --role <角色> --ref <提交> --dry-run`。核对输出的目录、提交和要检查的 Provider。脚本报角色不一致时停止，请用户确认后才加 `--change-role`。
 4. **部署并重载**：去掉 `--dry-run`，加 `--reload`。退出码 2 表示有会话正在运行插件托管的 Provider，重载会让这一轮失败：等这些会话空闲后重试，不绕过。脚本把旧目录保留为 `<安装目录>.prev-<时间>`。
