@@ -88,7 +88,7 @@ test('出口探测超时和 IP 不一致使用不同提示', async () => {
     if (result.status === 'error') assert.match(result.error, expected);
   }
 });
-test('出口探测超时一分钟后允许重试，IP 不一致仍缓存五分钟', async () => {
+test('出口探测超时与瞬态网络错误一分钟后允许重试，IP 不一致仍缓存五分钟', async () => {
   let now = 0;
   let calls = 0;
   const timedOut = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
@@ -101,6 +101,18 @@ test('出口探测超时一分钟后允许重试，IP 不一致仍缓存五分�
   assert.equal(calls, 1);
   now = 60_000;
   await timedOut.fetch(dir, 'account.org');
+  assert.equal(calls, 2);
+  calls = 0;
+  now = 0;
+  const netFail = new CrossUserUsage({ mappings, now: () => now,
+    run: async () => { calls++; return JSON.stringify({ version: 1, error: 'network' }); },
+  });
+  assert.equal((await netFail.fetch(dir, 'account.org')).status, 'error');
+  now = 59_999;
+  await netFail.fetch(dir, 'account.org');
+  assert.equal(calls, 1);
+  now = 60_000;
+  await netFail.fetch(dir, 'account.org');
   assert.equal(calls, 2);
   calls = 0;
   now = 0;
@@ -161,7 +173,7 @@ test('初始化确认不能代替真实账号结果，失败也不阻止尚有�
     }
   }
 });
-test('预检、初始化和查询共用三十秒预算，预算耗尽时不查询', async () => {
+test('预检、初始化和查询共用四十五秒预算，预算耗尽时不查询', async () => {
   let now = 0;
   const timeouts: number[] = [];
   const usage = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
@@ -173,9 +185,9 @@ test('预检、初始化和查询共用三十秒预算，预算耗尽时不查�
     },
   });
   assert.equal((await usage.fetch(dir, 'account.org')).status, 'available');
-  assert.deepEqual(timeouts, [15000, 21000]);
+  assert.deepEqual(timeouts, [15000, 36000]);
   const exhausted = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
-    initialize: async () => { now += 30_000; return false; },
+    initialize: async () => { now += 45_000; return false; },
     run: async (_command, args) => { assert.deepEqual(args, ['--egress']); return JSON.stringify({ verified: true }); },
   });
   assert.equal((await exhausted.fetch(dir, 'account.org')).status, 'error');
@@ -226,7 +238,7 @@ test('初始化抛错后仍查询有效凭据，旧映射完全跳过初始化',
 test('剩余预算少于三秒时不启动额度helper', async () => {
   let now = 0;
   const usage = new CrossUserUsage({ mappings: renewalMappings, now: () => now,
-    initialize: async () => { now = 27_001; return false; },
+    initialize: async () => { now = 42_001; return false; },
     run: async (_command, args) => { assert.deepEqual(args, ['--egress']); return JSON.stringify({ verified: true }); },
   });
   assert.equal((await usage.fetch(dir, 'account.org')).status, 'error');
