@@ -196,7 +196,7 @@ test('Antigravity 额外账号经 agy-paseo 使用官方窗口，裸 agy 会被�
   const dir = mkdtempSync(join(root, 'agy-'));
   const bin = join(dir, 'agy-paseo');
   writeFileSync(bin, `#!/bin/sh
-printf '%s\\n' '{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.06,"reset_time":"2026-12-03T07:15:00Z"},{"id":"gemini-5h","name":"5h","window":"5h","remaining_fraction":0.98,"reset_time":"2026-11-27T05:15:00Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"gpt-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":1,"reset_time":"2026-12-03T07:15:00Z"}]}]}}}'
+printf '%s\\n' '{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.06,"reset_time":"2026-12-03T07:15:00Z"},{"id":"gemini-5h","name":"5h","window":"5h","remaining_fraction":0.98,"reset_time":"2026-11-27T05:15:00Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"gpt-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}]}]}}}'
 `);
   chmodSync(bin, 0o755);
   const report = await source('antigravity-multi').fetch({
@@ -212,6 +212,7 @@ printf '%s\\n' '{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
     'Gemini · 5h',
     'Claude and GPT · Weekly',
   ]);
+  assert.equal(report.windows[2]!.resetsAt, null);
 });
 
 test('Qoder 子进程立即退出：返回错误，写入已关闭的 stdin 不会抛未捕获异常', async () => {
