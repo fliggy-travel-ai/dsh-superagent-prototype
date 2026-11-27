@@ -96,6 +96,10 @@ export class UsageContinuity {
     const observed = this.identities.get(routeKey(input));
     return !!credential && !!observed?.verified && observed.fingerprint === credential.fingerprint && observed.identity.key === accountKey;
   }
+  verifiedIdentity(input: UsageInput): Identity | undefined {
+    const observed = this.identities.get(routeKey(input));
+    return observed?.verified ? observed.identity : undefined;
+  }
   cached(accountKey: string): { report: Available; at: number } | null {
     const value = this.history.get(accountKey);
     if (!value || this.now() < value.at || this.now() - value.at > HISTORY_MS) return null;

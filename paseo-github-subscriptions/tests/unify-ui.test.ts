@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-test('第二期客户端入口：只注册 1 个主屏幕、1 个开发自动化侧栏入口与命令面板项，不注册独立设置页和待办侧栏项', async () => {
+test('客户端入口注册主屏幕、开发自动化侧栏入口、Claude 会员到期设置页与命令面板项', async () => {
   const { installTsxAndReactNativeHooks } = await import('./ui/presence-panel.ts');
   installTsxAndReactNativeHooks();
   const { createPreview } = await import('./ui/host.tsx');
@@ -16,8 +16,7 @@ test('第二期客户端入口：只注册 1 个主屏幕、1 个开发自动化
   try {
     assert.deepEqual([...handle.registry.screens.keys()], ['main']);
     assert.deepEqual([...handle.registry.sidebar.keys()], ['main']);
-    assert.equal('settingsScreens' in handle.registry, false);
-    assert.equal('addSettingsScreen' in handle.registry, false);
+    assert.equal(handle.registry.settingsScreens.get('claude-membership')?.title, 'Claude 会员到期');
     assert.deepEqual(
       [...handle.registry.commands.keys()],
       ['open-heartbeats', 'open-todo', 'qa-mode-online', 'qa-mode-offline', 'qa-mode-auto', 'pause-all'],

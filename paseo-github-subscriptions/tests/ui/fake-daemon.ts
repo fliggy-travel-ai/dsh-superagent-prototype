@@ -7,6 +7,7 @@ import type { BrowserBindingInput, BrowserSettings } from '../../shared/browser.
 import type { PresenceSettings } from '../../shared/presence.ts';
 import type { AgentDefaultRule, DefaultsSnapshot } from '../../shared/defaults.ts';
 import type { ClaudeAccountsSnapshot } from '../../shared/claude-accounts.ts';
+import type { MembershipAccount, MembershipRenewal } from '../../shared/claude-membership.ts';
 import type { EscalationSnapshot } from '../../shared/escalation.ts';
 import type { EscalationWindow } from '../../client/control-store.ts';
 import type { QuietSnapshot } from '../../shared/quiet.ts';
@@ -23,6 +24,10 @@ export interface RpcLogEntry {
 
 /** 内存里的假守护进程：用真实合约的 Zod 校验输入和输出。 */
 export class FakeDaemon {
+  membershipAccounts: MembershipAccount[] = [
+    { label: 'Claude 本机账号', email: 'local@example.invalid', renewal: { day: 9, time: '20:15' } }, // scan-allow
+    { label: 'Claude 独立用户账号', email: 'isolated@example.invalid', renewal: null }, // scan-allow
+  ];
   browser = {
     ...makeBrowser(),
     settings: { enabled: true, port: 17373 },
@@ -306,6 +311,14 @@ export class FakeDaemon {
 
   private handle(name: string, input: Record<string, unknown>): unknown {
     switch (name) {
+      case 'claude-membership.list':
+        return this.membershipAccounts;
+      case 'claude-membership.set': {
+        const account = this.membershipAccounts.find(item => item.email === input.email);
+        if (!account) throw new Error('本机未发现此 Claude 账号，请刷新列表');
+        account.renewal = input.renewal as MembershipRenewal | null;
+        return account.renewal;
+      }
       case 'modules.status':
         return {
           instance: { role: 'main', legacy: false },

@@ -78,6 +78,12 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
 
 打开事件转发后，Antigravity 子会话在本轮之外自己续跑（后台命令结束后继续工作，Paseo 显示为空闲且不发完成通知）时，静默 60 秒后告诉主会话“子会话后台续跑已结束”，附最后一条助手消息。不给子会话发续接。
 
+### Claude 会员到期
+
+在 Paseo 设置中打开「Claude 会员到期」。选择本机 Claude 账号，填写每月续费日（1–31）和北京时间（HH:MM），然后点「保存」。列表也显示额度模块已识别邮箱的独立用户账号。点「清除」可移除该账号的设置。
+
+插件额度卡片在下一次刷新后显示「会员到期」和倒计时。剩余不足 3 天时显示警告色，不足 1 天时显示危险色。设置按主机保存。
+
 ### 复制自 Paseo 自带插件的文件
 
 `server/vendor/paseo-0.15.0/claude-usage-source/` 原样复制 Paseo 0.15.0 自带插件 `claude-usage-source` 的 `server/usage.ts`、`server/stores.ts`、`shared/input.ts` 和 `icon.svg`，保持相对路径，没有修改。Paseo 更新后运行 `npm run vendor:check` 比较，有变化时重新复制。自有逻辑放在 `server/modules/usage-claude-accounts/`。

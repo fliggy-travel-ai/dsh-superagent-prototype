@@ -22,7 +22,7 @@ const themes: Record<'light' | 'dark', MockHostTheme> = {
 };
 
 type Route =
-  | { kind: 'screen'; screenId: string; params: Record<string, string> }
+  | { kind: 'screen' | 'settings'; screenId: string; params: Record<string, string> }
   | { kind: 'agent'; agentId: string };
 type Popover = { kind: 'sidebar' | 'pill'; Content: ComponentType<never>; props: Record<string, unknown> } | null;
 
@@ -37,7 +37,7 @@ function parseRoute(text: string): Route {
     }
   }
   if (kind === 'agent' && id) return { kind: 'agent', agentId: id };
-  return { kind: 'screen', screenId: id || 'main', params };
+  return { kind: kind === 'settings' ? 'settings' : 'screen', screenId: id || 'main', params };
 }
 
 export interface PreviewHandle {
@@ -73,6 +73,7 @@ export function createPreview(options: PreviewOptions) {
     openScreen: (input: { screenId: string; params?: Record<string, string> }) => route.set({ kind: 'screen', screenId: input.screenId, params: input.params ?? {} }),
     openPanel: (id: string, panelOptions: { workspaceId: string; agentId?: string }) => registry.openPanel(id, panelOptions),
     addScreen: (entry: Parameters<Registry['addScreen']>[0]) => registry.addScreen(entry),
+    addSettingsScreen: (entry: Parameters<Registry['addSettingsScreen']>[0]) => registry.addSettingsScreen(entry),
     addSidebarHeaderItem: (entry: Parameters<Registry['addSidebar']>[0]) => registry.addSidebar(entry),
     addAgentPanel: (entry: Parameters<Registry['addAgentPanel']>[0]) => registry.addAgentPanel(entry),
     addCommandCenterItem: (entry: Parameters<Registry['addCommandCenterItem']>[0]) => registry.addCommandCenterItem(entry),
@@ -158,8 +159,9 @@ export function createPreview(options: PreviewOptions) {
 
     let body: React.ReactNode;
     let title = '';
-    if (current.kind === 'screen') {
-      const screen = registry.screens.get(current.screenId);
+    if (current.kind !== 'agent') {
+      const screens = current.kind === 'settings' ? registry.settingsScreens : registry.screens;
+      const screen = screens.get(current.screenId);
       if (!screen) {
         body = <Text style={[text(14), { padding: 24 }]}>页面 {current.screenId} 不存在（插件未注册或已清理）</Text>;
       } else {
@@ -250,7 +252,7 @@ export function createPreview(options: PreviewOptions) {
               <Text style={[text(14), { flex: 1 }]} numberOfLines={1}>
                 {title}
               </Text>
-              {current.kind === 'screen' ? (
+              {current.kind !== 'agent' ? (
                 <Pressable accessibilityRole="button" accessibilityLabel="关闭页面" onPress={() => route.set({ kind: 'agent', agentId: 'agent-main' })}>
                   <Text style={text(16, true)}>×</Text>
                 </Pressable>

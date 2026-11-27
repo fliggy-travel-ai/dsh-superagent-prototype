@@ -3,6 +3,7 @@ import { createPills } from './client/pills.ts';
 import { PillPopover } from './client/pill-popover.tsx';
 import { MainScreen } from './client/dashboard.tsx';
 import { SidebarItem } from './client/sidebar-item.tsx';
+import { createMembershipScreen } from './client/claude-membership.tsx';
 import { registerQuotaResume } from './client/quota-resume/register.tsx';
 import { createSnapshotStore } from './client/store.ts';
 import { createControlStore } from './client/control-store.ts';
@@ -37,6 +38,12 @@ export default function contribute(client: PluginClientContext) {
   };
 
   const removers = [
+    client.addSettingsScreen({
+      id: 'claude-membership',
+      title: 'Claude 会员到期',
+      icon: 'CalendarClock',
+      Component: bind(env, createMembershipScreen(client)),
+    }),
     client.addScreen({ id: 'main', title: '开发自动化', Component: bind(env, MainScreen) }),
     client.addSidebarHeaderItem({ id: 'main', title: '开发自动化', Component: bind(env, SidebarItem) }),
     client.addAgentPanel?.({

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import * as rpc from '../../../shared/claude-accounts.ts';
+import { claudeMembershipList, claudeMembershipSet, MembershipEmailSchema, type MembershipAccount } from '../../../shared/claude-membership.ts';
 import { continuityInput } from '../../../shared/continuity-input.ts';
 import { legacyPluginStatus } from '../../core/legacy-plugins.ts';
 import { createSettingsStore } from '../../core/settings-store.ts';
@@ -10,7 +11,9 @@ import { APPLE_SUFFIX, isAppleRelay, listAccounts } from './accounts.ts';
 import { CLAUDE_ACCOUNTS_FALLBACK, ClaudeAccountsSectionSchema, QuotaSettingsSchema, quotaDefaults, type ClaudeAccountsSection } from './config.ts';
 import { ContinuousUsage } from './continuous-usage.ts';
 import { backupConfigFile, verifyProviderEntry, writeProviderEntry } from '../../core/provider-config.ts';
-import { withQuota } from './labels.ts';
+import { baseLabel, withQuota } from './labels.ts';
+import { providerEnvs } from './account-map.ts';
+import { MembershipStore } from './membership.ts';
 import { readLabels, setLabel } from './labels-file.ts';
 import { migrateLegacyClaudeQuota } from './migrate.ts';
 import { bundledClaudeUsageInstalled, discoverAccounts, isClaudeProvider } from './providers.ts';
@@ -50,6 +53,8 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       const refuse = async () => { throw new Error(message); };
       server.handle(rpc.claudeAccountsConfigure, refuse);
       server.handle(rpc.claudeAccountsRename, refuse);
+      server.handle(claudeMembershipList, refuse);
+      server.handle(claudeMembershipSet, refuse);
       context.fail(new Error(message));
       return;
     }
@@ -59,7 +64,8 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
 
     // 自带的 Claude 额度插件只读默认账号。它在时本来源只补其他账号；它不在时本来源报告全部账号。
     const includeDefault = !bundledClaudeUsageInstalled();
-    const usage = new ContinuousUsage({ home, directory, renewal: config.renewal });
+    const membership = new MembershipStore(directory);
+    const usage = new ContinuousUsage({ home, directory, renewal: config.renewal, membership });
     server.registerUsageSource?.({
       id: config.sourceId,
       label: includeDefault ? 'Claude' : 'Claude 其他账号',
@@ -113,9 +119,35 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
     usage.start();
 
     // —— 页面用的 RPC ——
+    const readProvidersRaw = (): Record<string, any> => JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')).agents?.providers ?? {};
     const providersRaw = (): Record<string, any> => {
-      try { return JSON.parse(readFileSync(join(home, 'config.json'), 'utf8')).agents?.providers ?? {}; } catch { return {}; }
+      try { return readProvidersRaw(); } catch { return {}; }
     };
+    const membershipAccounts = () => {
+      let providers: ReturnType<typeof readProvidersRaw>;
+      try { providers = readProvidersRaw(); }
+      catch { throw new Error('无法读取本机 Paseo 配置，请检查 config.json'); }
+      const displayLabels = readLabels(labelsFile);
+      const accounts = new Map<string, string>();
+      for (const [id, env] of providerEnvs(home)) {
+        const email = MembershipEmailSchema.safeParse(usage.membershipEmail(env));
+        if (!email.success || accounts.has(email.data)) continue;
+        const label = providers[id]?.label;
+        accounts.set(email.data, displayLabels[email.data] || (typeof label === 'string' && baseLabel(label)) || (id === 'claude' ? 'Claude' : id));
+      }
+      return accounts;
+    };
+    server.handle(claudeMembershipList, async (): Promise<MembershipAccount[]> => {
+      const entries = membership.read();
+      return Array.from(membershipAccounts(), ([email, label]) => ({ email, label, renewal: entries[email] ?? null }));
+    });
+    let stopped = false;
+    server.handle(claudeMembershipSet, async ({ email, renewal }) => {
+      if (stopped) throw new Error('Claude 账号额度模块已停止');
+      if (!membershipAccounts().has(email)) throw new Error('本机未发现此 Claude 账号，请刷新列表');
+      membership.set(email, renewal);
+      return renewal;
+    });
     const baseEnv = () => { const env = { ...process.env }; delete env.CLAUDE_CONFIG_DIR; return env; };
     const providerEnv = (id: string): NodeJS.ProcessEnv => ({ ...baseEnv(), ...Object.fromEntries(Object.entries(providersRaw()[id]?.env ?? {}).filter((entry): entry is [string, string] => typeof entry[1] === 'string')) });
     // 守护进程的 config.patch 只保存 enabled、additionalModels、paseoTools，不保存 extends、env、models、label：
@@ -165,6 +197,6 @@ export const claudeAccountsModule: Module<ClaudeAccountsSection> = {
       return snapshot();
     });
 
-    return async () => { removeStart(); removeArchive(); removeEnd(); service.stop(); await usage.stop(); await labels.stop(); };
+    return async () => { stopped = true; removeStart(); removeArchive(); removeEnd(); service.stop(); await usage.stop(); await labels.stop(); };
   },
 };

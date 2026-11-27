@@ -42,6 +42,7 @@ export interface PillEntry {
 /** 假宿主的注册表：行为对齐真实宿主（重复注册同一目标会抛错；移除幂等）。 */
 export class Registry {
   readonly screens = new Map<string, ScreenEntry>();
+  readonly settingsScreens = new Map<string, AgentPanelEntry>();
   readonly sidebar = new Map<string, SidebarEntry>();
   readonly agentPanels = new Map<string, AgentPanelEntry>();
   readonly commands = new Map<string, CommandEntry>();
@@ -69,6 +70,15 @@ export class Registry {
     this.bump();
     return () => {
       if (this.screens.delete(entry.id)) this.events.push(`screen- ${entry.id}`);
+      this.bump();
+    };
+  }
+  addSettingsScreen(entry: AgentPanelEntry) {
+    if (this.settingsScreens.has(entry.id)) throw new Error(`重复的设置页 ${entry.id}`);
+    this.settingsScreens.set(entry.id, entry);
+    this.bump();
+    return () => {
+      this.settingsScreens.delete(entry.id);
       this.bump();
     };
   }
