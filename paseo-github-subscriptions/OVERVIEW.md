@@ -119,9 +119,11 @@ Mac mini 和 MacBook 各自保存设置、令牌和订阅。每台机器只向�
   - `qoder`（Qoder 额度）：调用 Provider `command[0]` 或 `~/.local/bin/qodercli`（以 `--sdk` 协议运行，传入 Provider `env.HOME` 或系统主目录）。
   - `opencode-token-switch`（OpenCode TokenHub 额度）：只读打开 `<HOME>/.token-switch/token-switch.db`（SQLite）、读取 `env.OPENCODE_CONFIG` 或 `<XDG_CONFIG_HOME|~/.config>/opencode/opencode.json`、读取 `~/.paseo/token-hub-browser.json` 并通过 `~/.local/bin/ego-browser` 查询同账号共享额度，脱敏后的观测时间缓存在 `~/.paseo/cache/provider-quotas-usage-source/`。
 
-## 新建会话额度拦截
+## 新建会话额度拦截与跨主机查询
 
 「开发自动化 → Provider 与账号」中的「新建会话额度检查」卡片按本机 Provider 清单逐个调整拦截：选择一个 Provider 后「停止拦截」或「恢复拦截」，保存写回本机 `machine.json` 的 `quotaGate.excludeProviders` 并立即生效，不需要重载插件。恢复被 `codex*` 之类通配模式放行的 Provider 时，通配按本机现有 Provider 展开成精确项，只影响这台机器。卡片右上开关整体启停模块（需重载插件）；阈值 `minRemainingPct` 与手写配置见插件 README。守护进程暂不可用时 Provider 清单读取失败，按钮停用并自动重试。
+
+会话同时内置只读 MCP 工具 `provider_quotas`（由 `providers.quotaTool` 模块提供，默认启用）。调用方无需指定主机即可一次查询本机及所有已配对在线主机的 Provider 额度与并发会话负载：结果按真实底层账号跨主机去重（不输出邮箱与凭据），每条账号的 `supportedHosts` 列出支持它的每台主机 `serverId` 及该主机对应的 `providerId`，可直接用于 `create_agent` 派发；离线或查询失败的主机在 `hosts` 中显式给出原因。
 
 ## 主会话收尾与容量
 

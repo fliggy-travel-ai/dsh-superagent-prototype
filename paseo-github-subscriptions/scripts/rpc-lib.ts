@@ -4,6 +4,7 @@ import { ModulesSnapshotSchema } from '../shared/modules.ts';
 const permitted = new Set([
   'capacity.snapshot', 'capacity.clear-review', 'dispatch.finalize',
   'machine.settings.snapshot', 'escalation.snapshot', 'presence.snapshot', 'provider-quotas.snapshot',
+  'providers.quotas.local', 'providers.quotas.fleet',
   'browser.snapshot', 'browser.usage.snapshot', 'antigravity.snapshot', 'claude-accounts.snapshot',
   'subscriptions.snapshot', 'quiet.snapshot', 'defaults.snapshot', 'modules.status',
 ]);

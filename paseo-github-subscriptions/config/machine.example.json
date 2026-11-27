@@ -4,6 +4,7 @@
   "modules": {
     "providers.defaults": true,
     "providers.quotaGate": true,
+    "providers.quotaTool": true,
     "answer.quietChildren": true,
     "answer.escalation": true,
     "usage.claudeAccounts": true,

@@ -23,6 +23,7 @@ description: 修改「开发自动化」Paseo 插件时使用：改已有功能�
 | Claude 账号额度与自动继续 | `usage.claudeAccounts` | `usage-claude-accounts/` | `docs/answer-usage-modules.md` |
 | 其他 Provider 额度 | `usage.providerQuotas` | `usage-provider-quotas/` | OVERVIEW「其他 Provider 额度来源」 |
 | 新建会话额度检查 | `providers.quotaGate` | `providers-quota-gate/` | README「兼容与安装」 |
+| Provider 额度查询工具 | `providers.quotaTool` | `providers-quota-tool/` | README「兼容与安装」、OVERVIEW「新建会话额度拦截与跨主机查询」 |
 | 工具权限自动批准 | `providers.toolPermissions` | `providers-tool-permissions/` | README「兼容与安装」 |
 | 新建会话默认设置 | `providers.defaults` | `providers-defaults/` | `config/machine.example.json` |
 | 云端会话 Provider | `providers.cloudSession`、`providers.cloudGateway` | `providers-cloud-session/`、`providers-cloud-gateway/`，另有 `server/cloud-session/` | README「云端会话 Provider」，`../paseo-cloud-session/` |

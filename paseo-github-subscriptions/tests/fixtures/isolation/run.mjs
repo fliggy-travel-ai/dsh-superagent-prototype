@@ -49,7 +49,12 @@ let provider;
 const server = {
   registerProvider(value) { if (mode === 'cloud-fails') throw new Error('cloud registration failed Bearer pretend-secret https://example.invalid/?credential=pretend-query'); provider = value; },
   handle(contract, handler) { handlers.set(contract.name, handler); },
-  addHook(name, handler) { hooks.set(name, handler); return () => hooks.delete(name); },
+  addHook(name, handler) {
+    const callbacks = hooks.get(name) ?? new Set();
+    hooks.set(name, callbacks);
+    callbacks.add(handler);
+    return () => callbacks.delete(handler);
+  },
 };
 const previousError = console.error;
 const logs = [];
@@ -60,10 +65,13 @@ try {
   if (mode === 'cloud-fails') {
     assert.equal(logs.length, 1); assert.match(logs[0], /cloud registration failed/);
     assert.ok(!logs[0].includes('pretend-secret')); assert.ok(!logs[0].includes('pretend-query')); assert.ok(!logs[0].includes('example.invalid'));
-    const hook = hooks.get('agent.open.before');
-    const request = await hook({ request: { purpose: 'conversation', tools: [] } });
+    let request = { purpose: 'conversation', tools: [] };
+    for (const hook of hooks.get('agent.open.before') ?? []) {
+      request = await hook({ request }) ?? request;
+    }
     const tool = request.tools.find(entry => entry.name === 'github_list_subscriptions');
     assert.ok(tool);
+    assert.ok(request.tools.some(entry => entry.name === 'provider_quotas'));
     const result = await tool.execute({}, { agent: { id: 'agent' } });
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent, { shadow: true, subscriptions: [{ agentId: 'agent', id: 'subscription' }] });

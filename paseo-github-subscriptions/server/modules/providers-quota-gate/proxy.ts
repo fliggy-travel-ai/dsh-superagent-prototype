@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { accountAllocationHint, type QuotaPaceHint, type QuotaWindowReport, type UpstreamAccount } from '../../../shared/provider-quota-tool.ts';
 import { allocationHint, type AccountQuota } from './rules.ts';
 
 const upstreamIds = new Set(['antigravity', 'codex', 'cursor', 'deepseek', 'grok', 'mimo-app', 'openai', 'workbuddy', 'zcode']);
@@ -59,7 +60,7 @@ export function proxyQuotaUrl(kind: string, env: NodeJS.ProcessEnv, home: string
   }
 }
 
-type ProxyReport = { data: unknown[] } | { error: string };
+export type ProxyReport = { data: unknown[] } | { error: string };
 
 export async function readProxyQuotas(url: string, signal: AbortSignal, fetchImpl = fetch): Promise<ProxyReport | undefined> {
   try {
@@ -78,23 +79,66 @@ function number(value: number | string | null | undefined): number | undefined {
   if (Number.isFinite(result)) return result;
 }
 
-export function proxyAccount(report: ProxyReport, provider: string, kind: string): AccountQuota {
-  if ('error' in report) return { upstream: { error: report.error } };
+export function proxyDetails(
+  report: ProxyReport,
+  provider: string,
+  kind: string,
+): { error: string | null; accounts: UpstreamAccount[]; allocationHint: QuotaPaceHint } {
+  if ('error' in report) return { error: report.error, accounts: [], allocationHint: 'unknown' };
   const family = new Set([provider, kind].filter(id => upstreamIds.has(id)));
-  const hints = report.data.flatMap(row => {
+  const accounts: UpstreamAccount[] = [];
+  for (const row of report.data) {
     const parsed = accountSchema.safeParse(row);
-    if (!parsed.success || (family.size > 0 && !family.has(parsed.data.provider))) return [];
+    if (!parsed.success || (family.size > 0 && !family.has(parsed.data.provider))) continue;
     const account = parsed.data;
-    const windows = (account.windows ?? []).flatMap(rawWindow => {
+    const windows: QuotaWindowReport[] = (account.windows ?? []).flatMap((rawWindow, index) => {
       const window = windowSchema.safeParse(rawWindow);
       if (!window.success || window.data.name?.trim().toLowerCase() === 'total') return [];
       const used = number(window.data.used);
       const remaining = number(window.data.remaining) ?? (used === undefined ? undefined : 100 - used);
-      return remaining === undefined ? [] : [{ id: 'upstream', label: window.data.name, remainingPct: remaining }];
+      if (remaining === undefined) return [];
+      const clampedRem = Math.round(Math.max(0, Math.min(100, remaining)) * 10) / 10;
+      const clampedUsed = Math.round((100 - clampedRem) * 10) / 10;
+      const label = window.data.name?.trim() || `window_${index + 1}`;
+      return [{
+        id: label.toLowerCase().replace(/\s+/g, '_'),
+        label,
+        remainingPct: clampedRem,
+        usedPct: clampedUsed,
+        resetsAt: null,
+        hint: clampedRem <= 0 ? 'avoid' : 'normal',
+      }];
     });
     const amount = account.balance?.trim().match(/^(-?\d+(?:\.\d+)?)\s+\S.*$/)?.[1]
       ?? account.balance?.trim().match(/^[^\d\s]{1,3}\s*(-?\d+(?:\.\d+)?)$/)?.[1];
-    return [allocationHint(windows, account.provider === 'cursor', Number(amount) > 0)];
+    const hint = accountAllocationHint(windows, account.provider === 'cursor', Number(amount) > 0);
+    accounts.push({
+      provider: account.provider,
+      windows,
+      balance: account.balance ?? null,
+      allocationHint: hint,
+    });
+  }
+  const hints = accounts.map(account => account.allocationHint);
+  const overall: QuotaPaceHint = hints.includes('prefer')
+    ? 'prefer'
+    : hints.includes('normal')
+      ? 'normal'
+      : hints.includes('throttle')
+        ? 'throttle'
+        : hints.length > 0 && hints.every(hint => hint === 'avoid')
+          ? 'avoid'
+          : 'unknown';
+  return { error: null, accounts, allocationHint: overall };
+}
+
+export function proxyAccount(report: ProxyReport, provider: string, kind: string): AccountQuota {
+  if ('error' in report) return { upstream: { error: report.error } };
+  const details = proxyDetails(report, provider, kind);
+  const hints = details.accounts.map(account => {
+    const amount = account.balance?.trim().match(/^(-?\d+(?:\.\d+)?)\s+\S.*$/)?.[1]
+      ?? account.balance?.trim().match(/^[^\d\s]{1,3}\s*(-?\d+(?:\.\d+)?)$/)?.[1];
+    return allocationHint(account.windows, account.provider === 'cursor', Number(amount) > 0);
   });
   return { allocationHint: hints.includes('normal') ? 'normal' : hints.length > 0 && hints.every(hint => hint === 'avoid') ? 'avoid' : 'unknown' };
 }
