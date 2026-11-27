@@ -4,7 +4,7 @@ import { readJsonStrict } from '../../core/provider-config.ts';
 import type { DaemonConnection } from '../../core/daemon.ts';
 import { accountMap } from '../usage-claude-accounts/account-map.ts';
 import { ContinuousUsage } from '../usage-claude-accounts/continuous-usage.ts';
-import { allocationHint, quotaUsable, type AccountQuota } from './rules.ts';
+import { allocationHint, quotaUnknown, quotaUsable, type AccountQuota } from './rules.ts';
 import { proxyAccount, proxyQuotaUrl, readProxyQuotas } from './proxy.ts';
 
 type Client = Pick<DaemonConnection['client'], 'listUsageReports' | 'getProvidersSnapshot'>;
@@ -20,7 +20,7 @@ const directSources = new Map([
   ['codex-multi', 'codex'],
   ['antigravity-multi', 'antigravity'], ['glm', 'glm'], ['qoder', 'qoder'], ['opencode-token-switch', 'opencode'],
 ]);
-const builtinSources = new Set(['codex', 'cursor', 'grok']);
+const builtinSources = new Set(['antigravity', 'codex', 'cursor', 'grok']);
 const identityEnvKeys = ['HOME', 'CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'CLAUDE_CONFIG_DIR',
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'GROK_HOME', 'XDG_CONFIG_HOME', 'MAGPIE_URL'];
 
@@ -60,7 +60,9 @@ export function quotaFromReports(reports: readonly UsageReportEntry[], provider:
   }
   const resolvedKind = directSources.get(best.sourceId) ?? kind;
   const windows = report.windows.flatMap(window => {
-    if (window.resetsAt && Date.parse(window.resetsAt) <= now) return [];
+    const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
+    // Antigravity 未消费满额分组会返回 1970-01-01T00:00:00Z 占位，不能当成已过期窗口丢弃。
+    if (resetsAt > 0 && resetsAt <= now) return [];
     const remainingPct = window.remainingPct ?? (window.usedPct == null ? undefined : 100 - window.usedPct);
     return remainingPct === undefined ? [] : [{ id: window.id, label: window.shortLabel ?? window.label, remainingPct }];
   });
@@ -105,15 +107,21 @@ export function localQuotaReader(client: Client, paseoHome: string, signal: Abor
     return quotaFromReports(reports, provider, route.kind, claudeKey, Date.now());
   }
 
-  async function alternatives(provider: string, floor: number) {
+  async function alternatives(provider: string, floor: number): Promise<{ passing: string[]; unknown: string[] }> {
     const { entries, compactSnapshot } = await client.getProvidersSnapshot();
     const others = (compactSnapshot?.entries ?? entries).filter(entry =>
       entry.enabled && entry.status !== 'unavailable' && entry.status !== 'error' && entry.provider !== provider);
-    const results = await Promise.all(others.map(async entry => {
+    const passing: string[] = [];
+    const unknown: string[] = [];
+    await Promise.all(others.map(async entry => {
       const quota = await read(entry.provider).catch(() => undefined);
-      return quotaUsable(quota, floor) ? entry.provider : null;
+      if (quotaUsable(quota, floor)) passing.push(entry.provider);
+      else if (quotaUnknown(quota)) unknown.push(entry.provider);
     }));
-    return [...new Set(results.flatMap(result => result === null ? [] : [result]))].sort();
+    return {
+      passing: [...new Set(passing)].sort(),
+      unknown: [...new Set(unknown)].sort(),
+    };
   }
 
   return { read, alternatives };

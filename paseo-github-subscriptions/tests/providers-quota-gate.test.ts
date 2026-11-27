@@ -51,12 +51,20 @@ test('本机用户的 Claude 账号凭据缺失时拒绝，独立系统用户的
   assert.equal(await reader.read('claude-other-user'), undefined);
 });
 
-test('Cursor 有其他可用池即放行，Antigravity 跳过阈值但拒绝 avoid', () => {
-  const quotas = [usage('cursor', 'cursor', available(window(0), window(2))),
-    usage('antigravity-multi', 'agy-isolated', available(window(2))), usage('antigravity-multi', 'agy-exhausted', available(window(0)))];
-  assert.equal(quotaUsable(quotaFromReports(quotas, 'cursor', 'cursor', undefined, 0), 10), true);
-  assert.equal(quotaUsable(quotaFromReports(quotas, 'agy-isolated', 'antigravity', undefined, 0), 10), true);
-  assert.deepEqual(quotaProblems(quotaFromReports(quotas, 'agy-exhausted', 'antigravity', undefined, 0)), [
+test('Cursor 有其他可用池即放行，Antigravity 内置源与满额 1970 占位均识别且跳过阈值、拒绝 avoid', () => {
+  const now = Date.parse('2026-11-27T04:20:00Z');
+  const quotas = [
+    usage('cursor', 'cursor', available(window(0), window(2))),
+    usage('antigravity', 'hash-default', available({ ...window(100), resetsAt: '1970-01-01T00:00:00Z' } as never)),
+    usage('antigravity-multi', 'agy-isolated', available(window(2))),
+    usage('antigravity-multi', 'agy-full-epoch', available({ ...window(100), resetsAt: '1970-01-01T00:00:00Z' } as never)),
+    usage('antigravity-multi', 'agy-exhausted', available(window(0))),
+  ];
+  assert.equal(quotaUsable(quotaFromReports(quotas, 'cursor', 'cursor', undefined, now), 10), true);
+  assert.equal(quotaUsable(quotaFromReports(quotas, 'antigravity', 'antigravity', undefined, now), 10), true);
+  assert.equal(quotaUsable(quotaFromReports(quotas, 'agy-isolated', 'antigravity', undefined, now), 10), true);
+  assert.equal(quotaUsable(quotaFromReports(quotas, 'agy-full-epoch', 'antigravity', undefined, now), 10), true);
+  assert.deepEqual(quotaProblems(quotaFromReports(quotas, 'agy-exhausted', 'antigravity', undefined, now)), [
     '额度已耗尽（allocationHint avoid）', 'Weekly 窗口剩余 0%',
   ]);
 });
@@ -135,19 +143,19 @@ test('创建钩子拒绝耗尽账号和有达标备选时的低额度账号，�
   });
   assert.ok(hook);
   const request = { config: { cwd: home, provider: 'codex-empty' } };
-  await assert.rejects(hook({ request }), /codex-empty.*0%.*本机额度可用账号：codex-spare$/);
+  await assert.rejects(hook({ request }), /codex-empty.*0%.*本机额度可用账号：codex-spare；本机额度未知账号（允许创建）：codex-unknown$/);
   const passing = { config: { cwd: home, provider: 'codex-spare' } };
   assert.equal(await hook({ request: passing }), passing);
   // #2298：低于阈值的 codex-5、codex-4 被放行后约 20、30 分钟用尽，3 个会话改派。
   const low = { config: { cwd: home, provider: 'codex-low' } };
-  await assert.rejects(hook({ request: low }), /codex-low.*低于 10%.*Weekly 窗口剩余 8%.*本机额度可用账号：codex-spare$/);
+  await assert.rejects(hook({ request: low }), /codex-low.*低于 10%.*Weekly 窗口剩余 8%.*本机额度可用账号：codex-spare；本机额度未知账号（允许创建）：codex-unknown$/);
   const warn = context.mock.method(console, 'warn', () => {});
   const unknown = { config: { cwd: home, provider: 'codex-unknown' } };
   assert.equal(await hook({ request: unknown }), unknown);
   assert.match(String(warn.mock.calls[0]?.arguments[0]), /codex-unknown.*额度未知/);
 });
 
-test('低额度账号在本机没有达标备选时警告后放行', async context => {
+test('低额度账号在本机没有达标备选时（即使存在额度未知账号）警告后放行', async context => {
   const home = mkdtempSync(join(tmpdir(), 'quota-gate-'));
   context.after(() => rmSync(home, { recursive: true, force: true }));
   writeFileSync(join(home, 'config.json'), '{}');
@@ -157,7 +165,7 @@ test('低额度账号在本机没有达标备选时警告后放行', async conte
       usage('codex-multi', 'codex-low', available(window(8))),
       usage('codex-multi', 'codex-empty', available(window(0))),
     ] }),
-    getProvidersSnapshot: async () => ({ entries: ['codex-low', 'codex-empty'].map(provider => ({ provider, enabled: true, status: 'loading' })) }),
+    getProvidersSnapshot: async () => ({ entries: ['codex-low', 'codex-empty', 'antigravity'].map(provider => ({ provider, enabled: true, status: 'loading' })) }),
   };
   quotaGateModule.register({
     id: 'providers.quotaGate',

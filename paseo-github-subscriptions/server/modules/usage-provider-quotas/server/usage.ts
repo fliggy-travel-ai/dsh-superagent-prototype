@@ -341,6 +341,9 @@ async function fetchAntigravityUsage(input: AccountInput): Promise<UsageReport> 
     return group.buckets.flatMap((bucket) => {
       if (!bucket.disabled && bucket.remaining_fraction == null) return [];
       const used = bucket.disabled ? null : (1 - bucket.remaining_fraction!) * 100;
+      const resetsAt = !bucket.disabled && bucket.reset_time && Date.parse(bucket.reset_time) > 0
+        ? bucket.reset_time
+        : null;
       return [
         windowFromUsedPct({
           id: bucket.id,
@@ -354,7 +357,7 @@ async function fetchAntigravityUsage(input: AccountInput): Promise<UsageReport> 
           summary: !bucket.disabled && bucket.window === "weekly",
           utilizationPct: used,
           durationSeconds: agyWindowDuration(bucket.window),
-          resetsAt: bucket.disabled ? null : (bucket.reset_time ?? null),
+          resetsAt,
           tone: used === null ? "default" : toneFromUsedPct(used),
         }),
       ];

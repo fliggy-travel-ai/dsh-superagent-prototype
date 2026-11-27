@@ -20,6 +20,14 @@ function within<Value>(operation: Promise<Value>, signal: AbortSignal): Promise<
   });
 }
 
+function formatAlternatives(result: { passing: string[]; unknown: string[] } | null): string {
+  if (result === null) return '本机额度可用账号：读取失败';
+  const base = `本机额度可用账号：${result.passing.join('、') || '无'}`;
+  return result.unknown.length > 0
+    ? `${base}；本机额度未知账号（允许创建）：${result.unknown.join('、')}`
+    : base;
+}
+
 export const quotaGateModule: Module<QuotaGateConfig> = {
   id: 'providers.quotaGate',
   label: '新建会话额度检查',
@@ -61,16 +69,15 @@ export const quotaGateModule: Module<QuotaGateConfig> = {
       }), deadline).catch(() => undefined);
       const problems = quotaProblems(checked?.quota);
       if (checked && problems.length > 0) {
-        const passing = await within(checked.reader.alternatives(provider, floor), deadline).catch(() => null);
-        const alternatives = passing === null ? '读取失败' : passing.join('、') || '无';
-        throw new Error(`新建会话额度检查拒绝 ${provider}：${problems.join('；')}。本机额度可用账号：${alternatives}`);
+        const alts = await within(checked.reader.alternatives(provider, floor), deadline).catch(() => null);
+        throw new Error(`新建会话额度检查拒绝 ${provider}：${problems.join('；')}。${formatAlternatives(alts)}`);
       }
       const warnings = quotaWarnings(checked?.quota, floor);
       if (checked && warnings.length > 0) {
         // 低于阈值的账号常在派发后几十分钟内用尽；本机还有达标账号时拒绝，让主会话改派，没有时才放行。
-        const passing = await within(checked.reader.alternatives(provider, floor), deadline).catch(() => null);
-        if (passing !== null && passing.length > 0) {
-          throw new Error(`新建会话额度检查拒绝 ${provider}：额度低于 ${floor}%（${warnings.join('；')}）。本机额度可用账号：${passing.join('、')}`);
+        const alts = await within(checked.reader.alternatives(provider, floor), deadline).catch(() => null);
+        if (alts !== null && alts.passing.length > 0) {
+          throw new Error(`新建会话额度检查拒绝 ${provider}：额度低于 ${floor}%（${warnings.join('；')}）。${formatAlternatives(alts)}`);
         }
         console.warn(`[开发自动化][providers.quotaGate] ${provider} 额度低于 ${floor}%：${warnings.join('；')}，本机没有达标账号，允许创建会话`);
       } else if (!checked?.quota?.allocationHint || checked.quota.allocationHint === 'unknown') {

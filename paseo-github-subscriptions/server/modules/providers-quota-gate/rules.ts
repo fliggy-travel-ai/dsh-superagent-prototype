@@ -50,3 +50,9 @@ export function quotaWarnings(account: AccountQuota | undefined, floor: number):
 export function quotaUsable(account: AccountQuota | undefined, floor: number): boolean {
   return account?.allocationHint === 'normal' && quotaProblems(account).length === 0 && quotaWarnings(account, floor).length === 0;
 }
+
+/** 未读到可判定的额度：没有拒绝问题，也没有明确可用或耗尽结论。 */
+export function quotaUnknown(account: AccountQuota | undefined): boolean {
+  if (!account) return true;
+  return quotaProblems(account).length === 0 && (!account.allocationHint || account.allocationHint === 'unknown');
+}
