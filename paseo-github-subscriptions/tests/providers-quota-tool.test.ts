@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   accountAllocationHint,
+  formatFleetQuotasMarkdown,
   mergeFleetQuotas,
   windowPaceHint,
+  type FleetQuotas,
   type HostProviderQuota,
   type LocalHostQuotas,
 } from '../shared/provider-quota-tool.ts';
@@ -452,11 +454,93 @@ test('quotaToolModule：注册本地/跨主机 RPC，并通过 agent.open.before
   const twice = await openHook({ request: liveReq });
   assert.equal(twice.tools.length, 1);
 
-  const toolResult = await liveReq.tools[0]!.execute({}) as { text: string; structuredContent: { hosts: unknown[]; accounts: unknown[] } };
-  assert.equal(toolResult.structuredContent.hosts.length, 1);
-  assert.deepEqual(toolResult.structuredContent.accounts, []);
-  assert.ok(toolResult.text.includes('srv-self'));
+  const toolResult = await liveReq.tools[0]!.execute({}) as { text: string; structuredContent?: unknown };
+  assert.equal(toolResult.structuredContent, undefined);
+  assert.ok(toolResult.text.includes('### 主机'));
+  assert.ok(toolResult.text.includes('| srv-self | 本机 (本机) | ok |'));
+  assert.ok(toolResult.text.includes('无匹配账号。'));
 
   await cleanup?.();
   assert.equal(removed, true);
+});
+
+test('formatFleetQuotasMarkdown：渲染主机表与去重账号表、省略默认 hint 与重复重置时间、转义管道符与换行并支持代理上游', () => {
+  const fleet: FleetQuotas = {
+    collectedAt: '2026-11-27T08:42:39.891Z',
+    hosts: [
+      { serverId: 'srv-mini', hostName: 'Host | A', isSelf: true, ok: true },
+      { serverId: 'srv-mb', hostName: 'Host B', ok: true, sessionsError: 'list\ntimeout' },
+      { serverId: 'srv-off', hostName: 'Host C', ok: false, error: '主机离线' },
+    ],
+    accounts: [
+      {
+        kind: 'opencode',
+        planLabel: 'TokenHub · 共享积分',
+        verdict: 'ok',
+        allocationHint: 'prefer',
+        windows: [{ label: '月', remainingPct: 100, resetsAt: '2026-12-23T00:00:00+08:00', hint: 'prefer' }],
+        balances: [{ remaining: 49000, unit: 'credits', resetsAt: '2026-12-22T16:00:00.000Z' }],
+        runningSessions: 0,
+        load: 'idle',
+        supportedHosts: [{ serverId: 'srv-mb', providerId: 'opencode', runningSessions: 0, usable: true }],
+      },
+      {
+        kind: 'codex',
+        verdict: 'ok',
+        allocationHint: 'normal',
+        windows: [{ label: 'wk', remainingPct: 85, resetsAt: '2027-01-02T05:00:00Z', hint: 'normal' }],
+        balances: [{ unlimited: true }],
+        payableCredit: true,
+        runningSessions: null,
+        load: 'unknown',
+        upstream: {
+          accounts: [
+            { provider: 'pool-a', windows: [{ label: '5h', remainingPct: 75, hint: 'prefer' }], balance: '$12', allocationHint: 'prefer' },
+          ],
+        },
+        supportedHosts: [
+          { serverId: 'srv-mini', providerId: 'codex', runningSessions: 1, usable: true },
+          { serverId: 'srv-mb', providerId: 'codex-2', runningSessions: null, usable: false, hostError: 'HTTP 401 | bad' },
+        ],
+      },
+      {
+        kind: 'claude',
+        planLabel: 'max',
+        verdict: 'blocked',
+        allocationHint: 'avoid',
+        windows: [{ label: 'wk', remainingPct: 0, resetsAt: '2026-11-27T10:00:00Z', hint: 'avoid' }],
+        runningSessions: 0,
+        load: 'idle',
+        blockReasons: ['额度已耗尽', 'wk 剩余 0%'],
+        error: '额度已耗尽',
+        supportedHosts: [{ serverId: 'srv-mini', providerId: 'claude-1', runningSessions: 0, usable: false }],
+      },
+      {
+        kind: 'antigravity',
+        verdict: 'unknown',
+        allocationHint: 'unknown',
+        runningSessions: 0,
+        load: 'idle',
+        supportedHosts: [{ serverId: 'srv-mb', providerId: 'antigravity-x', runningSessions: 0, usable: false, hostError: 'Provider 状态为 unavailable' }],
+      },
+    ],
+  };
+
+  const md = formatFleetQuotasMarkdown(fleet);
+  assert.ok(md.startsWith('采集时间: 2026-11-27T08:42:39Z\n'));
+  // 管道符与换行已转义
+  assert.ok(md.includes('| srv-mini | Host \\| A (本机) | ok |'));
+  assert.ok(md.includes('| srv-mb | Host B | ok (会话失败: list timeout) |'));
+  assert.ok(md.includes('| srv-off | Host C | 失败: 主机离线 |'));
+  // opencode 余额与窗口同一重置时刻，不重复输出重置时间
+  assert.ok(md.includes('| opencode (TokenHub · 共享积分) | ok/prefer | 月 100% (12-22 16:00Z) [prefer]; 49000 credits | 0 idle | srv-mb/opencode(0) |  |'));
+  // 跨年显示完整年份、normal 省略方括号、代理上游与付费余额与 ? unknown 负载正确展示
+  assert.ok(md.includes('wk 85% (2027-01-02 05:00Z); unlimited; 付费余额可用; 代理上游: pool-a(5h 75% [prefer], $12)'));
+  assert.ok(md.includes('| ? unknown | srv-mini/codex(1), srv-mb/codex-2(?, 不可用: HTTP 401 \\| bad) |'));
+  // 备注去重（error 与 blockReasons 相同只写一次）
+  assert.ok(md.includes('| claude (max) | blocked/avoid | wk 0% (11-27 10:00Z) [avoid] | 0 idle | srv-mini/claude-1(0, 不可用) | 额度已耗尽; wk 剩余 0% |'));
+  // unknown/unknown 合并为 unknown，无窗口显示 -
+  assert.ok(md.includes('| antigravity | unknown | - | 0 idle | srv-mb/antigravity-x(0, 不可用: Provider 状态为 unavailable) |  |'));
+  // 不含 JSON 键壳
+  assert.equal(md.includes('"supportedHosts"'), false);
 });

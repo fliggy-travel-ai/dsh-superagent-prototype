@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   FleetQuotasInputSchema,
   fleetProviderQuotas,
+  formatFleetQuotasMarkdown,
   localProviderQuotas,
   type FleetQuotasInput,
 } from '../../../shared/provider-quota-tool.ts';
@@ -70,7 +71,7 @@ export const quotaToolModule: Module = {
 
     const tool = defineAgentTool({
       name: 'provider_quotas',
-      description: '查询当前 Paseo 守护进程本机及所有已配对在线主机的 Provider 剩余额度、并发会话负载与派发建议。调用无需指定主机；返回结果已按实际底层账号跨主机去重，共享窗口低于 1% 判为 blocked，每条账号记录的 supportedHosts 列出支持该账号的各主机 serverId、该主机上的 providerId、可用性与运行中会话数，可直接用于 create_agent 选型。离线或查询失败的主机会在 hosts 中明确报错。',
+      description: '查询当前 Paseo 守护进程本机及所有已配对在线主机的 Provider 剩余额度、并发会话负载与派发建议。调用无需指定主机；返回精简的 Markdown 表格（主机状态表与按实际底层账号跨主机去重并排序的账号表），共享窗口低于 1% 判为 blocked，支持主机列直接给出 serverId/providerId(运行中会话数) 与不可用原因，可直接用于 create_agent 选型。离线或查询失败的主机会在主机表中明确报错。',
       input: z.object({
         kind: FleetQuotasInputSchema.shape.kind.describe('可选，按 Provider 类型过滤，例如 claude、codex、antigravity、glm、grok、cursor、qoder、opencode'),
         concurrencyTarget: FleetQuotasInputSchema.shape.concurrencyTarget.describe('可选，并发负载高阈值（运行中会话数），默认 3'),
@@ -79,7 +80,7 @@ export const quotaToolModule: Module = {
       execute: async input => {
         try {
           const result = await runFleet(input);
-          return { text: JSON.stringify(result), structuredContent: result };
+          return { text: formatFleetQuotasMarkdown(result) };
         } catch (error) {
           return { text: `查询 Provider 额度失败：${summarizeError(error)}`, isError: true };
         }
