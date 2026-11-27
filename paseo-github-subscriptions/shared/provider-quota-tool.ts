@@ -154,6 +154,7 @@ export const FleetQuotasSchema = z.strictObject({
   collectedAt: z.string(),
   hosts: z.array(FleetHostStatusSchema),
   accounts: z.array(DeduplicatedAccountSchema),
+  hiddenUnavailableCount: z.number().int().positive().optional(),
 });
 export type FleetQuotas = z.infer<typeof FleetQuotasSchema>;
 
@@ -166,6 +167,7 @@ export const FleetQuotasInputSchema = z.object({
   kind: z.string().min(1).optional(),
   concurrencyTarget: z.number().int().min(1).max(100).optional(),
   refresh: z.boolean().optional(),
+  includeUnavailable: z.boolean().optional(),
 });
 export type FleetQuotasInput = z.infer<typeof FleetQuotasInputSchema>;
 
@@ -395,6 +397,7 @@ export function mergeFleetQuotas(
     collectedAt: string;
     concurrencyTarget: number;
     kind?: string;
+    includeUnavailable?: boolean;
   },
 ): FleetQuotas {
   const hosts: FleetHostStatus[] = collected.map(host => ({
@@ -531,10 +534,23 @@ export function mergeFleetQuotas(
     return a.sortKey.localeCompare(b.sortKey);
   });
 
+  const includeUnavailable = options.includeUnavailable === true;
+  const allAccounts = ranked.map(item => item.account);
+  const visibleAccounts = includeUnavailable
+    ? allAccounts
+    : allAccounts
+      .filter(account => account.verdict !== 'blocked' && account.supportedHosts.some(host => host.usable))
+      .map(account => ({
+        ...account,
+        supportedHosts: account.supportedHosts.filter(host => host.usable),
+      }));
+  const hiddenUnavailableCount = allAccounts.length - visibleAccounts.length;
+
   return {
     collectedAt: options.collectedAt,
     hosts,
-    accounts: ranked.map(item => item.account),
+    accounts: visibleAccounts,
+    ...(hiddenUnavailableCount > 0 ? { hiddenUnavailableCount } : {}),
   };
 }
 
@@ -542,36 +558,59 @@ function escapeMdCell(value: string): string {
   return value.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
 }
 
+function collapseLine(value: string): string {
+  return value.replace(/\r?\n/g, ' ').trim();
+}
+
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
-function formatUtcIsoSecond(value: string): string {
+function formatUtcMinute(value: string): string {
   const ms = Date.parse(value);
   if (!Number.isFinite(ms)) return value;
-  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}Z`;
 }
 
-function formatShortReset(value: string, referenceYear: number | null): string {
+interface UtcRefDate {
+  year: number;
+  dayKey: string;
+}
+
+function parseUtcRefDate(value: string): UtcRefDate | null {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  const year = d.getUTCFullYear();
+  return { year, dayKey: `${year}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}` };
+}
+
+function formatShortReset(value: string, ref: UtcRefDate | null): string {
   const ms = Date.parse(value);
   if (!Number.isFinite(ms)) return value;
   const d = new Date(ms);
   const year = d.getUTCFullYear();
-  const mdhm = `${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}Z`;
-  return referenceYear !== null && year === referenceYear ? mdhm : `${year}-${mdhm}`;
+  const month = pad2(d.getUTCMonth() + 1);
+  const day = pad2(d.getUTCDate());
+  const hm = `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}Z`;
+  if (ref && `${year}-${month}-${day}` === ref.dayKey) return hm;
+  if (ref && year === ref.year) return `${month}-${day} ${hm}`;
+  return `${year}-${month}-${day} ${hm}`;
 }
 
-function formatCompactWindow(window: CompactWindow, referenceYear: number | null): { text: string; resetKey: string | null } {
-  const resetKey = window.resetsAt ? formatShortReset(window.resetsAt, referenceYear) : null;
+function formatCompactWindow(window: CompactWindow, ref: UtcRefDate | null): { text: string; resetKey: string | null } {
+  const resetKey = window.resetsAt ? formatShortReset(window.resetsAt, ref) : null;
   let text = `${window.label} ${window.remainingPct}%`;
   if (resetKey) text += ` (${resetKey})`;
-  if (window.hint !== 'normal') text += ` [${window.hint}]`;
+  const omitHint = window.hint === 'normal' || (window.hint === 'prefer' && window.remainingPct >= 100);
+  if (!omitHint) text += ` [${window.hint}]`;
   return { text, resetKey };
 }
 
 function formatCompactBalance(
   balance: CompactBalance,
-  referenceYear: number | null,
+  ref: UtcRefDate | null,
   windowResets: ReadonlySet<string>,
 ): string | null {
   let base: string | null = null;
@@ -582,7 +621,7 @@ function formatCompactBalance(
   }
   if (!base) return null;
   if (balance.resetsAt) {
-    const resetKey = formatShortReset(balance.resetsAt, referenceYear);
+    const resetKey = formatShortReset(balance.resetsAt, ref);
     if (!windowResets.has(resetKey)) {
       base += ` (${resetKey})`;
     }
@@ -590,12 +629,12 @@ function formatCompactBalance(
   return base;
 }
 
-function formatCompactUpstream(upstream: CompactUpstream, referenceYear: number | null): string | null {
+function formatCompactUpstream(upstream: CompactUpstream, ref: UtcRefDate | null): string | null {
   if (!upstream.accounts || upstream.accounts.length === 0) return null;
   const entries = upstream.accounts.map(account => {
     const parts: string[] = [];
     if (account.windows && account.windows.length > 0) {
-      parts.push(...account.windows.map(w => formatCompactWindow(w, referenceYear).text));
+      parts.push(...account.windows.map(w => formatCompactWindow(w, ref).text));
     }
     if (account.balance) parts.push(account.balance);
     const hasWindowHint = Boolean(account.windows && account.windows.some(w => w.hint !== 'normal'));
@@ -609,58 +648,91 @@ function formatCompactUpstream(upstream: CompactUpstream, referenceYear: number 
   return `代理上游: ${entries.join('; ')}`;
 }
 
-function formatSupportedHost(host: SupportedHost): string {
-  const sessions = host.runningSessions === null ? '?' : String(host.runningSessions);
-  if (host.usable) return `${host.serverId}/${host.providerId}(${sessions})`;
-  return host.hostError
-    ? `${host.serverId}/${host.providerId}(${sessions}, 不可用: ${host.hostError})`
-    : `${host.serverId}/${host.providerId}(${sessions}, 不可用)`;
+function formatSupportedHost(host: SupportedHost, aliasByServerId: ReadonlyMap<string, string>): string {
+  const hostRef = aliasByServerId.get(host.serverId) ?? host.serverId;
+  const base = `${hostRef}/${host.providerId}`;
+  const details: string[] = [];
+  if (host.runningSessions === null) {
+    details.push('?');
+  } else if (host.runningSessions > 0) {
+    details.push(String(host.runningSessions));
+  }
+  if (!host.usable) {
+    details.push(host.hostError ? `不可用: ${host.hostError}` : '不可用');
+  }
+  return details.length > 0 ? `${base}(${details.join(',')})` : base;
 }
 
-/** 将跨主机去重后的额度结果渲染为精简 Markdown 表格，避免 JSON 重复键占用上下文。 */
-export function formatFleetQuotasMarkdown(fleet: FleetQuotas): string {
-  const collectedMs = Date.parse(fleet.collectedAt);
-  const referenceYear = Number.isFinite(collectedMs) ? new Date(collectedMs).getUTCFullYear() : null;
+function collectAccountNotes(account: DeduplicatedAccount): string {
+  const notes: string[] = [];
+  const seen = new Set<string>();
+  for (const item of [
+    ...(account.blockReasons ?? []),
+    ...(account.warnings ?? []).filter(warning => !warning.startsWith('并发负载高') && !warning.startsWith('消耗偏快')),
+    ...(account.error ? [account.error] : []),
+    ...(account.upstream?.error ? [account.upstream.error] : []),
+  ]) {
+    const normalized = item.trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    notes.push(normalized);
+  }
+  return notes.join('; ');
+}
+
+/** 将跨主机去重后的额度结果渲染为高压缩 Markdown 表格，避免重复键与冗余文本占用上下文。 */
+export function formatFleetQuotasMarkdown(
+  fleet: FleetQuotas,
+  options: { includeUnavailable?: boolean } = {},
+): string {
+  const ref = parseUtcRefDate(fleet.collectedAt);
+  const aliasByServerId = new Map<string, string>();
+  const hostTokens = fleet.hosts.map((host, index) => {
+    const alias = `H${index + 1}`;
+    aliasByServerId.set(host.serverId, alias);
+    const meta: string[] = [collapseLine(host.hostName)];
+    if (host.isSelf) meta.push('本机');
+    if (!host.ok) {
+      meta.push(`失败:${collapseLine(host.error ?? '未知错误')}`);
+    } else if (host.sessionsError) {
+      meta.push(`ok,会话失败:${collapseLine(host.sessionsError)}`);
+    } else {
+      meta.push('ok');
+    }
+    return `${alias}=${host.serverId}(${meta.join(',')})`;
+  });
+
+  const ruleText = options.includeUnavailable
+    ? `按推荐度排序，含不可用账号(<${MIN_REMAINING_PCT}%为blocked)`
+    : `按推荐度排序，默认隐藏不可用(<${MIN_REMAINING_PCT}%，传 includeUnavailable=true 查看全部)`;
+
   const lines: string[] = [
-    `采集时间: ${formatUtcIsoSecond(fleet.collectedAt)}`,
+    `时间: ${formatUtcMinute(fleet.collectedAt)} | ${ruleText}`,
+    `主机: ${hostTokens.join(', ')}`,
     '',
-    '### 主机',
-    '| serverId | 主机 | 状态 |',
-    '| --- | --- | --- |',
   ];
 
-  for (const host of fleet.hosts) {
-    const name = host.isSelf ? `${host.hostName} (本机)` : host.hostName;
-    const status = !host.ok
-      ? `失败: ${host.error ?? '未知错误'}`
-      : host.sessionsError
-        ? `ok (会话失败: ${host.sessionsError})`
-        : 'ok';
-    lines.push(`| ${escapeMdCell(host.serverId)} | ${escapeMdCell(name)} | ${escapeMdCell(status)} |`);
-  }
-
-  lines.push('', `### 账号（按推荐度排序，共享窗口 <${MIN_REMAINING_PCT}% 为 blocked）`);
+  const hidden = fleet.hiddenUnavailableCount ?? 0;
   if (fleet.accounts.length === 0) {
-    lines.push('无匹配账号。');
+    lines.push(
+      hidden > 0
+        ? `无可用账号（已隐藏 ${hidden} 个不可用账号，传 includeUnavailable=true 查看）。`
+        : '无匹配账号。',
+    );
     return lines.join('\n');
   }
 
-  lines.push(
-    '| 类型 | 判定 | 窗口与余额 | 并发 | 支持主机 (serverId/providerId(会话)) | 备注 |',
-    '| --- | --- | --- | --- | --- | --- |',
-  );
-
-  for (const account of fleet.accounts) {
+  const rows = fleet.accounts.map(account => {
     const typeLabel = account.planLabel ? `${account.kind} (${account.planLabel})` : account.kind;
-    const verdictLabel = account.verdict === 'unknown' && account.allocationHint === 'unknown'
-      ? 'unknown'
-      : `${account.verdict}/${account.allocationHint}`;
+    const verdictLabel = account.verdict === 'ok'
+      ? account.allocationHint
+      : account.verdict;
 
     const quotaParts: string[] = [];
     const windowResets = new Set<string>();
     if (account.windows && account.windows.length > 0) {
       const rendered = account.windows.map(w => {
-        const formatted = formatCompactWindow(w, referenceYear);
+        const formatted = formatCompactWindow(w, ref);
         if (formatted.resetKey) windowResets.add(formatted.resetKey);
         return formatted.text;
       });
@@ -668,38 +740,52 @@ export function formatFleetQuotasMarkdown(fleet: FleetQuotas): string {
     }
     if (account.balances && account.balances.length > 0) {
       const renderedBalances = account.balances
-        .map(b => formatCompactBalance(b, referenceYear, windowResets))
+        .map(b => formatCompactBalance(b, ref, windowResets))
         .filter((item): item is string => item !== null);
       if (renderedBalances.length > 0) quotaParts.push(renderedBalances.join(', '));
     }
     if (account.payableCredit) quotaParts.push('付费余额可用');
     if (account.upstream) {
-      const renderedUpstream = formatCompactUpstream(account.upstream, referenceYear);
+      const renderedUpstream = formatCompactUpstream(account.upstream, ref);
       if (renderedUpstream) quotaParts.push(renderedUpstream);
     }
     const quotaCell = quotaParts.length > 0 ? quotaParts.join('; ') : '-';
 
-    const sessions = account.runningSessions === null ? '?' : String(account.runningSessions);
-    const loadCell = `${sessions} ${account.load}`;
-    const hostsCell = account.supportedHosts.map(formatSupportedHost).join(', ');
+    const loadCell = account.runningSessions === null
+      ? '?'
+      : account.load === 'high'
+        ? `${account.runningSessions}(高)`
+        : String(account.runningSessions);
 
-    const notes: string[] = [];
-    const seenNotes = new Set<string>();
-    for (const item of [
-      ...(account.blockReasons ?? []),
-      ...(account.warnings ?? []),
-      ...(account.error ? [account.error] : []),
-      ...(account.upstream?.error ? [account.upstream.error] : []),
-    ]) {
-      const normalized = item.trim();
-      if (!normalized || seenNotes.has(normalized)) continue;
-      seenNotes.add(normalized);
-      notes.push(normalized);
-    }
+    const hostsCell = account.supportedHosts
+      .map(host => formatSupportedHost(host, aliasByServerId))
+      .join(', ');
 
-    lines.push(
-      `| ${escapeMdCell(typeLabel)} | ${escapeMdCell(verdictLabel)} | ${escapeMdCell(quotaCell)} | ${escapeMdCell(loadCell)} | ${escapeMdCell(hostsCell)} | ${escapeMdCell(notes.join('; '))} |`,
-    );
+    const noteCell = collectAccountNotes(account);
+    return { typeLabel, verdictLabel, quotaCell, loadCell, hostsCell, noteCell };
+  });
+
+  const showNotes = rows.some(row => row.noteCell.length > 0);
+  if (showNotes) {
+    lines.push('| 类型 | 建议 | 窗口与余额 | 并发 | 主机/providerId | 备注 |', '|---|---|---|---|---|---|');
+  } else {
+    lines.push('| 类型 | 建议 | 窗口与余额 | 并发 | 主机/providerId |', '|---|---|---|---|---|');
+  }
+
+  for (const row of rows) {
+    const cells = [
+      escapeMdCell(row.typeLabel),
+      escapeMdCell(row.verdictLabel),
+      escapeMdCell(row.quotaCell),
+      escapeMdCell(row.loadCell),
+      escapeMdCell(row.hostsCell),
+    ];
+    if (showNotes) cells.push(escapeMdCell(row.noteCell));
+    lines.push(`| ${cells.join(' | ')} |`);
+  }
+
+  if (hidden > 0) {
+    lines.push('', `已隐藏 ${hidden} 个不可用账号`);
   }
 
   return lines.join('\n');
