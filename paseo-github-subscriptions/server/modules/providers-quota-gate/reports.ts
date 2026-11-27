@@ -7,24 +7,26 @@ import { ContinuousUsage } from '../usage-claude-accounts/continuous-usage.ts';
 import { allocationHint, quotaUnknown, quotaUsable, type AccountQuota } from './rules.ts';
 import { proxyAccount, proxyQuotaUrl, readProxyQuotas } from './proxy.ts';
 
-type Client = Pick<DaemonConnection['client'], 'listUsageReports' | 'getProvidersSnapshot'>;
-type UsageReportEntry = Awaited<ReturnType<Client['listUsageReports']>>['reports'][number];
+export type QuotaReportClient = Pick<DaemonConnection['client'], 'listUsageReports' | 'getProvidersSnapshot'>;
+export type UsageReportEntry = Awaited<ReturnType<QuotaReportClient['listUsageReports']>>['reports'][number];
 
-interface ProviderConfig {
+export interface ProviderConfig {
+  enabled?: boolean;
+  label?: string;
   extends?: string;
   command?: string[];
   env?: Record<string, string>;
 }
 
-const directSources = new Map([
+export const directSources = new Map([
   ['codex-multi', 'codex'],
   ['antigravity-multi', 'antigravity'], ['glm', 'glm'], ['qoder', 'qoder'], ['opencode-token-switch', 'opencode'],
 ]);
-const builtinSources = new Set(['antigravity', 'codex', 'cursor', 'grok']);
+export const builtinSources = new Set(['antigravity', 'codex', 'cursor', 'grok']);
 const identityEnvKeys = ['HOME', 'CODEX_HOME', 'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'CLAUDE_CONFIG_DIR',
   'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'GROK_HOME', 'XDG_CONFIG_HOME', 'MAGPIE_URL'];
 
-function providerRoute(provider: string, providers: Record<string, ProviderConfig>) {
+export function providerRoute(provider: string, providers: Record<string, ProviderConfig>) {
   const chain = new Set<string>();
   const entries: ProviderConfig[] = [];
   let name: string | undefined = provider;
@@ -39,17 +41,46 @@ function providerRoute(provider: string, providers: Record<string, ProviderConfi
   if (command.some(part => /(?:^|\/)cursor-agent(?:-[^/]+)?$/.test(part))) kind = 'cursor';
   if (command.some(part => /(?:^|\/)agy(?:-paseo(?:-[^/]+)?)?$/.test(part))) kind = 'antigravity';
   if (command.some(part => /(?:^|\/)pi$/.test(part))) kind = 'pi';
+  if (command.some(part => /(?:^|\/)(?:@qoder-ai\/qodercli|qodercli)(?:@[^/]*)?$/.test(part))) kind = 'qoder';
+  if (command.some(part => /^glm-acp-agent(?:@|$)/.test(part)) || provider === 'glm-acp-agent' || provider.startsWith('glm-')) kind = 'glm';
+  if (command.some(part => /(?:^|\/)grok$/.test(part)) || provider === 'grok' || provider.startsWith('grok-')) kind = 'grok';
+  if (command.some(part => /(?:^|\/)opencode$/.test(part)) || provider === 'opencode' || provider.startsWith('opencode-')) kind = 'opencode';
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const entry of entries) Object.assign(env, entry.env);
-  return { kind, env };
+  return { kind, env, label: entries.findLast(entry => entry.label)?.label };
 }
 
-export function quotaFromReports(reports: readonly UsageReportEntry[], provider: string, kind: string, claudeKey: string | undefined, now: number): AccountQuota | undefined {
+export function matchUsageReport(
+  reports: readonly UsageReportEntry[],
+  provider: string,
+  kind: string,
+  claudeKey: string | undefined,
+): UsageReportEntry | undefined {
   const exact = reports.filter(entry => directSources.has(entry.sourceId) && entry.id === `${entry.sourceId}:${provider}`);
   const claude = claudeKey ? reports.filter(entry => ['claude-accounts', 'claude'].includes(entry.sourceId) && entry.id === `${entry.sourceId}:${claudeKey}`) : [];
   const builtin = builtinSources.has(provider) ? reports.filter(entry => entry.sourceId === provider) : [];
-  const best = (exact.length ? exact : claude.length ? claude : builtin)
-    .reduce<UsageReportEntry | undefined>((latest, entry) => !latest || Date.parse(entry.fetchedAt) > Date.parse(latest.fetchedAt) ? entry : latest, undefined);
+  const claudeFallback = !claudeKey && kind === 'claude' && provider === 'claude'
+    ? (() => {
+      const only = reports.filter(entry => entry.sourceId === 'claude');
+      return only.length === 1 ? only : [];
+    })()
+    : [];
+  const pool = exact.length ? exact : claude.length ? claude : builtin.length ? builtin : claudeFallback;
+  return pool.reduce<UsageReportEntry | undefined>(
+    (latest, entry) => !latest || Date.parse(entry.fetchedAt) > Date.parse(latest.fetchedAt) ? entry : latest,
+    undefined,
+  );
+}
+
+export function hasPayableCredit(resolvedKind: string, report: Extract<UsageReportEntry['report'], { status: 'available' }>): boolean {
+  return resolvedKind === 'codex' && (
+    report.balances?.some(balance => balance.id === 'credits' && (balance.remaining ?? 0) > 0) === true
+    || report.details?.some(detail => detail.id === 'payable_credit' && detail.value === 'unlimited') === true
+  );
+}
+
+export function quotaFromReports(reports: readonly UsageReportEntry[], provider: string, kind: string, claudeKey: string | undefined, now: number): AccountQuota | undefined {
+  const best = matchUsageReport(reports, provider, kind, claudeKey);
   if (!best) return;
   const report = best.report;
   if (report.status === 'error') return { error: '账号额度查询报错（account.error）' };
@@ -66,14 +97,11 @@ export function quotaFromReports(reports: readonly UsageReportEntry[], provider:
     const remainingPct = window.remainingPct ?? (window.usedPct == null ? undefined : 100 - window.usedPct);
     return remainingPct === undefined ? [] : [{ id: window.id, label: window.shortLabel ?? window.label, remainingPct }];
   });
-  const payableCredit = resolvedKind === 'codex' && (
-    report.balances?.some(balance => balance.id === 'credits' && (balance.remaining ?? 0) > 0) === true
-    || report.details?.some(detail => detail.id === 'payable_credit' && detail.value === 'unlimited') === true
-  );
+  const payableCredit = hasPayableCredit(resolvedKind, report);
   return { kind: resolvedKind, windows, payableCredit, allocationHint: allocationHint(windows, resolvedKind === 'cursor', payableCredit) };
 }
 
-export function localQuotaReader(client: Client, paseoHome: string, signal: AbortSignal) {
+export function localQuotaReader(client: QuotaReportClient, paseoHome: string, signal: AbortSignal) {
   const providers: Record<string, ProviderConfig> = readJsonStrict(join(paseoHome, 'config.json'))?.agents?.providers ?? {};
   const home = basename(paseoHome) === '.paseo' ? dirname(paseoHome) : homedir();
   const usageReports = client.listUsageReports().then(result => result.reports, () => []);
